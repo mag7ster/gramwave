@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 #[cfg(test)]
 mod regression {
     use super::*;
@@ -11,12 +12,13 @@ mod regression {
         let old: Track = serde_json::from_value(json!({
             "chat": 42, "message": 100, "file": 7, "image_file": 8,
             "cached": "/cache/photo.jpg", "image_path": "/cache/old-cover.jpg",
-            "pinned": "/offline/42-100", "title": "Song"
+            "pinned": "/offline/42-100", "title": "Queue snapshot", "duration": 200
         }))
         .unwrap();
-        assert_eq!((old.file, old.image_file), (0, 0));
-        assert!(old.cached.is_none());
-        assert!(old.image_path.is_none());
+        let metadata = serde_json::to_value(&old).unwrap();
+        for field in ["file", "cached", "pinned", "image_file", "image_path"] {
+            assert!(metadata.get(field).is_none());
+        }
         let tg = Telegram::mock_rpc(|v| {
             assert_eq!(v["@type"], "getMessage");
             assert_eq!(
@@ -29,40 +31,39 @@ mod regression {
                 "album_cover_thumbnail":{"file":{"id":7,"local":{"path":"/cache/photo.jpg","is_downloading_completed":true}}}
             }}})
         });
-        let resolved = resolve(&tg, &old).unwrap();
+        let resolved = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(resolve_async(&tg, &old, &Default::default()))
+            .unwrap();
         assert_eq!((resolved.file, resolved.image_file), (90, 7));
         assert_eq!(resolved.cached.as_deref(), Some("/cache/song.mp3"));
         assert_eq!(resolved.image_path.as_deref(), Some("/cache/photo.jpg"));
-        assert_eq!(resolved.duration, 240);
-        assert_eq!(resolved.pinned, old.pinned);
+        assert_eq!(resolved.duration, 200);
+        assert_eq!(resolved.title, "Queue snapshot");
 
         let state = State {
             playlists: vec![Playlist {
                 id: 42,
-                image_file: 5,
-                image_path: Some("/cache/avatar.jpg".into()),
-                tracks: vec![resolved.clone()],
+                tracks: vec![resolved.clone().into()],
                 ..Default::default()
             }],
             chat_pins: vec![42],
-            queue: vec![resolved.clone()],
-            pending_pins: vec![resolved],
             ..Default::default()
         };
         let restored: State =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(restored.chat_pins, vec![42]);
-        assert_eq!(restored.playlists[0].image_file, 0);
-        assert!(restored.playlists[0].image_path.is_none());
-        for t in [
-            &restored.playlists[0].tracks[0],
-            &restored.queue[0],
-            &restored.pending_pins[0],
-        ] {
+        let json = serde_json::to_string(&restored).unwrap();
+        assert!(
+            !json.contains("/cache/") && !json.contains("image_file") && !json.contains("cached")
+        );
+        {
+            let t = &restored.playlists[0].tracks[0];
             assert_eq!((t.chat, t.message), (42, 100));
-            assert_eq!((t.file, t.image_file), (0, 0));
-            assert!(t.cached.is_none());
-            assert!(t.pinned.is_some());
+            let media =
+                tg_player_application::AppCore::new(restored.clone()).media_track(t.clone());
+            assert_eq!((media.file, media.image_file), (0, 0));
+            assert!(media.cached.is_none());
         }
     }
 
@@ -73,15 +74,48 @@ mod regression {
             json!({"id":100,"content":{"@type":"messageText"}}),
         ] {
             let tg = Telegram::mock_rpc(move |_| response.clone());
-            assert!(resolve(
-                &tg,
-                &Track {
-                    chat: 42,
-                    message: 100,
-                    ..Default::default()
-                }
-            )
-            .is_err());
+            let error = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(resolve_async(
+                    &tg,
+                    &Track {
+                        chat: 42,
+                        message: 100,
+                        ..Default::default()
+                    },
+                    &Default::default(),
+                ))
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                tg_player_application::AppError::Telegram { .. }
+            ));
         }
     }
+}
+
+#[test]
+fn async_resolution_preserves_telegram_codes_and_cancellation() {
+    use tg_player_application::AppError;
+    use tokio_util::sync::CancellationToken;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let tg = Telegram::mock_rpc(|_| json!({"@type":"error","code":429,"message":"FLOOD_WAIT_3"}));
+    let track = Track {
+        chat: 42,
+        message: 7,
+        ..Default::default()
+    };
+    assert_eq!(
+        runtime.block_on(resolve_async(&tg, &track, &Default::default())),
+        Err(AppError::Telegram {
+            code: 429,
+            message: "FLOOD_WAIT_3".into()
+        })
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert_eq!(
+        runtime.block_on(resolve_async(&tg, &track, &cancelled)),
+        Err(AppError::Cancelled)
+    );
 }

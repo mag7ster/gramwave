@@ -38,12 +38,7 @@ mod interaction_tests {
     }
     impl Harness {
         fn new() -> Self {
-            static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "tg-player-ui-test-{}-{}",
-                std::process::id(),
-                SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            let root = std::path::PathBuf::new();
             let mut app = App::new_at(root, true);
             app.player = None;
             app.opened_chat = Some(0);
@@ -111,7 +106,17 @@ mod interaction_tests {
             h.frame(vec![]);
             h.time += 1.;
             h.click(h.app.test_rows[&1].0.center());
-            assert_eq!(h.app.state.session.current.as_ref().unwrap().message, 1);
+            assert_eq!(
+                h.app
+                    .state
+                    .view()
+                    .session
+                    .current()
+                    .as_ref()
+                    .unwrap()
+                    .message,
+                1
+            );
             let row = h.app.test_rows[&4].0;
             h.time += 1.;
             match activation {
@@ -127,11 +132,41 @@ mod interaction_tests {
                 }
                 _ => h.click(row.center()),
             }
-            assert_eq!(h.app.state.session.current.as_ref().unwrap().message, 4);
+            assert_eq!(
+                h.app
+                    .state
+                    .view()
+                    .session
+                    .current()
+                    .as_ref()
+                    .unwrap()
+                    .message,
+                4
+            );
             h.app.execute(AppCommand::Previous);
-            assert_eq!(h.app.state.session.current.as_ref().unwrap().message, 3);
+            assert_eq!(
+                h.app
+                    .state
+                    .view()
+                    .session
+                    .current()
+                    .as_ref()
+                    .unwrap()
+                    .message,
+                3
+            );
             h.app.execute(AppCommand::Next);
-            assert_eq!(h.app.state.session.current.as_ref().unwrap().message, 4);
+            assert_eq!(
+                h.app
+                    .state
+                    .view()
+                    .session
+                    .current()
+                    .as_ref()
+                    .unwrap()
+                    .message,
+                4
+            );
             h.app.shutdown_core().unwrap();
         }
     }
@@ -151,7 +186,7 @@ mod interaction_tests {
                 },
             ]);
         }
-        assert!(h.app.state.session.current.is_none());
+        assert!(h.app.state.view().session.current().is_none());
         assert!(egui::Popup::is_any_open(&h.ctx));
         h.key(egui::Key::Escape);
     }
@@ -166,33 +201,48 @@ mod interaction_tests {
         assert_eq!(row.height(), design::ROW_HEIGHT);
         // Cover, title and blank row space all activate the same row.
         for x in [row.left() + 50., row.left() + 160., row.right() - 60.] {
-            h.app.state.session.current = None;
+            h.app.execute(AppCommand::Stop);
             h.time += 1.;
             h.click(egui::pos2(x, row.center().y));
             assert_eq!(
-                h.app.state.session.current.as_ref().map(|t| t.message),
+                h.app
+                    .state
+                    .view()
+                    .session
+                    .current()
+                    .as_ref()
+                    .map(|t| t.message),
                 Some(0)
             );
-            assert!(!h.app.paused);
+            assert!(!h.app.state.playback().state().paused());
         }
         h.time += 1.;
         h.click(row.center());
-        assert!(h.app.paused);
+        assert!(h.app.state.playback().state().paused());
         h.time += 1.;
         h.click(row.center());
         h.click(row.center());
-        assert!(!h.app.paused, "double click must not pause after starting");
+        assert!(
+            !h.app.state.playback().state().paused(),
+            "double click must not pause after starting"
+        );
         h.time += 1.;
         h.click(menu.center());
-        assert!(!h.app.paused, "menu must not activate row");
+        assert!(
+            !h.app.state.playback().state().paused(),
+            "menu must not activate row"
+        );
         h.key(egui::Key::Escape);
         h.time += 1.;
         h.click(row.center());
-        assert!(h.app.paused);
+        assert!(h.app.state.playback().state().paused());
         h.key(egui::Key::Enter);
-        assert!(!h.app.paused);
+        assert!(!h.app.state.playback().state().paused());
         h.key(egui::Key::Space);
-        assert!(h.app.paused, "Space on row toggles playback");
+        assert!(
+            h.app.state.playback().state().paused(),
+            "Space on row toggles playback"
+        );
         // Click seeks once; a drag previews until release, independent of mpv position.
         let (rect, id) = h.app.test_seek.unwrap();
         h.time += 1.;
@@ -222,7 +272,8 @@ mod interaction_tests {
         assert_eq!(*h.app.test_seeks.last().unwrap(), 5.); // backend position remains zero in demo
         h.time += 1.;
         h.pointer(rect.center(), true);
-        h.app.next();
+        h.app
+            .execute(crate::application::commands::AppCommand::Next);
         assert!(h.app.seek_preview.is_none());
         let before = h.app.test_seeks.len();
         h.pointer(rect.center(), false);
@@ -241,9 +292,9 @@ mod interaction_tests {
         let search = egui::Id::new("chat-search");
         h.ctx.memory_mut(|m| m.request_focus(search));
         h.frame(vec![]);
-        let paused = h.app.paused;
+        let paused = h.app.state.playback().state().paused();
         h.key(egui::Key::Space);
-        assert_eq!(h.app.paused, paused);
+        assert_eq!(h.app.state.playback().state().paused(), paused);
         let mut reached_row = false;
         for _ in 0..60 {
             h.key(egui::Key::Tab);
@@ -259,8 +310,8 @@ mod interaction_tests {
         assert!(reached_row, "Tab must reach track rows");
         h.app.set_volume(32.);
         h.app.toggle_mute();
-        assert_eq!(h.app.state.volume, 0.);
+        assert_eq!(h.app.state.view().volume, 0.);
         h.app.toggle_mute();
-        assert_eq!(h.app.state.volume, 32.);
+        assert_eq!(h.app.state.view().volume, 32.);
     }
 }

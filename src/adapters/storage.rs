@@ -6,10 +6,10 @@ use std::{
     thread::JoinHandle,
     time::Duration,
 };
+use tg_player_application::persistence::ChangeSet;
 type Outcome = Result<(), String>;
 enum Request {
-    Save(Box<State>),
-    Volume(f32, f32),
+    Changes(Box<ChangeSet>),
     Flush(mpsc::Sender<Outcome>),
     Stop(mpsc::Sender<Outcome>),
 }
@@ -26,6 +26,7 @@ struct Shared {
 pub struct Store {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
+    offline: tg_player_application::offline::OfflineData,
 }
 
 fn document(db: &rusqlite::Connection, key: &str, value: &impl serde::Serialize) -> Outcome {
@@ -33,51 +34,207 @@ fn document(db: &rusqlite::Connection, key: &str, value: &impl serde::Serialize)
     db.execute("INSERT INTO documents(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value != excluded.value", [key, &value]).map_err(|e| format!("write {key}: {e}"))?;
     Ok(())
 }
-fn write_state(db: &mut rusqlite::Connection, state: &State) -> Outcome {
-    let tx = db.transaction().map_err(|e| format!("begin save: {e}"))?;
-    // Keep library records out of settings and the versioned session document.
-    let mut value = serde_json::to_value(state).map_err(|e| e.to_string())?;
-    value.as_object_mut().unwrap().remove("playlists");
-    value.as_object_mut().unwrap().remove("session");
-    value.as_object_mut().unwrap().remove("pending_pins");
-    for key in ["queue", "queue_version", "previous_queue"] {
-        value.as_object_mut().unwrap().remove(key);
+fn write_changes(db: &mut rusqlite::Connection, changes: &ChangeSet) -> Outcome {
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin save: {e}"))?;
+    write_changes_in(&tx, changes)?;
+    tx.commit().map_err(|e| format!("commit save: {e}"))
+}
+fn write_changes_in(tx: &rusqlite::Transaction<'_>, changes: &ChangeSet) -> Outcome {
+    if let Some(value) = &changes.offline {
+        write_offline(tx, value)?;
     }
-    document(
-        &tx,
-        "legacy_queue",
-        &serde_json::json!({"queue":state.queue,"queue_version":state.queue_version,"previous_queue":state.previous_queue}),
-    )?;
-    document(&tx, "settings", &value)?;
-    document(&tx, "session_v2", &state.session)?;
-    document(&tx, "offline", &state.pending_pins)?;
-    document(
-        &tx,
-        "library_order",
-        &state.playlists.iter().map(|p| p.id).collect::<Vec<_>>(),
-    )?;
-    for p in &state.playlists {
-        let header = serde_json::json!({"id":p.id,"title":p.title,"url":p.url,"filters":p.filters,"pinned":p.pinned,"cursors":p.cursors,"done":p.done}).to_string();
-        tx.execute("INSERT INTO library(id,value) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET value=excluded.value WHERE value != excluded.value", rusqlite::params![p.id,header]).map_err(|e| format!("write library: {e}"))?;
-        for (position, track) in p.tracks.iter().enumerate() {
-            let json = serde_json::to_string(track).map_err(|e| e.to_string())?;
-            tx.execute("INSERT INTO tracks(playlist,position,chat,message,value) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(playlist,position) DO UPDATE SET chat=excluded.chat,message=excluded.message,value=excluded.value WHERE value != excluded.value",rusqlite::params![p.id,position as i64,track.chat,track.message,json]).map_err(|e|format!("write track: {e}"))?;
+    if let Some(value) = &changes.settings {
+        document(tx, "settings", value)?;
+    }
+    if let Some(value) = &changes.session {
+        document(tx, "session_v3", value)?;
+    }
+    if let Some(value) = &changes.library_order {
+        document(tx, "library_order", value)?;
+    }
+    for header in &changes.headers {
+        let value = serde_json::to_string(header).map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO library(id,value) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET value=excluded.value WHERE value != excluded.value", rusqlite::params![header.id,value]).map_err(|e| format!("write library: {e}"))?;
+    }
+    for track in &changes.tracks {
+        let value = serde_json::to_string(&track.track).map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO track_records(playlist,entry_id,chat,message,value) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(playlist,entry_id) DO UPDATE SET chat=excluded.chat,message=excluded.message,value=excluded.value WHERE value != excluded.value",rusqlite::params![track.playlist,track.track.library_id as i64,track.track.chat,track.track.message,value]).map_err(|e|format!("write track: {e}"))?;
+    }
+    for (id, order) in &changes.track_order {
+        for (position, entry_id) in order.iter().enumerate() {
+            tx.execute("INSERT INTO track_order(playlist,position,entry_id) VALUES(?1,?2,?3) ON CONFLICT(playlist,position) DO UPDATE SET entry_id=excluded.entry_id WHERE entry_id!=excluded.entry_id",rusqlite::params![id,position as i64,*entry_id as i64]).map_err(|e|e.to_string())?;
         }
         tx.execute(
-            "DELETE FROM tracks WHERE playlist=?1 AND position>=?2",
-            rusqlite::params![p.id, p.tracks.len() as i64],
+            "DELETE FROM track_order WHERE playlist=?1 AND position>=?2",
+            rusqlite::params![id, order.len() as i64],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM track_records WHERE playlist=?1 AND entry_id NOT IN (SELECT entry_id FROM track_order WHERE playlist=?1)",[id]).map_err(|e|e.to_string())?;
+    }
+    if changes.library_order.is_some() {
+        tx.execute("DELETE FROM library WHERE id NOT IN (SELECT value FROM json_each((SELECT value FROM documents WHERE key='library_order')))",[]).map_err(|e|e.to_string())?;
+        tx.execute(
+            "DELETE FROM track_order WHERE playlist NOT IN (SELECT id FROM library)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM track_records WHERE playlist NOT IN (SELECT id FROM library)",
+            [],
         )
         .map_err(|e| e.to_string())?;
     }
-    tx.execute("DELETE FROM library WHERE id NOT IN (SELECT value FROM json_each((SELECT value FROM documents WHERE key='library_order')))",[]).map_err(|e|e.to_string())?;
-    tx.execute(
-        "DELETE FROM tracks WHERE playlist NOT IN (SELECT id FROM library)",
-        [],
+    Ok(())
+}
+/// SQLite's online backup includes committed WAL pages. Publication cannot overwrite a prior backup.
+fn backup(db: &rusqlite::Connection, path: &Path, target_version: u32) -> Outcome {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| format!("backup: {e}"))?;
+    {
+        let mut destination =
+            rusqlite::Connection::open(temp.path()).map_err(|e| format!("backup: {e}"))?;
+        rusqlite::backup::Backup::new(db, &mut destination)
+            .map_err(|e| format!("backup: {e}"))?
+            .run_to_completion(128, Duration::from_millis(5), None)
+            .map_err(|e| format!("backup: {e}"))?;
+        let result: String = destination
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .map_err(|e| format!("backup verification: {e}"))?;
+        if result != "ok" {
+            return Err(format!("backup verification: {result}"));
+        }
+    }
+    temp.as_file()
+        .sync_all()
+        .map_err(|e| format!("backup sync: {e}"))?;
+    let name = path
+        .file_name()
+        .ok_or("backup: missing filename")?
+        .to_string_lossy();
+    let mut index = 0u64;
+    let mut temp = temp;
+    loop {
+        let target = parent.join(format!("{name}.pre-v{target_version}-{index}.sqlite"));
+        match temp.persist_noclobber(target) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                temp = error.file;
+                index += 1;
+            }
+            Err(error) => return Err(format!("backup publication: {}", error.error)),
+        }
+    }
+}
+fn write_offline(
+    db: &rusqlite::Connection,
+    delta: &tg_player_application::offline::OfflineDelta,
+) -> Outcome {
+    fn records<T: serde::Serialize>(
+        db: &rusqlite::Connection,
+        table: &str,
+        values: impl Iterator<Item = (String, Option<T>)>,
+    ) -> Outcome {
+        for (id, value) in values {
+            if let Some(value) = value {
+                let value = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+                db.execute(&format!("INSERT INTO {table}(id,value) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET value=excluded.value WHERE value!=excluded.value"), [&id, &value]).map_err(|e| e.to_string())?;
+            } else {
+                db.execute(&format!("DELETE FROM {table} WHERE id=?1"), [&id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
+    let key = |id: &crate::domain::TrackId| format!("{}:{}", id.chat, id.message);
+    records(
+        db,
+        "offline_copies",
+        delta
+            .copies
+            .iter()
+            .map(|(id, value)| (key(id), value.as_ref())),
+    )?;
+    // Pending upserts represent enqueue events. Requeueing a removed job must
+    // append it after existing work, even when changes coalesced before a flush.
+    for (id, value) in &delta.pending {
+        let id = key(id);
+        db.execute("DELETE FROM offline_jobs WHERE id=?1", [&id])
+            .map_err(|e| e.to_string())?;
+        if let Some(track) = value {
+            let value = serde_json::to_string(track).map_err(|e| e.to_string())?;
+            db.execute(
+                "INSERT INTO offline_jobs(id,value) VALUES(?1,?2)",
+                [&id, &value],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    records(
+        db,
+        "offline_removal_jobs",
+        delta
+            .removing
+            .iter()
+            .map(|(path, value)| (path.clone(), value.as_ref())),
+    )?;
+    records(
+        db,
+        "offline_policy_records",
+        delta
+            .policies
+            .iter()
+            .map(|(chat, value)| (chat.to_string(), value.as_ref())),
+    )?;
+    records(
+        db,
+        "offline_exclusion_records",
+        delta
+            .excluded
+            .iter()
+            .map(|(id, excluded)| (key(id), excluded.then_some(id))),
     )
-    .map_err(|e| e.to_string())?;
-    tx.execute_batch("PRAGMA user_version=2")
-        .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| format!("commit save: {e}"))
+}
+fn read_offline(
+    db: &rusqlite::Connection,
+    version: u32,
+) -> Result<tg_player_application::offline::OfflineData, String> {
+    fn rows<T: serde::de::DeserializeOwned>(
+        db: &rusqlite::Connection,
+        table: &str,
+    ) -> Result<Vec<T>, String> {
+        let mut query = db
+            .prepare(&format!("SELECT value FROM {table} ORDER BY rowid"))
+            .map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.map(|row| {
+            serde_json::from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+        })
+        .collect()
+    }
+    Ok(tg_player_application::offline::OfflineData {
+        copies: rows(db, "offline_copies")?,
+        removing: rows(db, "offline_removal_jobs")?,
+        pending: rows(db, "offline_jobs")?,
+        policies: if version >= 4 {
+            rows(db, "offline_policy_records")?
+        } else {
+            serde_json::from_str(&read_document(db, "offline_policies")?)
+                .map_err(|e| e.to_string())?
+        },
+        excluded: if version >= 4 {
+            rows(db, "offline_exclusion_records")?
+        } else {
+            serde_json::from_str(&read_document(db, "offline_exclusions")?)
+                .map_err(|e| e.to_string())?
+        },
+    })
 }
 fn read_document(db: &rusqlite::Connection, key: &str) -> Result<String, String> {
     db.query_row("SELECT value FROM documents WHERE key=?1", [key], |r| {
@@ -91,86 +248,224 @@ impl Store {
         let version: u32 = db
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
-        if version > 2 {
+        if version > 4 {
             return Err(format!("open: unsupported database schema {version}"));
         }
-        db.busy_timeout(Duration::from_secs(2))
-            .map_err(|e| e.to_string())?;
-        db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS documents(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS library(id INTEGER PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS tracks(playlist INTEGER NOT NULL, position INTEGER NOT NULL, chat INTEGER NOT NULL, message INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(playlist,position)); CREATE INDEX IF NOT EXISTS track_identity ON tracks(chat,message);").map_err(|e| e.to_string())?;
-        let migrated: bool = db
+        let check: String = db
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .map_err(|e| format!("check database: {e}"))?;
+        if check != "ok" {
+            return Err(format!("check database: {check}"));
+        }
+        let existing: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM documents WHERE key='settings')",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table')",
                 [],
                 |r| r.get(0),
             )
             .map_err(|e| e.to_string())?;
-        let state = if migrated {
-            let mut state: State = serde_json::from_str(&read_document(&db, "settings")?)
-                .map_err(|e| e.to_string())?;
-            let legacy: State = serde_json::from_str(&read_document(&db, "legacy_queue")?)
-                .map_err(|e| e.to_string())?;
-            state.queue = legacy.queue;
-            state.queue_version = legacy.queue_version;
-            state.previous_queue = legacy.previous_queue;
-            state.session = serde_json::from_str(&read_document(&db, "session_v2")?)
-                .map_err(|e| e.to_string())?;
-            state.pending_pins =
-                serde_json::from_str(&read_document(&db, "offline")?).map_err(|e| e.to_string())?;
-            let order: Vec<i64> = serde_json::from_str(&read_document(&db, "library_order")?)
-                .map_err(|e| e.to_string())?;
-            for id in order {
-                let s: String = db
-                    .query_row("SELECT value FROM library WHERE id=?1", [id], |r| r.get(0))
-                    .map_err(|e| e.to_string())?;
-                let mut playlist: Playlist = serde_json::from_str(&s).map_err(|e| e.to_string())?;
-                let mut statement = db
-                    .prepare("SELECT value FROM tracks WHERE playlist=?1 ORDER BY position")
-                    .map_err(|e| e.to_string())?;
-                let rows = statement
-                    .query_map([id], |r| r.get::<_, String>(0))
-                    .map_err(|e| e.to_string())?;
-                for row in rows {
-                    playlist.tracks.push(
-                        serde_json::from_str(&row.map_err(|e| e.to_string())?)
-                            .map_err(|e| e.to_string())?,
-                    );
-                }
-                state.playlists.push(playlist);
+        if existing && version < 4 {
+            backup(&db, path, if version < 3 { 3 } else { 4 })?;
+        }
+        db.busy_timeout(Duration::from_secs(2))
+            .map_err(|e| e.to_string())?;
+        db.execute_batch("PRAGMA journal_mode=WAL")
+            .map_err(|e| e.to_string())?;
+        // Hold schema changes and imported records in the same transaction.
+        // On any decoding/write failure, dropping this transaction rolls back
+        // the entire attempted upgrade before the connection is released.
+        let (state, offline) = {
+            let migration = if version < 4 {
+                Some(
+                    db.unchecked_transaction()
+                        .map_err(|e| format!("begin migration: {e}"))?,
+                )
+            } else {
+                None
+            };
+            if migration.is_some() {
+                db.execute_batch("CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS documents(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS library(id INTEGER PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS tracks(playlist INTEGER NOT NULL, position INTEGER NOT NULL, chat INTEGER NOT NULL, message INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(playlist,position)); CREATE INDEX IF NOT EXISTS track_identity ON tracks(chat,message); CREATE TABLE IF NOT EXISTS offline_copies(id TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS offline_jobs(id TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS offline_removal_jobs(id TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS offline_policy_records(id TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS offline_exclusion_records(id TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS track_records(playlist INTEGER NOT NULL,entry_id INTEGER NOT NULL,chat INTEGER NOT NULL,message INTEGER NOT NULL,value TEXT NOT NULL,PRIMARY KEY(playlist,entry_id)); CREATE TABLE IF NOT EXISTS track_order(playlist INTEGER NOT NULL,position INTEGER NOT NULL,entry_id INTEGER NOT NULL,PRIMARY KEY(playlist,position));").map_err(|e| e.to_string())?;
             }
-            state
-        } else {
-            let original = match db.query_row("SELECT value FROM state WHERE id=1", [], |r| {
-                r.get::<_, String>(0)
-            }) {
-                Ok(s) => Some(s),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => return Err(e.to_string()),
-            };
-            let mut state: State = match &original {
-                Some(s) => {
-                    serde_json::from_str(s).map_err(|e| format!("decode legacy library: {e}"))?
-                }
-                None => State::default(),
-            };
-            // The source state row is never overwritten or deleted.
-            if let Some(s) = &original {
-                db.execute_batch("CREATE TABLE IF NOT EXISTS queue_backup(id INTEGER PRIMARY KEY,value TEXT NOT NULL)").map_err(|e| e.to_string())?;
-                db.execute(
-                    "INSERT OR IGNORE INTO queue_backup(id,value) VALUES(1,?1)",
-                    [s],
+            let migrated: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM documents WHERE key='settings')",
+                    [],
+                    |r| r.get(0),
                 )
                 .map_err(|e| e.to_string())?;
+            if version > 0 && !migrated {
+                return Err("open: settings record is missing".into());
             }
-            state.repair_legacy_queue();
-            if state.queue_version < 2 {
-                if state.previous_queue.is_empty() {
-                    state.previous_queue = state.queue.clone();
+            let mut state = if migrated {
+                let mut state: State = serde_json::from_str(&read_document(&db, "settings")?)
+                    .map_err(|e| e.to_string())?;
+                state.session = serde_json::from_str(&read_document(
+                    &db,
+                    if version < 3 {
+                        "session_v2"
+                    } else {
+                        "session_v3"
+                    },
+                )?)
+                .map_err(|e| e.to_string())?;
+                let order: Vec<i64> = serde_json::from_str(&read_document(&db, "library_order")?)
+                    .map_err(|e| e.to_string())?;
+                for id in order {
+                    let s: String = db
+                        .query_row("SELECT value FROM library WHERE id=?1", [id], |r| r.get(0))
+                        .map_err(|e| e.to_string())?;
+                    let mut playlist: Playlist =
+                        serde_json::from_str(&s).map_err(|e| e.to_string())?;
+                    let mut statement = db
+                    .prepare(if version<3 {"SELECT value FROM tracks WHERE playlist=?1 ORDER BY position"}else{"SELECT r.value FROM track_order o JOIN track_records r ON r.playlist=o.playlist AND r.entry_id=o.entry_id WHERE o.playlist=?1 ORDER BY o.position"})
+                    .map_err(|e| e.to_string())?;
+                    let rows = statement
+                        .query_map([id], |r| r.get::<_, String>(0))
+                        .map_err(|e| e.to_string())?;
+                    for row in rows {
+                        playlist.tracks.push(
+                            serde_json::from_str(&row.map_err(|e| e.to_string())?)
+                                .map_err(|e| e.to_string())?,
+                        );
+                    }
+                    if version >= 3 {
+                        let expected: usize = db
+                            .query_row(
+                                "SELECT count(*) FROM track_order WHERE playlist=?1",
+                                [id],
+                                |r| r.get(0),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        if expected != playlist.tracks.len() {
+                            return Err("open: missing library records".into());
+                        }
+                    }
+                    state.playlists.push(playlist);
                 }
-                state.session.import(std::mem::take(&mut state.queue));
-                state.queue_version = 2;
+                state
+            } else {
+                let original = match db.query_row("SELECT value FROM state WHERE id=1", [], |r| {
+                    r.get::<_, String>(0)
+                }) {
+                    Ok(s) => Some(s),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => return Err(e.to_string()),
+                };
+                let imported: tg_player_application::legacy::LegacyImport = match &original {
+                    Some(s) => serde_json::from_str(s)
+                        .map_err(|e| format!("decode legacy library: {e}"))?,
+                    None => Default::default(),
+                };
+                // The source state row is never overwritten or deleted.
+                if let Some(s) = &original {
+                    db.execute_batch("CREATE TABLE IF NOT EXISTS queue_backup(id INTEGER PRIMARY KEY,value TEXT NOT NULL)").map_err(|e| e.to_string())?;
+                    db.execute(
+                        "INSERT OR IGNORE INTO queue_backup(id,value) VALUES(1,?1)",
+                        [s],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                imported.finish()
+            };
+            for p in &mut state.playlists {
+                p.ensure_entry_ids();
             }
-            write_state(&mut db, &state)?;
-            state
+            let offline = if version >= 3 {
+                read_offline(&db, version)?
+            } else {
+                let mut offline =
+                    tg_player_application::offline::OfflineCore::new(Default::default());
+                if let Ok(value) = read_document(&db, "offline") {
+                    let tracks: Vec<crate::model::Track> = serde_json::from_str(&value)
+                        .map_err(|e| format!("read legacy downloads: {e}"))?;
+                    for track in tracks {
+                        offline.enqueue(track, true);
+                    }
+                }
+                fn collect(
+                    value: &serde_json::Value,
+                    offline: &mut tg_player_application::offline::OfflineCore,
+                ) {
+                    match value {
+                        serde_json::Value::Array(values) => {
+                            for value in values {
+                                collect(value, offline);
+                            }
+                        }
+                        serde_json::Value::Object(values) => {
+                            if let Some(tracks) = value["pending_pins"].as_array() {
+                                for track in tracks {
+                                    if let Ok(track) = serde_json::from_value(track.clone()) {
+                                        offline.enqueue(track, true);
+                                    }
+                                }
+                            }
+
+                            if let Some(path) = value["pinned"].as_str() {
+                                if value["chat"].is_i64() && value["message"].is_i64() {
+                                    if let Ok(track) =
+                                        serde_json::from_value::<crate::model::Track>(value.clone())
+                                    {
+                                        offline.publish(track, path.into());
+                                    }
+                                }
+                            }
+                            for value in values.values() {
+                                collect(value, offline);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                for key in ["offline", "session_v2", "legacy_queue"] {
+                    if let Ok(value) = read_document(&db, key) {
+                        let value = serde_json::from_str(&value)
+                            .map_err(|e| format!("decode {key}: {e}"))?;
+                        collect(&value, &mut offline);
+                    }
+                }
+                // Old split libraries stored offline paths inside raw track JSON.
+                // Read them before those records become pure metadata: serde intentionally
+                // ignores the retired pinned/file/artwork presentation fields.
+                for table in ["library", "tracks"] {
+                    let mut query = db
+                        .prepare(&format!("SELECT value FROM {table} ORDER BY rowid"))
+                        .map_err(|e| format!("read legacy {table}: {e}"))?;
+                    let rows = query
+                        .query_map([], |row| row.get::<_, String>(0))
+                        .map_err(|e| format!("read legacy {table}: {e}"))?;
+                    for row in rows {
+                        let value = serde_json::from_str(&row.map_err(|e| e.to_string())?)
+                            .map_err(|e| format!("decode legacy {table}: {e}"))?;
+                        collect(&value, &mut offline);
+                    }
+                }
+                if let Ok(value) = db.query_row("SELECT value FROM state WHERE id=1", [], |r| {
+                    r.get::<_, String>(0)
+                }) {
+                    let value = serde_json::from_str(&value)
+                        .map_err(|e| format!("decode legacy state: {e}"))?;
+                    collect(&value, &mut offline);
+                }
+
+                offline.data()
+            };
+            if let Some(tx) = migration {
+                let mut changes = if version < 3 {
+                    ChangeSet::between(None, &state)
+                } else {
+                    ChangeSet::default()
+                };
+                changes.offline = Some(offline.clone().into());
+                if version < 3 {
+                    tx.execute_batch("CREATE TABLE IF NOT EXISTS legacy_documents(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT OR IGNORE INTO legacy_documents SELECT key,value FROM documents;").map_err(|e|e.to_string())?;
+                }
+                write_changes_in(&tx, &changes)?;
+                tx.execute_batch("PRAGMA user_version=4")
+                    .map_err(|e| e.to_string())?;
+                tx.commit().map_err(|e| format!("commit migration: {e}"))?;
+            }
+            (state, offline)
         };
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue::default()),
@@ -189,15 +484,7 @@ impl Store {
                     q.requests.pop_front().unwrap()
                 };
                 let result = match request {
-                    Request::Save(state) => write_state(&mut db, &state),
-                    Request::Volume(volume, unmuted) => (|| {
-                        let mut settings: serde_json::Value =
-                            serde_json::from_str(&read_document(&db, "settings")?)
-                                .map_err(|e| e.to_string())?;
-                        settings["volume"] = serde_json::json!(volume);
-                        settings["unmuted_volume"] = serde_json::json!(unmuted);
-                        document(&db, "settings", &settings)
-                    })(),
+                    Request::Changes(changes) => write_changes(&mut db, &changes),
                     Request::Flush(reply) => {
                         let _ = reply.send(failure.clone().map_or(Ok(()), Err));
                         continue;
@@ -217,6 +504,7 @@ impl Store {
             Self {
                 shared,
                 worker: Some(worker),
+                offline,
             },
             state,
         ))
@@ -231,19 +519,14 @@ impl Store {
             return Err("save: worker is closed".into());
         }
         // Coalesce only within the tail after the last acknowledgement barrier.
-        let boundary = q
-            .requests
-            .iter()
-            .rposition(|r| matches!(r, Request::Flush(_) | Request::Stop(_)))
-            .map_or(0, |i| i + 1);
-        if matches!(request, Request::Save(_) | Request::Volume(..)) {
-            let mut tail = q.requests.split_off(boundary);
-            tail.retain(|r| match &request {
-                Request::Save(_) => !matches!(r, Request::Save(_) | Request::Volume(..)),
-                Request::Volume(..) => !matches!(r, Request::Volume(..)),
-                _ => true,
-            });
-            q.requests.append(&mut tail);
+        if let Request::Changes(newer) = request {
+            if let Some(Request::Changes(pending)) = q.requests.back_mut() {
+                pending.merge(*newer);
+                return Ok(());
+            }
+            q.requests.push_back(Request::Changes(newer));
+            self.shared.wake.notify_one();
+            return Ok(());
         }
         if matches!(request, Request::Stop(_)) {
             q.closed = true;
@@ -252,11 +535,11 @@ impl Store {
         self.shared.wake.notify_one();
         Ok(())
     }
-    pub fn save(&self, state: State) -> Outcome {
-        self.enqueue(Request::Save(Box::new(state)))
+    pub fn offline(&self) -> tg_player_application::offline::OfflineData {
+        self.offline.clone()
     }
-    pub fn save_volume(&self, volume: f32, unmuted: f32) -> Outcome {
-        self.enqueue(Request::Volume(volume, unmuted))
+    pub fn apply(&self, changes: ChangeSet) -> Outcome {
+        self.enqueue(Request::Changes(Box::new(changes)))
     }
     pub fn flush(&self) -> Outcome {
         self.flush_timeout(Duration::from_secs(5))
@@ -268,46 +551,57 @@ impl Store {
             .map_err(|e| format!("flush: {e}"))?
     }
     pub fn shutdown(&mut self) -> Outcome {
-        if self.worker.is_none() {
+        self.shutdown_timeout(Duration::from_secs(5))
+    }
+    pub fn shutdown_timeout(&mut self, timeout: Duration) -> Outcome {
+        let Some(worker) = self.worker.take() else {
             return Ok(());
-        }
+        };
+        let deadline = std::time::Instant::now() + timeout;
         let (tx, rx) = mpsc::channel();
         self.enqueue(Request::Stop(tx))?;
         let result = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
             .map_err(|e| format!("shutdown store: {e}"))?;
-        self.worker
-            .take()
-            .unwrap()
+        while !worker.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return Err("shutdown store timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        worker
             .join()
             .map_err(|_| "store worker panicked".to_owned())?;
         result
     }
     pub fn error(&self) -> Option<String> {
-        self.shared.error.lock().unwrap().take()
+        self.shared.error.lock().unwrap().clone()
     }
 }
 impl Drop for Store {
     fn drop(&mut self) {
-        let _ = self.shutdown();
+        if self.worker.take().is_some() {
+            let (tx, _) = mpsc::channel();
+            let _ = self.enqueue(Request::Stop(tx));
+        }
     }
 }
 
 use crate::application::ports::Repository;
 impl Repository for Store {
-    fn save(&self, state: State) -> Result<(), String> {
-        self.save(state)
+    fn apply(&self, changes: ChangeSet) -> Result<(), tg_player_application::AppError> {
+        self.apply(changes)
+            .map_err(tg_player_application::AppError::Storage)
     }
-    fn save_volume(&self, volume: f32, unmuted: f32) -> Result<(), String> {
-        self.save_volume(volume, unmuted)
+    fn flush(&self, timeout: Duration) -> Result<(), tg_player_application::AppError> {
+        self.flush_timeout(timeout)
+            .map_err(tg_player_application::AppError::Storage)
     }
-    fn flush(&self) -> Result<(), String> {
-        self.flush()
+    fn shutdown(&mut self, timeout: Duration) -> Result<(), tg_player_application::AppError> {
+        self.shutdown_timeout(timeout)
+            .map_err(tg_player_application::AppError::Storage)
     }
-    fn shutdown(&mut self) -> Result<(), String> {
-        self.shutdown()
-    }
-    fn error(&self) -> Option<String> {
-        self.error()
+    fn error(&self) -> Option<tg_player_application::AppError> {
+        self.error().map(tg_player_application::AppError::Storage)
     }
 }

@@ -1,4 +1,4 @@
-use crate::model::Track;
+use tg_player_application::media::MediaTrack as Track;
 pub fn audio_document(name: &str, mime: &str) -> bool {
     mime.starts_with("audio/")
         || [
@@ -37,6 +37,7 @@ pub fn track(chat: i64, v: &serde_json::Value) -> Option<Track> {
         .map(str::to_owned)
         .unwrap_or_else(|| crate::i18n::tr("Voice message"));
     Some(Track {
+        library_id: 0,
         entry_id: Default::default(),
         chat,
         message: v["id"].as_i64()?,
@@ -45,7 +46,6 @@ pub fn track(chat: i64, v: &serde_json::Value) -> Option<Track> {
         artist: a["performer"].as_str().unwrap_or("").into(),
         duration: a["duration"].as_u64().unwrap_or(0),
         kind: kind.try_into().ok()?,
-        pinned: None,
         cached: local_path(f),
         image_file: a["album_cover_thumbnail"]["file"]["id"]
             .as_i64()
@@ -66,29 +66,109 @@ fn local_path(file: &serde_json::Value) -> Option<String> {
         .flatten()
 }
 
-pub fn apply_message_deletions(state: &mut crate::model::State, update: &serde_json::Value) {
-    // TDLib also sends updateDeleteMessages when evicting its own cache.
-    // The source messages still exist and our playlist metadata stays valid.
-    if update["from_cache"] == true {
-        return;
-    }
-    if let Some(p) = state
-        .playlists
-        .iter_mut()
-        .find(|p| Some(p.id) == update["chat_id"].as_i64())
-    {
-        p.tracks.retain(|t| {
-            !update["message_ids"]
-                .as_array()
-                .is_some_and(|ids| ids.contains(&serde_json::json!(t.message)))
-        });
+use tg_player_application::telegram::TelegramFile;
+#[cfg(any(feature = "telegram", test))]
+use tg_player_application::telegram::{AuthorizationState as AuthState, TelegramUpdate};
+#[cfg(any(feature = "telegram", test))]
+pub(crate) fn auth_state(v: &serde_json::Value) -> AuthState {
+    match v["@type"].as_str().unwrap_or("") {
+        "authorizationStateWaitTdlibParameters" => AuthState::Parameters,
+        "authorizationStateWaitPhoneNumber" => AuthState::Phone,
+        "authorizationStateWaitOtherDeviceConfirmation" => {
+            AuthState::Confirmation(v["link"].as_str().unwrap_or("").into())
+        }
+        "authorizationStateWaitCode" | "authorizationStateWaitEmailCode" => AuthState::Code {
+            email: v["@type"] == "authorizationStateWaitEmailCode",
+            delivery: v["code_info"]["type"]["@type"]
+                .as_str()
+                .unwrap_or("")
+                .into(),
+            next: v["code_info"]["next_type"].is_object(),
+            timeout: v["code_info"]["timeout"].as_u64().unwrap_or(0),
+        },
+        "authorizationStateWaitPassword" => {
+            AuthState::Password(v["password_hint"].as_str().unwrap_or("").into())
+        }
+        "authorizationStateWaitEmailAddress" => AuthState::Email,
+        "authorizationStateReady" => AuthState::Ready,
+        "authorizationStateClosed" => AuthState::Closed,
+        _ => AuthState::Starting,
     }
 }
-
+pub(crate) fn file_state(v: &serde_json::Value) -> TelegramFile {
+    TelegramFile {
+        id: v["id"].as_i64().unwrap_or(0),
+        size: v["size"].as_u64().unwrap_or(0),
+        downloaded: v["local"]["downloaded_size"].as_u64().unwrap_or(0),
+        path: v["local"]["path"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        complete: v["local"]["is_downloading_completed"] == true,
+    }
+}
+#[cfg(any(feature = "telegram", test))]
+pub(crate) fn update(v: serde_json::Value) -> Option<TelegramUpdate> {
+    Some(match v["@type"].as_str()? {
+        "updateAuthorizationState" => {
+            TelegramUpdate::Authorization(auth_state(&v["authorization_state"]))
+        }
+        "updateFile" => TelegramUpdate::File(file_state(&v["file"])),
+        "updateNewChat" => TelegramUpdate::Chat(crate::adapters::discovery::chat_metadata(
+            &v["chat"],
+            [true, true, false],
+        )?),
+        "updateChatTitle" => {
+            TelegramUpdate::ChatTitle(v["chat_id"].as_i64()?, v["title"].as_str()?.into())
+        }
+        "updateNewMessage" => {
+            let m = &v["message"];
+            let chat = m["chat_id"].as_i64()?;
+            TelegramUpdate::Message {
+                id: crate::domain::TrackId {
+                    chat,
+                    message: m["id"].as_i64()?,
+                },
+                track: track(chat, m),
+            }
+        }
+        "updateMessageContent" => {
+            let chat = v["chat_id"].as_i64()?;
+            let message = v["message_id"].as_i64()?;
+            TelegramUpdate::Message {
+                id: crate::domain::TrackId { chat, message },
+                track: track(
+                    chat,
+                    &serde_json::json!({"id":message,"content":v["new_content"]}),
+                ),
+            }
+        }
+        "updateDeleteMessages" => TelegramUpdate::Deleted {
+            chat: v["chat_id"].as_i64()?,
+            messages: v["message_ids"]
+                .as_array()?
+                .iter()
+                .filter_map(serde_json::Value::as_i64)
+                .collect(),
+            from_cache: v["from_cache"] == true,
+        },
+        _ => return None,
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{default_filters, Playlist, State};
+    fn apply_message_deletions(state: &mut crate::model::State, value: &serde_json::Value) {
+        let mut app = crate::App::new_at(std::path::PathBuf::new(), true);
+        app.state = tg_player_application::AppCore::new(std::mem::take(state));
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.updates = Some(rx);
+        tx.send(super::update(value.clone()).unwrap()).unwrap();
+        app.process(&eframe::egui::Context::default());
+        *state = app.state.view().clone();
+        app.shutdown_core().unwrap();
+    }
+    use crate::model::{default_filters, Playlist, State, Track};
     #[test]
     fn cache_eviction_keeps_second_pinned_playlist() {
         let playlist = |id| Playlist {
@@ -141,5 +221,26 @@ mod tests {
         let v = serde_json::json!({"id":123,"content":{"@type":"messageAudio","audio":{"title":"Song","performer":"Artist","audio":{"id":8}}}});
         let t = track(7, &v).unwrap();
         assert_eq!((t.chat, t.message, t.file), (7, 123, 8));
+    }
+}
+
+#[cfg(test)]
+mod typed_update_tests {
+    use super::*;
+    #[test]
+    fn auth_and_source_deletions_have_typed_boundaries() {
+        let update=update(serde_json::json!({"@type":"updateAuthorizationState","authorization_state":{"@type":"authorizationStateWaitPassword","password_hint":"hint"}})).unwrap();
+        assert!(
+            matches!(update,TelegramUpdate::Authorization(AuthState::Password(hint)) if hint=="hint")
+        );
+        assert!(matches!(
+            super::update(
+                serde_json::json!({"@type":"updateDeleteMessages","chat_id":42,"message_ids":[7],"from_cache":true})
+            ),
+            Some(TelegramUpdate::Deleted {
+                from_cache: true,
+                ..
+            })
+        ));
     }
 }

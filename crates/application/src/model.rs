@@ -1,39 +1,5 @@
 use serde::{Deserialize, Serialize};
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "usize", into = "usize")]
-pub enum MediaKind {
-    #[default]
-    Audio,
-    Document,
-    Voice,
-}
-impl From<MediaKind> for usize {
-    fn from(value: MediaKind) -> usize {
-        value as usize
-    }
-}
-impl TryFrom<usize> for MediaKind {
-    type Error = String;
-    fn try_from(value: usize) -> Result<Self, String> {
-        match value {
-            0 => Ok(Self::Audio),
-            1 => Ok(Self::Document),
-            2 => Ok(Self::Voice),
-            _ => Err(format!("unknown media kind: {value}")),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TrackId {
-    pub chat: i64,
-    pub message: i64,
-}
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct QueueEntryId(pub u64);
+pub use tg_player_domain::{MediaKind, QueueEntryId, TrackId};
 impl Track {
     pub fn id(&self) -> TrackId {
         TrackId {
@@ -46,33 +12,22 @@ impl Track {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Track {
+    pub library_id: u64,
     pub entry_id: QueueEntryId,
     pub chat: i64,
     pub message: i64,
-    #[serde(skip)]
-    pub file: i64,
     pub title: String,
     pub artist: String,
     pub duration: u64,
     pub kind: MediaKind,
-    pub pinned: Option<String>,
-    #[serde(skip)]
-    pub cached: Option<String>,
-    #[serde(skip)]
-    pub image_file: i64,
-    #[serde(skip)]
-    pub image_path: Option<String>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Playlist {
+    pub entry_serial: u64,
     pub id: i64,
     pub title: String,
     pub url: String,
-    #[serde(skip)]
-    pub image_file: i64,
-    #[serde(skip)]
-    pub image_path: Option<String>,
     pub tracks: Vec<Track>,
     pub filters: [bool; 3],
     pub pinned: bool,
@@ -85,24 +40,38 @@ impl Playlist {
             if protected.contains(&t.message) {
                 continue;
             }
-            if let Some(old) = self.tracks.iter_mut().find(|old| old.message == t.message) {
-                t.pinned = old.pinned.clone();
-                if t.file == 0 {
-                    t.file = old.file;
-                    t.cached = old.cached.clone();
-                    t.image_file = old.image_file;
-                }
-                if t.image_file == old.image_file {
-                    t.image_path = t.image_path.or(old.image_path.clone());
-                }
-                if *old != t {
-                    *old = t;
-                }
-            } else {
+            let mut found = false;
+            for old in self
+                .tracks
+                .iter_mut()
+                .filter(|old| old.message == t.message)
+            {
+                let mut fresh = t.clone();
+                fresh.library_id = old.library_id;
+                *old = fresh;
+                found = true;
+            }
+            if !found {
+                t.library_id = 0;
                 self.tracks.push(t);
             }
         }
         self.tracks.sort_by_key(|t| std::cmp::Reverse(t.message));
+        self.ensure_entry_ids();
+    }
+    pub fn ensure_entry_ids(&mut self) {
+        let mut serial = self
+            .entry_serial
+            .max(self.tracks.iter().map(|t| t.library_id).max().unwrap_or(0));
+        let mut seen = std::collections::HashSet::new();
+        for track in &mut self.tracks {
+            if track.library_id == 0 || !seen.insert(track.library_id) {
+                serial = serial.checked_add(1).expect("library identity exhausted");
+                track.library_id = serial;
+                seen.insert(serial);
+            }
+        }
+        self.entry_serial = serial;
     }
     pub fn recover_empty_index(&mut self) {
         // Older versions could drop cached message metadata while keeping the
@@ -124,20 +93,14 @@ impl Playlist {
 pub struct State {
     pub playlists: Vec<Playlist>,
     pub chat_pins: Vec<i64>,
-    // Legacy queue remains the explicit manual queue.
-    pub queue: Vec<Track>,
-    #[serde(default)]
-    pub queue_version: u8,
-    pub previous_queue: Vec<Track>,
-    pub session: crate::playback::Session,
-    pub repeat: crate::playback::RepeatMode,
+    pub session: tg_player_domain::playback::Session,
+    pub repeat: tg_player_domain::playback::RepeatMode,
     pub shuffle: bool,
     pub volume: f32,
     pub unmuted_volume: f32,
     pub api_id: String,
     pub api_hash: String,
     pub light: bool,
-    pub pending_pins: Vec<Track>,
     #[serde(default = "default_filters")]
     pub filters: [bool; 3],
 }
@@ -146,9 +109,6 @@ impl Default for State {
         Self {
             playlists: Vec::new(),
             chat_pins: Vec::new(),
-            queue: Vec::new(),
-            queue_version: 1,
-            previous_queue: Vec::new(),
             session: Default::default(),
             repeat: Default::default(),
             shuffle: false,
@@ -157,42 +117,11 @@ impl Default for State {
             api_id: String::new(),
             api_hash: String::new(),
             light: false,
-            pending_pins: Vec::new(),
             filters: default_filters(),
         }
     }
 }
 impl State {
-    /// Older releases stored the automatic tail in `queue`; the first session
-    /// release misclassified it as manual. Repair only a substantial, exact
-    /// suffix already present in the automatic continuation. Keep a backup.
-    pub fn repair_legacy_queue(&mut self) -> bool {
-        if self.queue_version >= 1 {
-            return false;
-        }
-        self.queue_version = 1;
-        let count = self.queue.len();
-        if count < 8 || count > self.session.snapshot.len() {
-            return false;
-        }
-        let suffix = &self.session.snapshot[self.session.snapshot.len() - count..];
-        let automatic = &self.session.remaining;
-        if self
-            .queue
-            .iter()
-            .zip(suffix)
-            .all(|(a, b)| crate::playback::same(a, b))
-            && self
-                .queue
-                .iter()
-                .all(|q| automatic.iter().any(|a| crate::playback::same(q, a)))
-        {
-            self.previous_queue = std::mem::take(&mut self.queue);
-            return true;
-        }
-        false
-    }
-
     pub fn sidebar_chats(&self, searching: bool, query: &str) -> Vec<usize> {
         if searching {
             let query = query.trim().to_lowercase();
@@ -224,3 +153,35 @@ pub fn default_filters() -> [bool; 3] {
 #[cfg(test)]
 #[path = "model/tests.rs"]
 mod tests;
+
+impl From<Track> for tg_player_domain::TrackMetadata {
+    fn from(t: Track) -> Self {
+        Self {
+            chat: t.chat,
+            message: t.message,
+            title: t.title,
+            artist: t.artist,
+            duration: t.duration,
+            kind: t.kind,
+        }
+    }
+}
+impl From<tg_player_domain::QueueEntry> for Track {
+    fn from(entry: tg_player_domain::QueueEntry) -> Self {
+        Self {
+            entry_id: entry.entry_id,
+            chat: entry.track.chat,
+            message: entry.track.message,
+            title: entry.track.title,
+            artist: entry.track.artist,
+            duration: entry.track.duration,
+            kind: entry.track.kind,
+            ..Default::default()
+        }
+    }
+}
+impl From<&tg_player_domain::QueueEntry> for Track {
+    fn from(entry: &tg_player_domain::QueueEntry) -> Self {
+        entry.clone().into()
+    }
+}

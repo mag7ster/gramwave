@@ -1,51 +1,59 @@
-use crate::{
-    adapters::telegram_mapping::track,
-    model::{Playlist, Track},
-    telegram::Telegram,
-};
+use crate::{adapters::telegram_mapping::track, model::Playlist, telegram::Telegram};
 use serde_json::{json, Value};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-fn response(v: Value) -> Result<Value, String> {
+use tg_player_application::{media::MediaPlaylist, AppError};
+fn response(v: Value) -> Result<Value, AppError> {
     if v["@type"] == "error" {
-        Err(v["message"].as_str().unwrap_or("Telegram error").into())
+        Err(AppError::Telegram {
+            code: v["code"].as_i64().unwrap_or(500) as i32,
+            message: v["message"].as_str().unwrap_or("Telegram error").into(),
+        })
     } else {
         Ok(v)
     }
 }
 
-#[derive(Default)]
-pub struct Changes {
-    pub chat: i64,
-    pub tracks: Vec<Track>,
-    pub removed: Vec<i64>,
-    pub url: Option<String>,
-    pub pagination: [Option<(i64, bool)>; 3],
-}
-impl Changes {
-    pub fn apply(self, p: &mut Playlist, protected: &std::collections::HashSet<i64>) {
-        p.tracks
-            .retain(|t| protected.contains(&t.message) || !self.removed.contains(&t.message));
-        p.merge_tracks(self.tracks, protected);
-        if let Some(url) = self.url {
-            p.url = url;
-        }
-        for (kind, progress) in self.pagination.into_iter().enumerate() {
-            if let Some((cursor, done)) = progress {
-                p.cursors[kind] = cursor;
-                p.done[kind] = done;
-            }
-        }
+fn search_page(batch: &Value, cursor: i64) -> Result<(&[Value], i64), AppError> {
+    let messages = batch["messages"]
+        .as_array()
+        .ok_or_else(|| AppError::Protocol("Invalid search response".into()))?;
+    let next = batch["next_from_message_id"]
+        .as_i64()
+        .ok_or_else(|| AppError::Protocol("Invalid search cursor".into()))?;
+    if next != 0 && next == cursor {
+        return Err(AppError::Protocol("Search cursor did not advance".into()));
     }
+    Ok((messages, next))
+}
+fn chat_ids(batch: &Value) -> Result<Vec<i64>, AppError> {
+    batch["chat_ids"]
+        .as_array()
+        .ok_or_else(|| AppError::Protocol("Invalid chat list response".into()))?
+        .iter()
+        .map(|id| {
+            id.as_i64()
+                .ok_or_else(|| AppError::Protocol("Invalid chat identity".into()))
+        })
+        .collect()
+}
+fn chat_response(chat: &Value, filters: [bool; 3]) -> Result<Option<MediaPlaylist>, AppError> {
+    if chat["type"]["@type"] == "chatTypeSecret" {
+        return Ok(None);
+    }
+    chat_metadata(chat, filters)
+        .map(Some)
+        .ok_or_else(|| AppError::Protocol("Invalid chat metadata".into()))
 }
 
-pub fn refresh(
+pub use tg_player_application::media::MediaPatch as Changes;
+
+async fn refresh_async<F: std::future::Future<Output = Result<Value, AppError>>>(
     p: Playlist,
-    epoch: &AtomicU64,
-    generation: u64,
-    mut call: impl FnMut(Value) -> Result<Value, String>,
+    current: impl Fn() -> bool,
+    mut call: impl FnMut(Value) -> F,
     mut emit: impl FnMut(Changes),
-) -> Result<(), String> {
-    let current = || epoch.load(Ordering::Relaxed) == generation;
+) -> Result<(), AppError> {
     for (kind, filter) in [
         "searchMessagesFilterAudio",
         "searchMessagesFilterDocument",
@@ -66,18 +74,15 @@ pub fn refresh(
         let mut cursor = 0;
         loop {
             if !current() {
-                return Ok(());
+                return Err(AppError::Cancelled);
             }
             let batch = response(call(
                 json!({"@type":"searchChatMessages", "chat_id":p.id,"topic_id":null,"query":"","sender_id":null,"from_message_id":cursor,"offset":0,"limit":100,"filter":{"@type":filter}}),
-            )?)?;
+            ).await?)?;
             if !current() {
-                return Ok(());
+                return Err(AppError::Cancelled);
             }
-            let messages = batch["messages"]
-                .as_array()
-                .ok_or("Invalid search response")?;
-            let next = messages.last().and_then(|m| m["id"].as_i64()).unwrap_or(0);
+            let (messages, next) = search_page(&batch, cursor)?;
             let mut changes = Changes {
                 chat: p.id,
                 tracks: messages.iter().filter_map(|m| track(p.id, m)).collect(),
@@ -88,7 +93,13 @@ pub fn refresh(
                 changes.pagination[kind] = Some((next, next == 0));
             }
             emit(changes);
-            if next == 0 || next == cursor || newest.is_none_or(|id| next <= id) {
+            if next == 0
+                || newest.is_none_or(|id| {
+                    messages
+                        .iter()
+                        .any(|m| m["id"].as_i64().is_some_and(|m| m <= id))
+                })
+            {
                 break;
             }
             cursor = next;
@@ -99,25 +110,25 @@ pub fn refresh(
     let ids: Vec<_> = p.tracks.iter().map(|t| t.message).collect();
     for chunk in ids.chunks(100) {
         if !current() {
-            return Ok(());
+            return Err(AppError::Cancelled);
         }
-        let batch = response(call(
-            json!({"@type":"getMessages", "chat_id":p.id,"message_ids":chunk}),
-        )?)?;
+        let batch = response(
+            call(json!({"@type":"getMessages", "chat_id":p.id,"message_ids":chunk})).await?,
+        )?;
         if !current() {
-            return Ok(());
+            return Err(AppError::Cancelled);
         }
         let messages = batch["messages"]
             .as_array()
             .filter(|m| m.len() == chunk.len())
-            .ok_or("Invalid messages response")?;
+            .ok_or_else(|| AppError::Protocol("Invalid messages response".into()))?;
         let mut changes = Changes {
             chat: p.id,
             ..Default::default()
         };
         for (id, m) in chunk.iter().zip(messages) {
             if !m.is_null() && m["id"].as_i64() != Some(*id) {
-                return Err("Unexpected message identity".into());
+                return Err(AppError::Protocol("Unexpected message identity".into()));
             }
             if let Some(t) = track(p.id, m) {
                 changes.tracks.push(t);
@@ -129,11 +140,11 @@ pub fn refresh(
     }
     Ok(())
 }
-pub fn chat_metadata(c: &Value, filters: [bool; 3]) -> Option<Playlist> {
+pub(super) fn chat_metadata(c: &Value, filters: [bool; 3]) -> Option<MediaPlaylist> {
     if c["type"]["@type"] == "chatTypeSecret" {
         return None;
     }
-    Some(Playlist {
+    Some(MediaPlaylist {
         id: c["id"].as_i64()?,
         title: c["title"].as_str()?.into(),
         filters,
@@ -141,35 +152,39 @@ pub fn chat_metadata(c: &Value, filters: [bool; 3]) -> Option<Playlist> {
         ..Default::default()
     })
 }
-pub fn search_chats(
+pub async fn search_chats(
     tg: &Telegram,
     query: &str,
     filters: [bool; 3],
-) -> Result<Vec<Playlist>, String> {
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<MediaPlaylist>, AppError> {
     let mut ids = std::collections::HashSet::new();
     let mut chats = Vec::new();
     let mut error = None;
     for method in ["searchChats", "searchChatsOnServer"] {
-        match tg.call(json!({"@type":method,"query":query,"limit":100})) {
+        match tg
+            .call_async(json!({"@type":method,"query":query,"limit":100}), cancel)
+            .await
+        {
             Ok(v) => {
-                for id in v["chat_ids"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_i64)
-                {
+                for id in chat_ids(&v)? {
                     if ids.insert(id) {
-                        match tg.call(json!({"@type":"getChat","chat_id":id})) {
+                        match tg
+                            .call_async(json!({"@type":"getChat","chat_id":id}), cancel)
+                            .await
+                        {
                             Ok(c) => {
-                                if let Some(p) = chat_metadata(&c, filters) {
+                                if let Some(p) = chat_response(&c, filters)? {
                                     chats.push(p);
                                 }
                             }
+                            Err(AppError::Cancelled) => return Err(AppError::Cancelled),
                             Err(e) => error = Some(e),
                         }
                     }
                 }
             }
+            Err(AppError::Cancelled) => return Err(AppError::Cancelled),
             Err(e) => error = Some(e),
         }
     }
@@ -180,25 +195,35 @@ pub fn search_chats(
     }
     Ok(chats)
 }
-pub fn catalog(tg: &Telegram, filters: [bool; 3]) -> Result<Vec<Playlist>, String> {
+pub async fn catalog(
+    tg: &Telegram,
+    filters: [bool; 3],
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<MediaPlaylist>, AppError> {
     let mut ids = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for archive in [false, true] {
         let list = json!({"@type":if archive{"chatListArchive"}else{"chatListMain"}});
         loop {
-            match tg.call(json!({"@type":"loadChats","chat_list":list,"limit":100})) {
+            match tg
+                .call_async(
+                    json!({"@type":"loadChats","chat_list":list,"limit":100}),
+                    cancel,
+                )
+                .await
+            {
                 Ok(_) => {}
-                Err(e) if e.contains("404") || e.contains("Not Found") => break,
+                Err(AppError::Telegram { code: 404, .. }) => break,
                 Err(e) => return Err(e),
             }
         }
-        let chats = tg.call(json!({"@type":"getChats","chat_list":list,"limit":10000}))?;
-        for id in chats["chat_ids"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_i64)
-        {
+        let chats = tg
+            .call_async(
+                json!({"@type":"getChats","chat_list":list,"limit":10000}),
+                cancel,
+            )
+            .await?;
+        for id in chat_ids(&chats)? {
             if seen.insert(id) {
                 ids.push(id);
             }
@@ -206,20 +231,22 @@ pub fn catalog(tg: &Telegram, filters: [bool; 3]) -> Result<Vec<Playlist>, Strin
     }
     let mut chats = Vec::new();
     for id in ids {
-        let c = tg.call(json!({"@type":"getChat","chat_id":id}))?;
-        if let Some(p) = chat_metadata(&c, filters) {
+        let c = tg
+            .call_async(json!({"@type":"getChat","chat_id":id}), cancel)
+            .await?;
+        if let Some(p) = chat_response(&c, filters)? {
             chats.push(p);
         }
     }
     Ok(chats)
 }
-pub fn index(
-    mut p: Playlist,
-    epoch: &AtomicU64,
-    generation: u64,
-    mut call: impl FnMut(Value) -> Result<Value, String>,
-    mut emit: impl FnMut(Playlist),
-) -> Result<(), String> {
+async fn index_async<F: std::future::Future<Output = Result<Value, AppError>>>(
+    p: Playlist,
+    current: impl Fn() -> bool,
+    mut call: impl FnMut(Value) -> F,
+    mut emit: impl FnMut(MediaPlaylist),
+) -> Result<(), AppError> {
+    let mut p = MediaPlaylist::from(p);
     for (kind, filter) in [
         "searchMessagesFilterAudio",
         "searchMessagesFilterDocument",
@@ -233,18 +260,17 @@ pub fn index(
         }
         let cursor = p.cursors[kind];
         {
-            if epoch.load(Ordering::Relaxed) != generation {
-                return Ok(());
+            if !current() {
+                return Err(AppError::Cancelled);
             }
-            let batch = call(
+            let batch = response(call(
                 json!({"@type":"searchChatMessages","chat_id":p.id,"topic_id":null,"query":"","sender_id":null,"from_message_id":cursor,"offset":0,"limit":100,"filter":{"@type":filter}}),
-            )?;
-            if epoch.load(Ordering::Relaxed) != generation {
-                return Ok(());
+            ).await?)?;
+            if !current() {
+                return Err(AppError::Cancelled);
             }
-            let messages = batch["messages"].as_array().cloned().unwrap_or_default();
-            let next = messages.last().and_then(|m| m["id"].as_i64()).unwrap_or(0);
-            for m in &messages {
+            let (messages, next) = search_page(&batch, cursor)?;
+            for m in messages {
                 if let Some(t) = track(p.id, m) {
                     if !p.tracks.iter().any(|x| x.message == t.message) {
                         p.tracks.push(t)
@@ -252,11 +278,8 @@ pub fn index(
                 }
             }
             p.tracks.sort_by_key(|t| std::cmp::Reverse(t.message));
-            if next == 0 || next == cursor {
-                p.done[kind] = true;
-            } else {
-                p.cursors[kind] = next;
-            }
+            p.cursors[kind] = next;
+            p.done[kind] = next == 0;
             emit(p.clone());
         }
     }
@@ -265,3 +288,89 @@ pub fn index(
 #[cfg(test)]
 #[path = "discovery/tests.rs"]
 mod tests;
+
+/// An offline search page has an independent cursor from the displayed library.
+pub(crate) async fn offline_page(
+    tg: &Telegram,
+    chat: i64,
+    kind: usize,
+    cursor: i64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<tg_player_application::telegram::MediaPage, AppError> {
+    use tg_player_application::telegram::TelegramGateway;
+    let kind = match kind {
+        0 => crate::domain::MediaKind::Audio,
+        1 => crate::domain::MediaKind::Document,
+        2 => crate::domain::MediaKind::Voice,
+        _ => return Err(AppError::Protocol("Invalid media filter".into())),
+    };
+    tg.search_media(chat, kind, cursor, cancel).await
+}
+
+#[cfg(test)]
+fn refresh(
+    p: Playlist,
+    epoch: &AtomicU64,
+    generation: u64,
+    mut call: impl FnMut(Value) -> Result<Value, AppError>,
+    emit: impl FnMut(Changes),
+) -> Result<(), AppError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(refresh_async(
+            p,
+            || epoch.load(Ordering::Relaxed) == generation,
+            |v| std::future::ready(call(v)),
+            emit,
+        ))
+}
+#[cfg(test)]
+fn index(
+    p: Playlist,
+    epoch: &AtomicU64,
+    generation: u64,
+    mut call: impl FnMut(Value) -> Result<Value, AppError>,
+    emit: impl FnMut(MediaPlaylist),
+) -> Result<(), AppError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(index_async(
+            p,
+            || epoch.load(Ordering::Relaxed) == generation,
+            |v| std::future::ready(call(v)),
+            emit,
+        ))
+}
+
+pub(crate) async fn refresh_library(
+    tg: &Telegram,
+    p: Playlist,
+    cancel: &tokio_util::sync::CancellationToken,
+    emit: impl FnMut(Changes),
+) -> Result<(), AppError> {
+    refresh_async(
+        p,
+        || !cancel.is_cancelled(),
+        |value| tg.call_async(value, cancel),
+        emit,
+    )
+    .await
+}
+pub(crate) async fn index_library(
+    tg: &Telegram,
+    p: Playlist,
+    cancel: &tokio_util::sync::CancellationToken,
+    emit: impl FnMut(MediaPlaylist),
+) -> Result<(), AppError> {
+    index_async(
+        p,
+        || !cancel.is_cancelled(),
+        |value| tg.call_async(value, cancel),
+        emit,
+    )
+    .await
+}

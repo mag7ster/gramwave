@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 cd "$(dirname "$0")/.."
-cargo build --release --locked
+cargo build --workspace --release --locked
 bundle=dist/tg-player
 mkdir -p "$bundle/lib" "$bundle/share/applications" "$bundle/share/icons"
 # Replace via rename so an already running player can keep its old executable
@@ -16,5 +16,5 @@ mv -f "$bundle/lib/libtdjson.so.1.8.61.new" "$bundle/lib/libtdjson.so.1.8.61"
 ln -sf libtdjson.so.1.8.61 "$bundle/lib/libtdjson.so"
 cp assets/tgplayer.desktop "$bundle/share/applications/"
 cp assets/tgplayer.svg "$bundle/share/icons/"
-cp README.md LICENSE assets/LICENSE-icons.txt "$bundle/"
+cp README.md ARCHITECTURE.md LICENSE assets/LICENSE-icons.txt "$bundle/"
 printf 'Local bundle: %s\n' "$bundle"

@@ -1,6 +1,6 @@
-use crate::{design, tr, App, Event};
+use crate::{design, tr, App};
 use eframe::egui;
-use serde_json::{json, Value};
+use tg_player_application::telegram::{AuthRequest, AuthorizationState};
 #[derive(Debug, PartialEq)]
 enum Phase {
     Setup,
@@ -12,19 +12,17 @@ enum Phase {
     Ready,
     Closed,
 }
-fn phase(tg: bool, state: &Value) -> Phase {
+fn phase(tg: bool, state: &AuthorizationState) -> Phase {
     if !tg {
         return Phase::Setup;
     }
-    match state["@type"].as_str().unwrap_or("") {
-        "authorizationStateWaitPhoneNumber" | "authorizationStateWaitOtherDeviceConfirmation" => {
-            Phase::Method
-        }
-        "authorizationStateWaitCode" | "authorizationStateWaitEmailCode" => Phase::Code,
-        "authorizationStateWaitPassword" => Phase::Password,
-        "authorizationStateWaitEmailAddress" => Phase::Email,
-        "authorizationStateReady" => Phase::Ready,
-        "authorizationStateClosed" => Phase::Closed,
+    match state {
+        AuthorizationState::Phone | AuthorizationState::Confirmation(_) => Phase::Method,
+        AuthorizationState::Code { .. } => Phase::Code,
+        AuthorizationState::Password(_) => Phase::Password,
+        AuthorizationState::Email => Phase::Email,
+        AuthorizationState::Ready => Phase::Ready,
+        AuthorizationState::Closed => Phase::Closed,
         _ => Phase::Starting,
     }
 }
@@ -67,38 +65,26 @@ pub(crate) fn friendly_error(error: &str) -> String {
     error.into()
 }
 impl App {
-    pub(crate) fn submit_auth(&mut self, v: Value) {
-        if self.auth_pending {
-            return;
-        }
-        let Some(tg) = self.tg.clone() else { return };
-        self.auth_token += 1;
-        let token = self.auth_token;
-        self.auth_pending = true;
+    pub(crate) fn submit_auth(&mut self, request: AuthRequest) {
         self.auth_error.clear();
-        let tx = self.tx.clone();
-        self.spawn(move || {
-            let result = tg.call(v).map(|_| ());
-            let _ = tx.send(Event::AuthResult(token, result));
-        });
+        self.core_command(tg_player_application::commands::AppCommand::Authenticate(
+            request,
+        ));
     }
     pub(crate) fn auth_ui(&mut self, ui: &mut egui::Ui) {
-        let current = match std::env::args()
-            .find_map(|a| a.strip_prefix("--preview-auth=").map(str::to_owned))
-            .as_deref()
-        {
+        let current = match self.options.preview_auth.as_deref() {
             Some("qr") => Phase::Method,
             Some("code") | Some("error") | Some("email-code") => Phase::Code,
             Some("password") => Phase::Password,
             Some("email") => Phase::Email,
-            _ => phase(self.tg.is_some(), &self.auth),
+            _ => phase(self.tg.is_some(), self.state.auth().state()),
         };
 
         let step = format!("{current:?}");
         let changed = step != self.last_auth_step;
         self.last_auth_step = step;
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-        let pending = self.auth_pending;
+        let pending = self.state.auth().running();
         ui.add_enabled_ui(!pending,|ui|{match current{
    Phase::Setup=>{
 ui.heading(tr("Connect your Telegram"));
@@ -110,13 +96,16 @@ ui.horizontal(|ui| {
 });
 ui.add_space(12.);
 ui.label(tr("API ID"));
-ui.add(egui::TextEdit::singleline(&mut self.state.api_id).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY).hint_text("12345678"));
+ui.add(egui::TextEdit::singleline(&mut self.api_id_input).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY).hint_text("12345678"));
 ui.label(tr("API hash"));
-ui.add(egui::TextEdit::singleline(&mut self.state.api_hash).password(true).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY));
-if ui.add_enabled(credentials(&self.state.api_id,&self.state.api_hash),egui::Button::new(egui::RichText::new(tr("Continue")).color(egui::Color32::BLACK)).fill(design::GREEN).corner_radius(20).min_size(egui::vec2(ui.available_width(),40.))).clicked()||(enter&&credentials(&self.state.api_id,&self.state.api_hash)){
-self.state.api_id=self.state.api_id.trim().into();
-self.state.api_hash=self.state.api_hash.trim().into();
-self.connect();
+ui.add(egui::TextEdit::singleline(&mut self.api_hash_input).password(true).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY));
+if ui.add_enabled(credentials(&self.api_id_input,&self.api_hash_input),egui::Button::new(egui::RichText::new(tr("Continue")).color(egui::Color32::BLACK)).fill(design::GREEN).corner_radius(20).min_size(egui::vec2(ui.available_width(),40.))).clicked()||(enter&&credentials(&self.api_id_input,&self.api_hash_input)){
+self.api_id_input=self.api_id_input.trim().into();
+self.api_hash_input=self.api_hash_input.trim().into();
+let mut settings=tg_player_application::persistence::Settings::from(self.state.view());
+settings.api_id=self.api_id_input.clone();settings.api_hash=self.api_hash_input.clone();
+self.execute(crate::application::commands::AppCommand::Settings(settings));
+self.execute(crate::application::commands::AppCommand::Connect);
 self.persist();
 }
 }
@@ -149,9 +138,7 @@ response.request_focus();
 }
 if design::primary(ui,tr("Continue with phone")).clicked()||enter{
 if self.phone.starts_with('+')&&self.phone.chars().filter(char::is_ascii_digit).count()>=7{
-self.submit_auth(json!({
-"@type":"setAuthenticationPhoneNumber","phone_number":self.phone,"settings":null}
-));
+self.execute(crate::application::commands::AppCommand::Authenticate(AuthRequest::Phone(self.phone.clone())));
 }
 else{
 self.auth_error=tr("Enter a phone number including the country code, for example +44…");
@@ -161,7 +148,7 @@ self.auth_error=tr("Enter a phone number including the country code, for example
 ,
    Phase::Code=>{
 ui.heading(tr("Check your messages"));
-let delivery=self.auth["code_info"]["type"]["@type"].as_str().unwrap_or("");
+let delivery=self.state.auth().state().delivery();
 ui.label(match delivery{
 "authenticationCodeTypeTelegramMessage"=>tr("We sent a code to your Telegram app."),"authenticationCodeTypeSms"=>tr("We sent an SMS to your phone."),_=>tr("Enter the verification code sent by Telegram.")}
 );
@@ -170,28 +157,16 @@ if changed{
 response.request_focus();
 }
 if design::primary(ui,tr("Verify code")).clicked()||enter{
-let email=self.auth["@type"]=="authorizationStateWaitEmailCode";
-self.submit_auth(if email{
-json!({
-"@type":"checkAuthenticationEmailCode","code":{
-"@type":"emailAddressAuthenticationCode","code":self.code}
-}
-)}
-else{
-json!({
-"@type":"checkAuthenticationCode","code":self.code}
-)}
-);
+let email=self.state.auth().state().email_code();
+self.execute(crate::application::commands::AppCommand::Authenticate(if email {AuthRequest::EmailCode(self.code.clone())}else{AuthRequest::Code(self.code.clone())}));
 }
 let wait=self.resend_at.map(|t|t.saturating_duration_since(std::time::Instant::now()).as_secs()).unwrap_or(0);
-if self.auth["code_info"]["next_type"].is_object(){
+if self.state.auth().state().can_resend(){
 if wait>0{
 ui.weak(tr("Resend available in {seconds}s").replace("{seconds}",&wait.to_string()));
 }
 else if ui.button(tr("Resend code")).clicked(){
-self.submit_auth(json!({
-"@type":"resendAuthenticationCode","reason":null}
-));
+self.execute(crate::application::commands::AppCommand::Authenticate(AuthRequest::Resend));
 }
 }
 }
@@ -199,15 +174,13 @@ self.submit_auth(json!({
    Phase::Password=>{
 ui.heading(tr("Two-step verification"));
 ui.label(tr("Enter your Telegram password to finish signing in."));
-ui.weak(self.auth["password_hint"].as_str().unwrap_or(""));
+ui.weak(self.state.auth().state().password_hint());
 let response=ui.add(egui::TextEdit::singleline(&mut self.password).password(true).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY).hint_text(tr("Password")));
 if changed{
 response.request_focus();
 }
 if design::primary(ui,tr("Sign in")).clicked()||enter{
-self.submit_auth(json!({
-"@type":"checkAuthenticationPassword","password":self.password}
-));
+self.execute(crate::application::commands::AppCommand::Authenticate(AuthRequest::Password(self.password.clone())));
 }
 }
 ,
@@ -218,9 +191,7 @@ if changed{
 response.request_focus();
 }
 if design::primary(ui,tr("Continue")).clicked()||enter{
-self.submit_auth(json!({
-"@type":"setAuthenticationEmailAddress","email_address":self.phone}
-));
+self.execute(crate::application::commands::AppCommand::Authenticate(AuthRequest::Email(self.phone.clone())));
 }
 }
 ,
@@ -241,7 +212,9 @@ self.submit_auth(json!({
         ui.add_space(18.);
         ui.weak(tr("Listening does not announce you online."));
         if self.tg.is_some() && !pending && ui.button(tr("Start over")).clicked() {
-            self.submit_auth(json!({"@type":"close"}));
+            self.execute(crate::application::commands::AppCommand::Authenticate(
+                AuthRequest::Close,
+            ));
         }
     }
 }

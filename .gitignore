@@ -5,3 +5,5 @@
 *.sqlite*
 *.log
 /dist/
+
+/tools/mpv-bindings/target/

@@ -11,7 +11,7 @@ mod regression {
     #[test]
     fn qr_can_require_password() {
         assert_eq!(
-            phase(true, &json!({"@type":"authorizationStateWaitPassword"})),
+            phase(true, &AuthorizationState::Password(String::new())),
             Phase::Password
         );
     }

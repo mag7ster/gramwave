@@ -94,21 +94,21 @@ impl App {
         let position = self
             .player
             .as_ref()
-            .map(|p| p.number("time-pos"))
+            .map(|p| p.snapshot().position)
             .unwrap_or(0.);
         json!({
-            "current": self.state.session.current.as_ref().map(track_view),
+            "current": self.state.view().session.current().map(|t|track_view(&t.into())),
             "position": if position.is_finite() { position.max(0.) } else { 0. },
-            "paused": self.paused, "loading": self.loading,
-            "shuffle": self.state.shuffle,
-            "repeat": match self.state.repeat { RepeatMode::Off => "off", RepeatMode::All => "all", RepeatMode::One => "one" },
-            "opened_chat": self.opened_chat, "queue_length": self.state.session.remaining.len(),
+            "paused": self.state.playback().state().paused(), "loading": self.state.playback().state().loading(),
+            "shuffle": self.state.view().shuffle,
+            "repeat": match self.state.view().repeat { RepeatMode::Off => "off", RepeatMode::All => "all", RepeatMode::One => "one" },
+            "opened_chat": self.opened_chat, "queue_length": self.state.view().session.remaining().len(),
             "error": label(&self.error),
         })
     }
     fn control_playlist(&self) -> Result<usize, String> {
         self.opened_chat
-            .and_then(|id| self.state.playlists.iter().position(|p| p.id == id))
+            .and_then(|id| self.state.view().playlists.iter().position(|p| p.id == id))
             .ok_or_else(|| {
                 "No playlist is open; use --ctl playlists and --ctl open <chat-id>".into()
             })
@@ -119,7 +119,7 @@ impl App {
         }
         let command = match request {
             Request::Status => return Ok(self.control_status()),
-            Request::Playlists { offset } => return page(self.state.playlists.iter().map(|p| json!({"chat_id": p.id, "title": label(&p.title), "loaded_tracks": p.tracks.len()})), offset),
+            Request::Playlists { offset } => return page(self.state.view().playlists.iter().map(|p| json!({"chat_id": p.id, "title": label(&p.title), "loaded_tracks": p.tracks.len()})), offset),
             Request::Playlist { offset } => {
                 let index = self.control_playlist()?;
                 let tracks = self.playlist_tracks(index);
@@ -129,13 +129,13 @@ impl App {
                     view
                 }), offset);
             }
-            Request::Queue { offset } => return page(self.state.session.remaining.iter().enumerate().map(|(i, t)| {
-                let mut view = track_view(t);
+            Request::Queue { offset } => return page(self.state.view().session.remaining().iter().enumerate().map(|(i, t)| {
+                let mut view = track_view(&t.into());
                 view["row"] = json!(i + 1);
                 view
             }), offset),
             Request::Open { chat_id } => {
-                if !self.state.playlists.iter().any(|p| p.id == chat_id) {
+                if !self.state.view().playlists.iter().any(|p| p.id == chat_id) {
                     return Err("Unknown playlist chat ID".into());
                 }
                 AppCommand::OpenPlaylist(chat_id)
@@ -148,7 +148,7 @@ impl App {
                 AppCommand::SelectPlaylistRow(row - 1)
             }
             Request::QueuePlay { entry_id } => {
-                if !self.state.session.remaining.iter().any(|t| t.entry_id == entry_id) {
+                if !self.state.view().session.remaining().iter().any(|t| t.entry_id == entry_id) {
                     return Err("Unknown upcoming queue entry ID; read --ctl queue again".into());
                 }
                 AppCommand::PlayQueue(entry_id)
@@ -161,7 +161,7 @@ impl App {
                 if !seconds.is_finite() || seconds < 0. {
                     return Err("Seek position must be a finite, nonnegative number of seconds".into());
                 }
-                if self.loading {
+                if self.state.playback().state().loading() {
                     return Err("Track is still loading".into());
                 }
                 AppCommand::Seek(seconds)

@@ -1,8 +1,9 @@
 pub mod adapters;
 pub mod application;
-pub mod domain;
-use adapters::{audio, discovery, media_loader, storage, streaming, telegram};
-use domain::{model, playback};
+use adapters::{discovery, media_loader, streaming, telegram};
+use tg_player_application::model;
+pub use tg_player_domain as domain;
+use tg_player_domain::playback;
 #[cfg(test)]
 mod artwork_tests;
 mod auth;
@@ -13,9 +14,12 @@ mod screens;
 mod ui;
 use i18n::tr;
 mod demo;
-use application::controller::{App, Event, RetryAction};
-use model::{Playlist, State, Track};
+pub mod launch;
+use application::controller::{DesktopApp as App, Event, RetryAction};
+use model::{Playlist, State};
+mod presentation;
 use playback::RepeatMode;
+use presentation::Track;
 
 pub use adapters::control::run_cli;
 pub use bootstrap::run;

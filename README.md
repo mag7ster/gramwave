@@ -99,8 +99,16 @@ cargo run -- --demo --preview-auth=error
   Play starts the saved track from the beginning. Legacy queues are imported once
   in their visible order after legacy repair; the original state is backed up in
   SQLite. Queue changes never edit Telegram messages.
-- The download button saves a separate offline copy; saving a playlist also
-  enables saving new matching tracks. Offline copies survive cache cleanup.
+- The download button saves a separate offline copy. Saving a playlist searches
+  every page of the enabled Music/Audio files/Voice filters, including tracks
+  that are not displayed yet. Screen search and sorting do not limit saving.
+  Scans and download jobs resume after restart; at most two files download at once.
+  Reconnect checks for new tracks while retaining the saved history cursor.
+  New matching messages are saved while the playlist policy remains enabled.
+- Offline copies survive cache cleanup and deletion of their source messages.
+  Removing a copy excludes that track from automatic saving until you explicitly
+  save it or save the playlist again. Cancelling offline downloads preserves
+  ready files and disables the affected automatic policies.
 - Public chat links and available message links open in Telegram. Some private
   chats have no shareable link; the player never generates invitations.
 - MPRIS and media keys use fastframe; close-to-tray is enabled only when a tray
@@ -117,13 +125,15 @@ Keep it private: it contains account credentials and cached media.
 ## Development
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo test --no-default-features
+cargo fmt --all --check
+cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo clippy --workspace --locked --all-targets --no-default-features -- -D warnings
+cargo test --workspace --locked
+cargo test --workspace --locked --no-default-features
 # Explicit native suite: requires libmpv2, TDLib and loopback sockets
-cargo test --features native-tests --lib -- --test-threads=1
-cargo build --release
+cargo test --workspace --locked --features native-tests --lib -- --test-threads=1
+cargo build --workspace --locked --release
+cargo build --workspace --locked --release --no-default-features
 scripts/package.sh
 ```
 
@@ -165,10 +175,12 @@ The local bundle keeps TDLib in `lib/`; mpv and its C++ dependencies remain syst
 dependencies.
 
 The library entry is `src/lib.rs`; `src/main.rs` only launches it. Domain types
-and queue rules live in `src/domain`, application commands and workers in
-`src/application`, and SQLite, TDLib, mpv, offline files and HTTP in `src/adapters`.
+and queue rules live in `crates/domain`; `crates/application` contains `AppCore`,
+commands, ports, persistence deltas and the Tokio scheduler. The desktop controller
+and views live in `src/application`, `src/ui.rs` and `src/screens.rs`; SQLite,
+TDLib, mpv, offline files and HTTP live in `src/adapters`.
 `src/bootstrap.rs` assembles the desktop lifecycle. See [architecture and migration
-notes](ARCHITECTURE.md) for implemented boundaries and remaining work.
+notes](ARCHITECTURE.md) for boundaries and verification requirements.
 For an offline build using an already installed TDLib 1.8.61, set
 `TG_PLAYER_TDLIB_DIR` to the directory containing `lib/libtdjson.so.1.8.61`.
 
@@ -259,3 +271,31 @@ Escape to stop. Holding the middle button, moving and releasing also works. Prev
 queue positions, including skipped entries, then preceding rows from the original
 unshuffled playlist snapshot when playback began in the middle. Chat search combines cached matches with TDLib
 account search after a short typing pause; it does not load message history.
+
+## Database upgrade and native bindings
+
+Upgrading an existing database first creates a verified SQLite Backup API copy
+beside it. Pre-v3 imports use `library.sqlite.pre-v3-N.sqlite`; upgrading schema v3
+uses `library.sqlite.pre-v4-N.sqlite`. Committed WAL data is included and previous
+backups are never overwritten. Backup or migration failure reports an error and
+leaves the previous schema/data intact. Original state rows and legacy documents
+remain available. Schema v4 preserves v3's occurrence IDs and normalized sessions,
+and stores offline policy/exclusion changes by key. Jobs, scan progress and files
+survive the upgrade; ordinary saves do not change the schema version.
+
+Older binaries cannot read schema v4. To roll back, close the player, preserve the
+v4 database and its WAL/SHM files together, and restore the appropriate pre-upgrade
+backup under the original name without stale WAL/SHM files beside it. Account and
+media files remain in the same application data directory.
+
+Normal builds do not require libclang or link libmpv at build time. The checked-in
+mpv ABI comes from `vendor/mpv/client.h` (mpv v0.40.0, ISC licensed). To regenerate
+it deliberately, install libclang and run:
+
+```sh
+cargo run --locked --manifest-path tools/mpv-bindings/Cargo.toml
+cargo fmt --all
+```
+
+The generator is a separate developer tool and is not part of normal workspace
+builds. See `ARCHITECTURE.md` for the complete check matrix.

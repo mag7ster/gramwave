@@ -1,6 +1,8 @@
+mod services;
 use crate::{demo, App};
 use eframe::egui;
 use fastframe_shell::{Closed, Headless, Held, Resident, Shell, Waker};
+pub(crate) use services::{connect, Services};
 struct Window {
     app: Held<App>,
 }
@@ -39,6 +41,7 @@ impl Resident for App {
     fn shutdown(&mut self) {
         if let Err(error) = self.shutdown_core() {
             eprintln!("shutdown: {error}");
+            *self.shutdown_error.lock().unwrap() = Some(error.clone());
             self.error = error;
         }
     }
@@ -48,7 +51,7 @@ pub fn run() -> eframe::Result {
     let show = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = show.clone();
     let wake = waker.clone();
-    let slot = crate::adapters::control::slot(std::env::args().any(|s| s == "--demo"));
+    let slot = crate::adapters::control::slot(crate::launch::options().demo);
     let (control_tx, control_rx) = std::sync::mpsc::sync_channel(8);
     let _guard = match slot.claim("show", move |request| {
         if request == "show" {
@@ -62,13 +65,18 @@ pub fn run() -> eframe::Result {
         fastframe_instance::Claim::First(g) => g,
         _ => return Ok(()),
     };
-    let mut app = App::new();
+    let mut app =
+        App::new().map_err(|e| eframe::Error::AppCreation(Box::new(std::io::Error::other(e))))?;
     demo::configure(&mut app);
     app.show_requested = show;
     app.control = Some(control_rx);
-    if !app.demo && app.state.api_id.parse::<i32>().is_ok() && app.state.api_hash.len() == 32 {
+    if !app.demo
+        && app.state.view().api_id.parse::<i32>().is_ok()
+        && app.state.view().api_hash.len() == 32
+    {
         app.connect();
     }
+    let shutdown_error = app.shutdown_error.clone();
     Shell::new(app, &waker)
         .idle(fastframe_tray::idle)
         .run(|lease| {
@@ -76,12 +84,12 @@ pub fn run() -> eframe::Result {
                 "TG Player",
                 eframe::NativeOptions {
                     viewport: egui::ViewportBuilder::default()
-                        .with_inner_size(demo::window_size())
+                        .with_inner_size(crate::launch::options().window_size())
                         .with_min_inner_size([850., 550.]),
                     ..Default::default()
                 },
                 Box::new(move |cc| {
-                    if let Some(scale) = demo::scale() {
+                    if let Some(scale) = crate::launch::options().scale() {
                         cc.egui_ctx.set_zoom_factor(scale);
                     }
                     cc.egui_ctx
@@ -93,5 +101,11 @@ pub fn run() -> eframe::Result {
                     }))
                 }),
             )
-        })
+        })?;
+    if let Some(error) = shutdown_error.lock().unwrap().take() {
+        return Err(eframe::Error::AppCreation(Box::new(std::io::Error::other(
+            error,
+        ))));
+    }
+    Ok(())
 }

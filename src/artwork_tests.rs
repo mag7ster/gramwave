@@ -13,8 +13,8 @@ fn jpeg_png_webp_decode_through_real_egui_loader() {
         (image::ImageFormat::Png, "png"),
         (image::ImageFormat::WebP, "webp"),
     ] {
-        let dir = std::env::temp_dir().join(format!("tg-player-images-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         let path = dir.join(format!("avatar # музыка {name}"));
         let mut bytes = std::io::Cursor::new(Vec::new());
         image.write_to(&mut bytes, format).unwrap();
@@ -35,6 +35,5 @@ fn jpeg_png_webp_decode_through_real_egui_loader() {
         assert!(ready, "{name} never decoded");
         ctx.forget_image(&uri);
         std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir(dir).unwrap();
     }
 }

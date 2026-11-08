@@ -5,6 +5,6 @@ pub mod media_loader;
 pub(crate) mod offline;
 pub mod storage;
 pub mod streaming;
-mod system;
+pub(crate) mod system;
 pub mod telegram;
-pub mod telegram_mapping;
+pub(crate) mod telegram_mapping;

@@ -1,0 +1,16 @@
+[package]
+name = "tg-player-application"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+tg-player-domain = { path = "../domain" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+indexmap = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+serde_json = "1"

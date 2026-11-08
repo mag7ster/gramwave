@@ -1,5 +1,5 @@
 use crate::application::commands::AppCommand;
-use crate::{design, playback, tr, App, RepeatMode};
+use crate::{design, tr, App, RepeatMode};
 use design::{button, Icon};
 use eframe::egui;
 use std::time::Duration;
@@ -8,21 +8,23 @@ impl App {
         let ctx = root.ctx().clone();
         self.image_wanted.clear();
         self.track_wanted.clear();
-        design::style(&ctx, self.state.light);
+        design::style(&ctx, self.state.view().light);
         self.poll_chat_search(&ctx);
         if !self.settings_open
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {
-            self.execute(AppCommand::Pause(!self.paused));
+            self.execute(AppCommand::Pause(!self.state.playback().state().paused()));
         }
 
         if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Q)) {
             self.quitting = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if std::env::args().any(|a| a.starts_with("--preview-auth="))
-            || (!self.demo && self.auth["@type"] != "authorizationStateReady")
+        if self.options.preview_auth.is_some()
+            || (!self.demo
+                && *self.state.auth().state()
+                    != tg_player_application::telegram::AuthorizationState::Ready)
         {
             egui::CentralPanel::default().show(root, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -39,7 +41,7 @@ impl App {
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
                                 egui::Frame::new()
-                                    .fill(design::palette(self.state.light).panel)
+                                    .fill(design::palette(self.state.view().light).panel)
                                     .corner_radius(16)
                                     .inner_margin(28.)
                                     .show(ui, |ui| {
@@ -67,8 +69,8 @@ impl App {
                                 .hint_text(tr("Find a chat")),
                         );
                         let mut open = None;
-                        for i in self.state.sidebar_chats(true, &self.chat_query) {
-                            if ui.button(&self.state.playlists[i].title).clicked() {
+                        for i in self.state.view().sidebar_chats(true, &self.chat_query) {
+                            if ui.button(&self.state.view().playlists[i].title).clicked() {
                                 open = Some(i);
                             }
                         }
@@ -97,7 +99,7 @@ impl App {
                 })
                 .frame(
                     egui::Frame::new()
-                        .fill(design::palette(self.state.light).panel)
+                        .fill(design::palette(self.state.view().light).panel)
                         .inner_margin(16.),
                 )
                 .show(root, |ui| {
@@ -139,20 +141,31 @@ impl App {
                     });
                     let mut indices = self
                         .state
+                        .view()
                         .sidebar_chats(self.chat_search_active, &self.chat_query);
                     if self.chat_search_active {
-                        for (i, p) in self.state.playlists.iter().enumerate() {
-                            if self.chat_search.ids.contains(&p.id) && !indices.contains(&i) {
+                        for (i, p) in self.state.view().playlists.iter().enumerate() {
+                            if self.state.library().search().ids.contains(&p.id)
+                                && !indices.contains(&i)
+                            {
                                 indices.push(i);
                             }
                         }
-                        if self.chat_search.loading {
+                        if self.state.library().search().loading() {
                             ui.weak(tr("Searching chats…"));
                         }
-                        if !self.chat_search.error.is_empty() {
-                            ui.label(&self.chat_search.error);
+                        if self.state.library().search().error.is_some() {
+                            ui.label(
+                                self.state
+                                    .library()
+                                    .search()
+                                    .error
+                                    .as_ref()
+                                    .map(ToString::to_string)
+                                    .unwrap_or_default(),
+                            );
                             if ui.button(tr("Retry search")).clicked() {
-                                self.chat_search.sent = false;
+                                self.retry_chat_search();
                             }
                         }
                     }
@@ -170,12 +183,12 @@ impl App {
                             .id_salt("chat-list")
                             .show(ui, |ui| {
                                 for i in indices {
-                                    let p = &self.state.playlists[i];
+                                    let p = &self.state.view().playlists[i];
                                     let id = p.id;
-                                    let pinned = self.state.chat_pins.contains(&id);
+                                    let pinned = self.state.view().chat_pins.contains(&id);
                                     let frame = egui::Frame::new()
                                         .fill(if self.opened_chat == Some(id) {
-                                            design::palette(self.state.light).selected
+                                            design::palette(self.state.view().light).selected
                                         } else {
                                             egui::Color32::TRANSPARENT
                                         })
@@ -184,7 +197,16 @@ impl App {
                                         .show(ui, |ui| {
                                             ui.set_min_width(ui.available_width());
                                             ui.horizontal(|ui| {
-                                                art(ui, &p.title, p.image_path.as_deref(), 40.);
+                                                art(
+                                                    ui,
+                                                    &p.title,
+                                                    self.state
+                                                        .library()
+                                                        .playlist_artwork(p.id)
+                                                        .path
+                                                        .as_deref(),
+                                                    40.,
+                                                );
                                                 ui.add(
                                                     egui::Label::new(
                                                         egui::RichText::new(&p.title).strong(),
@@ -208,7 +230,8 @@ impl App {
                                         );
                                     }
                                     if ui.is_rect_visible(response.rect) {
-                                        self.image_wanted.push(p.image_file);
+                                        self.image_wanted
+                                            .push(self.state.library().playlist_artwork(p.id).file);
                                     }
                                     if response.clicked() {
                                         open = Some(i);
@@ -267,7 +290,7 @@ impl App {
                     .default_size(290.)
                     .frame(
                         egui::Frame::new()
-                            .fill(design::palette(self.state.light).panel)
+                            .fill(design::palette(self.state.view().light).panel)
                             .inner_margin(20.),
                     )
                     .show(root, |ui| self.queue_screen(ui));
@@ -276,7 +299,7 @@ impl App {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(design::palette(self.state.light).background)
+                    .fill(design::palette(self.state.view().light).background)
                     .inner_margin(24.),
             )
             .show(root, |ui| {
@@ -305,7 +328,7 @@ impl App {
                 .order(egui::Order::Foreground)
                 .show(&ctx, |ui| {
                     egui::Frame::new()
-                        .fill(design::palette(self.state.light).raised)
+                        .fill(design::palette(self.state.view().light).raised)
                         .corner_radius(8)
                         .inner_margin(14.)
                         .show(ui, |ui| {
@@ -331,7 +354,7 @@ impl App {
                             ui.ctx().copy_text(self.error.clone());
                         }
                         if self.error_retry.is_some() && ui.button(tr("Retry")).clicked() {
-                            self.retry_error();
+                            self.execute(AppCommand::Retry);
                         }
                         if ui.button(tr("Dismiss")).clicked() {
                             self.error.clear();
@@ -341,7 +364,13 @@ impl App {
         }
     }
     fn transport(&mut self, ui: &mut egui::Ui) {
-        if let Some(t) = &self.state.session.current {
+        if let Some(t) = self
+            .state
+            .view()
+            .session
+            .current()
+            .map(|t| self.media_track(t.into()))
+        {
             self.image_wanted.push(t.image_file);
         }
         ui.spacing_mut().item_spacing.y = 4.;
@@ -367,7 +396,13 @@ impl App {
                 ui.allocate_ui(egui::vec2(metadata_width, 72.), |ui| {
                     ui.set_min_width(metadata_width);
                     ui.horizontal(|ui| {
-                        let t = self.state.session.current.as_ref();
+                        let current = self
+                            .state
+                            .view()
+                            .session
+                            .current()
+                            .map(|t| self.media_track(t.into()));
+                        let t = current.as_ref();
                         art(
                             ui,
                             t.map(|t| t.title.as_str()).unwrap_or("TG"),
@@ -392,7 +427,7 @@ impl App {
                                         .truncate(),
                                 )
                                 .on_hover_text(artist);
-                                if self.loading {
+                                if self.state.playback().state().loading() {
                                     ui.small(tr("Loading track…"));
                                 }
                             });
@@ -405,32 +440,42 @@ impl App {
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {
                         ui.add_space((center_width - 212.).max(0.) / 2.);
-                        let shuffle_hint = if self.state.shuffle {
+                        let shuffle_hint = if self.state.view().shuffle {
                             tr("Shuffle on · Turn off")
                         } else {
                             tr("Shuffle off · Turn on")
                         };
-                        if design::toggle(ui, Icon::Shuffle, self.state.shuffle, "", shuffle_hint) {
-                            self.execute(AppCommand::Shuffle(!self.state.shuffle));
+                        if design::toggle(
+                            ui,
+                            Icon::Shuffle,
+                            self.state.view().shuffle,
+                            "",
+                            shuffle_hint,
+                        ) {
+                            self.execute(AppCommand::Shuffle(!self.state.view().shuffle));
                         }
                         if button(ui, Icon::Previous, "Previous") {
                             self.execute(AppCommand::Previous);
                         }
                         if button(
                             ui,
-                            if self.paused || self.state.session.current.is_none() {
+                            if self.state.playback().state().paused()
+                                || self.state.view().session.current().is_none()
+                            {
                                 Icon::Play
                             } else {
                                 Icon::Pause
                             },
                             "Play / pause",
                         ) {
-                            self.execute(AppCommand::Pause(!self.paused));
+                            self.execute(AppCommand::Pause(
+                                !self.state.playback().state().paused(),
+                            ));
                         }
                         if button(ui, Icon::Next, "Next") {
                             self.execute(AppCommand::Next);
                         }
-                        let hint = match self.state.repeat {
+                        let hint = match self.state.view().repeat {
                             RepeatMode::Off => tr("Repeat off · Repeat all"),
                             RepeatMode::All => tr("Repeat all · Repeat one"),
                             RepeatMode::One => tr("Repeat one · Turn off"),
@@ -438,41 +483,42 @@ impl App {
                         if design::toggle(
                             ui,
                             Icon::Repeat,
-                            self.state.repeat != RepeatMode::Off,
-                            if self.state.repeat == RepeatMode::One {
+                            self.state.view().repeat != RepeatMode::Off,
+                            if self.state.view().repeat == RepeatMode::One {
                                 "1"
                             } else {
                                 ""
                             },
                             hint,
                         ) {
-                            self.execute(AppCommand::Repeat(self.state.repeat.next()));
+                            self.execute(AppCommand::Repeat(self.state.view().repeat.next()));
                         }
                     });
-                    let duration = if self.loading {
+                    let duration = if self.state.playback().state().loading() {
                         0.
                     } else {
                         self.player
                             .as_ref()
-                            .map(|p| p.number("duration"))
+                            .map(|p| p.snapshot().duration)
                             .unwrap_or(0.)
                     };
                     let duration = if self.demo {
                         self.state
+                            .view()
                             .session
-                            .current
+                            .current()
                             .as_ref()
                             .map(|t| t.duration as f64)
                             .unwrap_or(0.)
                     } else {
                         duration
                     };
-                    let pos = if self.loading {
+                    let pos = if self.state.playback().state().loading() {
                         0.
                     } else {
                         self.player
                             .as_ref()
-                            .map(|p| p.number("time-pos"))
+                            .map(|p| p.snapshot().position)
                             .unwrap_or(0.)
                     };
                     let mut preview = self.seek_preview.unwrap_or(pos);
@@ -483,11 +529,11 @@ impl App {
                         );
                         let enabled = duration.is_finite()
                             && duration > 0.
-                            && self.state.session.current.is_some()
-                            && !self.loading;
+                            && self.state.view().session.current().is_some()
+                            && !self.state.playback().state().loading();
                         let response = ui
                             .add_enabled_ui(enabled, |ui| {
-                                ui.push_id(("seek", self.playback_generation), |ui| {
+                                ui.push_id(("seek", self.state.playback().generation()), |ui| {
                                     design::slider(
                                         ui,
                                         &mut preview,
@@ -541,12 +587,12 @@ impl App {
                     }
                     if design::labelled_button(
                         ui,
-                        if self.state.volume == 0. {
+                        if self.state.view().volume == 0. {
                             Icon::Muted
                         } else {
                             Icon::Volume
                         },
-                        if self.state.volume == 0. {
+                        if self.state.view().volume == 0. {
                             tr("Unmute")
                         } else {
                             tr("Mute")
@@ -554,7 +600,7 @@ impl App {
                     ) {
                         self.toggle_mute();
                     }
-                    let mut volume = self.state.volume as f64;
+                    let mut volume = self.state.view().volume as f64;
                     if !compact
                         && design::slider(
                             ui,
@@ -582,26 +628,28 @@ impl App {
 
         let Some(selected) = self
             .state
+            .view()
             .playlists
             .iter()
             .position(|p| Some(p.id) == self.opened_chat.or(self.demo.then_some(0)))
         else {
             return;
         };
-        let Some(p) = self.state.playlists.get(selected) else {
+        let Some(p) = self.state.view().playlists.get(selected) else {
             ui.add_space(80.);
             ui.heading(tr("Your next favourite is waiting."));
             ui.weak(&self.status);
             return;
         };
         let chat_id = p.id;
-        self.image_wanted.push(p.image_file);
+        self.image_wanted
+            .push(self.state.library().playlist_artwork(p.id).file);
         let title = p.title.clone();
-        let artwork = p.image_path.clone();
+        let artwork = self.state.library().playlist_artwork(p.id).path;
         let url = p.url.clone();
 
         egui::Frame::new()
-            .fill(design::palette(self.state.light).panel)
+            .fill(design::palette(self.state.view().light).panel)
             .corner_radius(12)
             .inner_margin(16.)
             .show(ui, |ui| {
@@ -641,20 +689,20 @@ impl App {
             play_all = ui
                 .add(
                     egui::Button::image(Icon::Play.image(
-                        if self.state.light {
+                        if self.state.view().light {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::BLACK
                         },
                         22.,
                     ))
-                    .fill(design::palette(self.state.light).accent)
+                    .fill(design::palette(self.state.view().light).accent)
                     .corner_radius(30)
                     .min_size(egui::vec2(44., 44.)),
                 )
                 .clicked();
             if ui
-                .button(if self.state.chat_pins.contains(&chat_id) {
+                .button(if self.state.view().chat_pins.contains(&chat_id) {
                     tr("Unpin chat")
                 } else {
                     tr("Pin chat")
@@ -692,7 +740,8 @@ impl App {
         if toggle_pin {
             self.toggle_chat_pin(chat_id);
         }
-        let before_filters = self.state.playlists[selected].filters;
+        let before_filters = self.state.view().playlists[selected].filters;
+        let mut filters = before_filters;
         ui.horizontal_wrapped(|ui| {
             ui.add(Icon::Search.image(egui::Color32::GRAY, 18.));
             ui.add(
@@ -700,31 +749,35 @@ impl App {
                     .hint_text(tr("Search this playlist"))
                     .desired_width(200.),
             );
-            let p = &mut self.state.playlists[selected];
+
             for (i, label) in [tr("Music"), tr("Audio files"), tr("Voice messages")]
                 .iter()
                 .enumerate()
             {
-                ui.toggle_value(&mut p.filters[i], label.as_str());
+                ui.toggle_value(&mut filters[i], label.as_str());
             }
         });
         ui.add_space(12.);
-        if before_filters != self.state.playlists[selected].filters {
+        if before_filters != filters {
+            self.execute(AppCommand::Filters(chat_id, filters));
             self.open_chat(selected);
         }
         let tracks = self.playlist_tracks(selected);
         if play_all {
-            self.start_session(&tracks, 0);
+            self.execute(AppCommand::StartSession(
+                tracks.iter().map(|t| t.metadata()).collect(),
+                0,
+            ));
         }
         if pin_all {
-            self.state.playlists[selected].pinned = true;
-            for t in &tracks {
-                self.pin(t.clone());
-            }
+            self.execute(AppCommand::SavePlaylist(
+                chat_id,
+                self.state.view().playlists[selected].filters,
+            ));
         }
         // This reserved status line avoids shifting the list as loading starts/ends.
         ui.allocate_ui(egui::vec2(ui.available_width(), 24.), |ui| {
-            if self.indexing_chat == Some(chat_id) {
+            if self.state.library().indexing_chat() == Some(chat_id) {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.small(tr("Loading music from this chat…"));
@@ -734,11 +787,15 @@ impl App {
         if tracks.is_empty() {
             ui.add_space(24.);
             ui.heading(
-                if !self.state.playlists[selected].filters.iter().any(|v| *v) {
+                if !self.state.view().playlists[selected]
+                    .filters
+                    .iter()
+                    .any(|v| *v)
+                {
                     tr("All filters are off")
                 } else if !self.search.is_empty() {
                     tr("No matching tracks")
-                } else if self.indexing_chat.is_some() {
+                } else if self.state.library().indexing_chat().is_some() {
                     tr("Loading music…")
                 } else {
                     tr("No music in this chat yet")
@@ -760,10 +817,11 @@ impl App {
                     }
                     let active = self
                         .state
+                        .view()
                         .session
-                        .current
+                        .current()
                         .as_ref()
-                        .is_some_and(|c| playback::same(c, t));
+                        .is_some_and(|c| c.id() == t.id());
                     let (rect, _) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), design::ROW_HEIGHT),
                         egui::Sense::hover(),
@@ -816,9 +874,9 @@ impl App {
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         |ui| {
                             let indicator = if active {
-                                Some(if self.loading {
+                                Some(if self.state.playback().state().loading() {
                                     "…"
-                                } else if self.paused {
+                                } else if self.state.playback().state().paused() {
                                     "Ⅱ"
                                 } else {
                                     "▶"
@@ -838,9 +896,20 @@ impl App {
                             art(ui, &t.title, t.image_path.as_deref(), 44.);
                             let offline = if t.pinned.is_some() {
                                 Some(("✓", tr("Saved offline")))
-                            } else if self.state.pending_pins.iter().any(|p| playback::same(p, t)) {
+                            } else if self
+                                .state
+                                .offline()
+                                .pending
+                                .values()
+                                .any(|p| p.id() == t.id())
+                            {
                                 Some(("↓", tr("Downloading…")))
-                            } else if self.pin_errors.contains_key(&(t.chat, t.message)) {
+                            } else if self
+                                .state
+                                .offline()
+                                .errors()
+                                .contains_key(&(t.chat, t.message))
+                            {
                                 Some(("!", tr("Download failed · Save offline to retry")))
                             } else {
                                 None
@@ -908,16 +977,17 @@ impl App {
                                         ui.label(tr("Saved offline"));
                                     } else if self
                                         .state
-                                        .pending_pins
-                                        .iter()
-                                        .any(|p| playback::same(p, t))
+                                        .offline()
+                                        .pending
+                                        .values()
+                                        .any(|p| p.id() == t.id())
                                     {
                                         ui.label(tr("Downloading…"));
                                     } else if let Some(error) =
-                                        self.pin_errors.get(&(t.chat, t.message))
+                                        self.state.offline().errors().get(&(t.chat, t.message))
                                     {
                                         ui.label(tr("Download failed · Save offline to retry"));
-                                        ui.label(error);
+                                        ui.label(error.to_string());
                                     }
                                 };
                                 let menu = ui.menu_button("…", &mut contents);
@@ -947,8 +1017,8 @@ impl App {
                 }
             });
         design::middle_scroll(ui, scroll.id, scroll.inner_rect, scroll.content_size.y);
-        let more = self.state.playlists[selected].has_more();
-        if more && self.indexing_chat.is_none() && !self.demo {
+        let more = self.state.view().playlists[selected].has_more();
+        if more && self.state.library().indexing_chat().is_none() && !self.demo {
             let at_bottom = scroll.state.offset.y > 0.
                 && scroll.state.offset.y + scroll.inner_rect.height()
                     >= scroll.content_size.y - 120.;
@@ -958,12 +1028,15 @@ impl App {
         }
         if let Some((kind, i)) = action {
             match kind {
-                0 => self.choose_session(&tracks, i),
+                0 => self.execute(AppCommand::StartSession(
+                    tracks.iter().map(|t| t.metadata()).collect(),
+                    i,
+                )),
                 6 => self.execute(AppCommand::SelectPlaylistRow(i)),
                 5 => ui.ctx().copy_text(tracks[i].title.clone()),
-                1 => self.state.session.insert(tracks[i].clone(), true),
-                2 => self.state.session.insert(tracks[i].clone(), false),
-                3 => self.pin(tracks[i].clone()),
+                1 => self.execute(AppCommand::Insert(tracks[i].metadata(), true)),
+                2 => self.execute(AppCommand::Insert(tracks[i].metadata(), false)),
+                3 => self.execute(AppCommand::SaveTrack(tracks[i].metadata())),
                 _ => self.link(&tracks[i]),
             }
             self.persist();
@@ -1023,7 +1096,7 @@ fn cover(ui: &mut egui::Ui, title: &str, size: f32) {
 }
 
 fn art(ui: &mut egui::Ui, title: &str, path: Option<&str>, size: f32) {
-    if let Some(path) = path.filter(|p| std::path::Path::new(p).is_file()) {
+    if let Some(path) = path {
         let image = egui::Image::new(format!("file://{path}"))
             .fit_to_exact_size(egui::vec2(size, size))
             .corner_radius(6);
@@ -1046,21 +1119,20 @@ impl App {
                 self.queue_open = false;
             }
         });
-        ui.weak(if self.state.shuffle {
+        ui.weak(if self.state.view().shuffle {
             tr("Shuffled order")
         } else {
             tr("Playlist order")
         });
         ui.small(tr("Playback uses the tracks loaded when you started."));
         if ui.button(tr("Clear queue")).clicked() {
-            self.state.session.clear();
-            self.state.repeat = RepeatMode::Off;
+            self.execute(AppCommand::Clear);
             self.persist();
         }
-        if let Some(t) = &self.state.session.current {
+        if let Some(t) = &self.state.view().session.current() {
             ui.label(format!("{}: {}", tr("Now playing"), t.title));
         }
-        if self.state.session.remaining.is_empty() {
+        if self.state.view().session.remaining().is_empty() {
             ui.label(tr("Your queue is empty"));
         }
         let mut play = None;
@@ -1071,7 +1143,7 @@ impl App {
         let queue_scroll = egui::ScrollArea::vertical()
             .id_salt("queue-list")
             .show(ui, |ui| {
-                for (i, t) in self.state.session.remaining.iter().enumerate() {
+                for (i, t) in self.state.view().session.remaining().iter().enumerate() {
                     let context = ui.interact(
                         egui::Rect::from_min_size(
                             ui.cursor().min,
@@ -1112,7 +1184,7 @@ impl App {
                                 up = Some(i);
                                 ui.close();
                             }
-                            if i + 1 < self.state.session.remaining.len()
+                            if i + 1 < self.state.view().session.remaining().len()
                                 && ui.button(tr("Move down")).clicked()
                             {
                                 down = Some(i);
@@ -1138,22 +1210,22 @@ impl App {
             queue_scroll.content_size.y,
         );
         if let Some((from, to)) = moved {
-            self.state.session.move_before(from, to);
+            self.execute(AppCommand::Move(from, to));
             self.persist();
         }
         if let Some(id) = play {
             self.execute(AppCommand::PlayQueue(id));
         }
         if let Some(i) = remove {
-            self.state.session.remove(i);
+            self.execute(AppCommand::Remove(i));
             self.persist();
         }
         if let Some(i) = up {
-            self.state.session.move_before(i, i - 1);
+            self.execute(AppCommand::Move(i, i - 1));
             self.persist();
         }
         if let Some(i) = down {
-            self.state.session.move_before(i, i + 2);
+            self.execute(AppCommand::Move(i, i + 2));
             self.persist();
         }
     }

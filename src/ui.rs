@@ -1,7 +1,6 @@
 use crate::application::commands::AppCommand;
-use crate::{audio, demo, design, media_loader, tr, App, Event, RepeatMode, RetryAction};
+use crate::{design, tr, App, Event, RepeatMode};
 use eframe::egui;
-use serde_json::json;
 use std::time::Duration;
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
@@ -16,10 +15,12 @@ impl App {
         if !self.settings_open {
             return;
         }
-        let p = design::palette(self.state.light);
+        let p = design::palette(self.state.view().light);
         let width = (ctx.content_rect().width() - 80.).clamp(280., 520.);
         let mut close = false;
         let mut changed = false;
+        let mut light = self.state.view().light;
+        let mut filters = self.state.view().filters;
         let mut remove = None;
         let response = egui::Modal::new(egui::Id::new("player-settings"))
             .frame(
@@ -48,12 +49,12 @@ impl App {
                         design::settings_section(ui, tr("Appearance"), |ui| {
                             ui.weak(tr("Choose the player’s color scheme."));
                             ui.horizontal(|ui| {
-                                if design::choice(ui, tr("Dark"), !self.state.light) {
-                                    self.state.light = false;
+                                if design::choice(ui, tr("Dark"), !self.state.view().light) {
+                                    light = false;
                                     changed = true;
                                 }
-                                if design::choice(ui, tr("Light"), self.state.light) {
-                                    self.state.light = true;
+                                if design::choice(ui, tr("Light"), self.state.view().light) {
+                                    light = true;
                                     changed = true;
                                 }
                             });
@@ -61,10 +62,10 @@ impl App {
                         design::settings_section(ui, tr("Playback"), |ui| {
                             ui.label(tr("Shuffle"));
                             ui.horizontal(|ui| {
-                                if design::choice(ui, tr("Off"), !self.state.shuffle) {
+                                if design::choice(ui, tr("Off"), !self.state.view().shuffle) {
                                     self.execute(AppCommand::Shuffle(false));
                                 }
-                                if design::choice(ui, tr("On"), self.state.shuffle) {
+                                if design::choice(ui, tr("On"), self.state.view().shuffle) {
                                     self.execute(AppCommand::Shuffle(true));
                                 }
                             });
@@ -76,7 +77,7 @@ impl App {
                                     (RepeatMode::All, tr("All tracks")),
                                     (RepeatMode::One, tr("One track")),
                                 ] {
-                                    if design::choice(ui, label, self.state.repeat == mode) {
+                                    if design::choice(ui, label, self.state.view().repeat == mode) {
                                         self.execute(AppCommand::Repeat(mode));
                                     }
                                 }
@@ -89,15 +90,17 @@ impl App {
                                         .into_iter()
                                         .enumerate()
                                 {
-                                    if design::choice(ui, label, self.state.filters[i]) {
-                                        self.state.filters[i] = !self.state.filters[i];
+                                    if design::choice(ui, label, self.state.view().filters[i]) {
+                                        filters[i] = !filters[i];
                                         changed = true;
                                     }
                                 }
                             });
                             if ui.button(tr("Apply to all playlists")).clicked() {
-                                for playlist in &mut self.state.playlists {
-                                    playlist.filters = self.state.filters;
+                                let ids: Vec<_> =
+                                    self.state.view().playlists.iter().map(|p| p.id).collect();
+                                for id in ids {
+                                    self.execute(AppCommand::Filters(id, filters));
                                 }
                                 changed = true;
                             }
@@ -106,18 +109,20 @@ impl App {
                             ui.label(tr("Automatic cache · 2 GiB"));
                             ui.weak(tr("Saved offline tracks are kept separately."));
                             if ui.button(tr("Clear automatic cache")).clicked() {
-                                self.clear_automatic_cache();
+                                self.execute(AppCommand::ClearCache);
                             }
-                            if !self.state.pending_pins.is_empty() {
+                            if !self.state.offline().pending.is_empty() {
                                 ui.weak(tr("Downloading offline tracks…"));
                                 if ui.button(tr("Cancel offline downloads")).clicked() {
-                                    self.cancel_offline_downloads();
+                                    self.execute(AppCommand::CancelOffline);
                                     changed = true;
                                 }
                             }
                             let mut any = false;
-                            for t in self.state.playlists.iter().flat_map(|p| &p.tracks) {
-                                if let Some(path) = &t.pinned {
+                            for copy in self.state.offline().copies.values() {
+                                let t = &copy.track;
+                                {
+                                    let path = &copy.path;
                                     if !any {
                                         ui.add_space(8.);
                                         ui.strong(tr("Saved tracks"));
@@ -153,47 +158,37 @@ impl App {
                     });
             });
         if let Some((chat, message, path)) = remove {
-            if std::path::Path::new(&path).starts_with(self.root.join("offline")) {
-                match std::fs::remove_file(&path) {
-                    Ok(()) => {
-                        for p in &mut self.state.playlists {
-                            if p.id == chat {
-                                p.pinned = false;
-                                for t in &mut p.tracks {
-                                    if t.message == message {
-                                        t.pinned = None;
-                                    }
-                                }
-                            }
-                        }
-                        changed = true;
-                    }
-                    Err(e) => {
-                        self.error = e.to_string();
-                        self.error_retry = None;
-                    }
-                }
-            }
+            self.execute(AppCommand::RemoveOffline(
+                crate::domain::TrackId { chat, message },
+                path,
+            ));
         }
         if changed {
+            let mut settings =
+                tg_player_application::persistence::Settings::from(self.state.view());
+            settings.light = light;
+            settings.filters = filters;
+            self.execute(AppCommand::Settings(settings));
             self.persist();
         }
         if close || response.should_close() {
             self.settings_open = false;
         }
     }
-    fn clear_automatic_cache(&self) {
-        self.send(json!({"@type":"optimizeStorage","size":0,"ttl":0,"count":0,"immunity_delay":0,"file_types":[],"chat_ids":[],"exclude_chat_ids":[],"return_deleted_file_statistics":true,"chat_limit":0}));
-    }
-    pub(crate) fn cancel_offline_downloads(&mut self) {
-        self.pin_cancel
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        for t in self.state.pending_pins.iter().filter(|t| t.file > 0) {
-            self.send(
-                json!({"@type":"cancelDownloadFile","file_id":t.file,"only_if_pending":true}),
+    pub(crate) fn clear_automatic_cache(&self) {
+        if let Some(tg) = self.tg.clone() {
+            self.async_event(
+                tg_player_application::tasks::JobClass::Background,
+                0,
+                async move {
+                    match tg.clear_cache(&Default::default()).await {
+                        Ok(()) => Event::Noop,
+                        Err(e) => Event::Error(e),
+                    }
+                },
+                Event::Error,
             );
         }
-        self.state.pending_pins.clear();
     }
 }
 
@@ -201,75 +196,25 @@ impl App {
     pub fn background(&mut self, ctx: &egui::Context, window_present: bool) {
         self.process(ctx);
         self.process_control();
-        if let Some(tg) = &self.tg {
-            for t in self.track_wanted.clone() {
-                let key = (t.chat, t.message);
-                if self.track_requests.len() >= 4
-                    || self.track_requests.contains(&key)
-                    || self
-                        .track_retry
-                        .get(&key)
-                        .is_some_and(|at| *at > std::time::Instant::now())
-                {
-                    continue;
-                }
-                self.track_requests.insert(key);
-                let tg = tg.clone();
-                let tx = self.tx.clone();
-                self.spawn(move || {
-                    let _ = tx.send(Event::TrackReady(key, media_loader::resolve(&tg, &t)));
-                });
-            }
-            for id in self.image_wanted.clone() {
-                if id == 0 || self.image_requests.len() >= 4 {
-                    continue;
-                }
-                if self
-                    .artwork_path(id)
-                    .is_some_and(|path| std::path::Path::new(path).is_file())
-                {
-                    continue;
-                }
-                if self
-                    .image_retry
-                    .get(&id)
-                    .is_some_and(|at| *at > std::time::Instant::now())
-                {
-                    continue;
-                }
-                if self.image_requests.insert(id) {
-                    let tg = tg.clone();
-                    let tx = self.tx.clone();
-                    self.spawn(move || {
-                        let result = tg
-                            .call(json!({
-                                "@type": "downloadFile", "file_id": id, "priority": 1,
-                                "offset": 0, "limit": 0, "synchronous": true
-                            }))
-                            .and_then(|v| {
-                                if v["local"]["is_downloading_completed"] == true {
-                                    v["local"]["path"]
-                                        .as_str()
-                                        .filter(|p| !p.is_empty())
-                                        .map(str::to_owned)
-                                        .ok_or_else(|| "Image path missing".into())
-                                } else {
-                                    Err("Image download incomplete".into())
-                                }
-                            });
-                        let _ = tx.send(Event::Artwork(id, result));
-                    });
-                }
-            }
+        self.pump_offline();
+        let now = std::time::Instant::now();
+        for track in self.track_wanted.clone() {
+            self.library_command(
+                tg_player_application::library::LibraryCommand::RequestMedia {
+                    track: track.into(),
+                    now,
+                },
+            );
+        }
+        for id in self.image_wanted.clone() {
+            let force = self
+                .artwork_path(id)
+                .is_some_and(|path| !std::path::Path::new(path).is_file());
+            self.library_command(
+                tg_player_application::library::LibraryCommand::RequestArtwork { id, now, force },
+            );
         }
 
-        if self.auth["@type"] == "authorizationStateWaitPhoneNumber"
-            && !self.auth_pending
-            && self.qr.is_empty()
-            && self.auth_error.is_empty()
-        {
-            self.submit_auth(json!({"@type":"requestQrCodeAuthentication","other_user_ids":[]}));
-        }
         if window_present
             && self
                 .show_requested
@@ -279,7 +224,7 @@ impl App {
         }
 
         self.frames += 1;
-        if std::env::args().any(|a| a == "--smoke-test") {
+        if self.options.smoke_test {
             if self.preview_started.elapsed() > Duration::from_secs(2) && !self.preview_captured {
                 self.preview_captured = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -288,7 +233,10 @@ impl App {
                 if let egui::Event::Screenshot { image, .. } = event {
                     let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
                     let _ = image::save_buffer(
-                        demo::preview_path(),
+                        self.options
+                            .screenshot
+                            .clone()
+                            .unwrap_or_else(|| "/tmp/tg-player-preview.png".into()),
                         &bytes,
                         image.width() as u32,
                         image.height() as u32,
@@ -305,7 +253,7 @@ impl App {
             for event in tray.events() {
                 match event {
                     fastframe_tray::Event::Menu("quit") => {
-                        self.quitting = true;
+                        self.execute(AppCommand::Quit);
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     fastframe_tray::Event::Toggle
@@ -317,7 +265,7 @@ impl App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                     fastframe_tray::Event::Menu("play") => {
-                        self.execute(AppCommand::Pause(!self.paused));
+                        self.execute(AppCommand::Pause(!self.state.playback().state().paused()));
                     }
                     fastframe_tray::Event::Menu("next") => self.execute(AppCommand::Next),
                     _ => {}
@@ -348,7 +296,7 @@ impl App {
                     let paused = match command {
                         Command::Play => false,
                         Command::Pause => true,
-                        _ => !self.paused,
+                        _ => !self.state.playback().state().paused(),
                     };
                     self.execute(AppCommand::Pause(paused));
                 }
@@ -357,15 +305,16 @@ impl App {
                     let pos = self
                         .player
                         .as_ref()
-                        .map(|p| p.number("time-pos"))
+                        .map(|p| p.snapshot().position)
                         .unwrap_or(0.);
                     self.execute(AppCommand::Seek(pos + ms as f64 / 1000.));
                 }
                 Command::SetPosition { track_id, position } => {
                     if self
                         .state
+                        .view()
                         .session
-                        .current
+                        .current()
                         .as_ref()
                         .is_some_and(|t| format!("{}-{}", t.chat, t.message) == track_id)
                     {
@@ -374,20 +323,13 @@ impl App {
                 }
                 Command::SetVolume(v) => self.execute(AppCommand::Volume((v * 100.) as f32)),
                 Command::SetShuffle(v) => self.execute(AppCommand::Shuffle(v)),
-                Command::SetRepeat(v) => self.execute(AppCommand::Repeat(v.into())),
+                Command::SetRepeat(v) => self.execute(AppCommand::Repeat(
+                    crate::adapters::system::repeat_from_system(v),
+                )),
                 Command::Previous => self.execute(AppCommand::Previous),
-                Command::Stop => {
-                    self.playback_generation += 1;
-                    if let Some(p) = &self.player {
-                        p.cmd(&["stop"]);
-                    }
-                    self.state.session.current = None;
-                    self.loading = false;
-                    self.seek_preview = None;
-                    self.paused = true;
-                }
+                Command::Stop => self.execute(AppCommand::Stop),
                 Command::Quit => {
-                    self.quitting = true;
+                    self.execute(AppCommand::Quit);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 Command::Raise => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
@@ -396,30 +338,40 @@ impl App {
         }
         if let Some(media) = &mut self.media {
             media.update(MediaState {
-                playback: if self.state.session.current.is_none() {
+                playback: if self.state.view().session.current().is_none() {
                     Playback::Stopped
-                } else if self.paused || self.loading {
+                } else if self.state.playback().state().paused()
+                    || self.state.playback().state().loading()
+                {
                     Playback::Paused
                 } else {
                     Playback::Playing
                 },
-                track: self.state.session.current.as_ref().map(|t| MediaTrack {
-                    id: format!("{}-{}", t.chat, t.message),
-                    title: t.title.clone(),
-                    artists: vec![t.artist.clone()],
-                    duration: Some(Duration::from_secs(t.duration)),
-                    ..Default::default()
-                }),
+                track: self
+                    .state
+                    .view()
+                    .session
+                    .current()
+                    .as_ref()
+                    .map(|t| MediaTrack {
+                        id: format!("{}-{}", t.chat, t.message),
+                        title: t.title.clone(),
+                        artists: vec![t.artist.clone()],
+                        duration: Some(Duration::from_secs(t.duration)),
+                        ..Default::default()
+                    }),
                 position: Duration::from_secs_f64(
                     self.player
                         .as_ref()
-                        .map(|p| p.number("time-pos"))
+                        .map(|p| p.snapshot().position)
                         .unwrap_or(0.)
                         .max(0.),
                 ),
-                volume: Some(self.state.volume as f64 / 100.),
-                shuffle: Some(self.state.shuffle),
-                repeat: Some(self.state.repeat.into()),
+                volume: Some(self.state.view().volume as f64 / 100.),
+                shuffle: Some(self.state.view().shuffle),
+                repeat: Some(crate::adapters::system::repeat_to_system(
+                    self.state.view().repeat,
+                )),
                 ..Default::default()
             });
         }
@@ -427,66 +379,58 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(200));
         let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
         for event in events {
-            match event {
-                audio::PlaybackEvent::Loaded => self.loading = false,
-                audio::PlaybackEvent::Finished if self.state.session.current.is_some() => {
-                    if !self.loading {
-                        self.advance(true);
-                    }
-                }
-
-                audio::PlaybackEvent::Failed(error) => {
-                    self.error = format!("{}: {error}", tr("Unable to play track"));
-                    self.error_retry = self
-                        .state
-                        .session
-                        .current
-                        .clone()
-                        .map(RetryAction::Playback);
-                    self.loading = false;
-                    self.paused = true;
-                }
-                _ => {}
-            }
+            self.core_event(tg_player_application::workflow::AppEvent::Player(event));
         }
     }
 }
 
 impl App {
     pub fn shutdown_core(&mut self) -> Result<(), String> {
+        if self.shutdown_finished {
+            return Ok(());
+        }
+        self.shutdown_finished = true;
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let remaining = || deadline.saturating_duration_since(std::time::Instant::now());
+        self.process(&egui::Context::default());
         self.quitting = true;
-        self.playback_generation += 1;
-        self.index_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.pin_cancel
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.pin_jobs.take();
+        self.state.shutdown_operations();
+        self.state.cancel_library_operations();
         if let Some(server) = &self.server {
             server.stop();
         }
-        self.player.take();
         let mut errors = Vec::new();
-        if let Some(tg) = &self.tg {
-            if let Err(e) = tg.shutdown(Duration::from_secs(5)) {
-                errors.push(e);
+        if let Some(mut player) = self.player.take() {
+            if let Err(e) = player.shutdown(remaining()) {
+                errors.push(e.to_string());
             }
         }
-        if let Err(e) = self.workers.shutdown(Duration::from_secs(7)) {
-            errors.push(e);
+        if let Some(tg) = &self.tg {
+            if let Err(e) = tg.shutdown(remaining()) {
+                errors.push(e.to_string());
+            }
         }
         if let Some(server) = &mut self.server {
-            if let Err(e) = server.shutdown(Duration::from_secs(7)) {
-                errors.push(e);
+            if let Err(e) = server.shutdown(remaining()) {
+                errors.push(e.to_string());
             }
         }
+        if let Err(e) = self.tasks.shutdown(remaining()) {
+            errors.push(e.to_string());
+        }
+        self.updates.take();
+        while self.process(&egui::Context::default()) > 0 && std::time::Instant::now() < deadline {}
         self.persist();
         if let Some(db) = &mut self.db {
-            if let Err(e) = db.flush() {
-                errors.push(e);
+            if let Err(e) = db.flush(remaining()) {
+                errors.push(e.to_string());
             }
-            if let Err(e) = db.shutdown() {
-                errors.push(e);
+            if let Err(e) = db.shutdown(remaining()) {
+                errors.push(e.to_string());
             }
+        }
+        if std::time::Instant::now() > deadline {
+            errors.push("Shutdown timed out".into());
         }
         if errors.is_empty() {
             Ok(())

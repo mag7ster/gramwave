@@ -1,215 +1,264 @@
 use crate::telegram::Telegram;
+use axum::{
+    body::{Body, Bytes},
+    extract::{Path, State},
+    http::{header, HeaderMap, Method, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
 use serde_json::json;
 use std::{
-    io::{Read, Seek, Write},
-    net::{TcpListener, TcpStream},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    io,
+    sync::{mpsc, Arc},
     time::Duration,
 };
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
+use tokio_util::sync::CancellationToken;
+
 pub struct Server {
-    alive: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<Result<(), String>>>,
+    cancel: CancellationToken,
+    done: Option<mpsc::Receiver<Result<(), String>>>,
 }
 impl Server {
     pub fn stop(&self) {
-        self.alive.store(false, Ordering::Release);
+        self.cancel.cancel();
     }
     pub fn shutdown(&mut self, timeout: Duration) -> Result<(), String> {
         self.stop();
-        let deadline = std::time::Instant::now() + timeout;
-        if let Some(worker) = &self.worker {
-            while !worker.is_finished() {
-                if std::time::Instant::now() >= deadline {
-                    return Err("HTTP shutdown timed out".into());
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
-        if let Some(worker) = self.worker.take() {
-            worker
-                .join()
-                .map_err(|_| "HTTP worker panicked".to_owned())??;
-        }
-        Ok(())
+        let Some(done) = self.done.take() else {
+            return Ok(());
+        };
+        done.recv_timeout(timeout)
+            .map_err(|e| format!("HTTP shutdown: {e}"))?
     }
 }
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.shutdown(Duration::from_secs(7));
+        self.stop();
     }
 }
-// A loopback-only range endpoint lets mpv own decoding, buffering and seeking.
-pub fn serve(tg: Telegram) -> Result<(String, Server), String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let port = listener.local_addr().unwrap().port();
+#[derive(Clone)]
+struct Endpoint {
+    tg: Telegram,
+    token: String,
+    cancel: CancellationToken,
+    active: Arc<Semaphore>,
+    admission: Arc<Semaphore>,
+}
+/// A loopback endpoint running on the desktop's shared runtime.
+pub fn serve(tg: Telegram, runtime: tokio::runtime::Handle) -> Result<(String, Server), String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let mut entropy = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut entropy))
-        .map_err(|e| e.to_string())?;
-    let token = entropy
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    getrandom::fill(&mut entropy).map_err(|e| e.to_string())?;
+    let token: String = entropy.iter().map(|b| format!("{b:02x}")).collect();
     let base = format!("http://127.0.0.1:{port}/{token}");
-    let alive = Arc::new(AtomicBool::new(true));
-    let a = alive.clone();
-    listener.set_nonblocking(true).unwrap();
-    let mut clients = crate::application::workers::Workers::new(4, 16);
-    let worker = std::thread::spawn(move || {
-        while a.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((s, _)) => {
-                    let t = tg.clone();
-                    let stop = a.clone();
-                    let token = token.clone();
-                    let _ = clients.spawn(move || {
-                        let _ = respond(s, t, stop, &token);
-                    });
-                }
-                Err(_) => std::thread::sleep(Duration::from_millis(50)),
-            }
+    let cancel = CancellationToken::new();
+    let endpoint = Endpoint {
+        tg,
+        token,
+        cancel: cancel.clone(),
+        active: Arc::new(Semaphore::new(4)),
+        admission: Arc::new(Semaphore::new(20)),
+    };
+    let router = Router::new()
+        .route("/{token}/{file}", get(respond))
+        .with_state(endpoint);
+    let (tx, done) = mpsc::channel();
+    let stop = cancel.clone();
+    runtime.spawn(async move {
+        let result = async {
+            let listener =
+                tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?;
+            axum::serve(listener, router)
+                .with_graceful_shutdown(stop.cancelled_owned())
+                .await
+                .map_err(|e| e.to_string())
         }
-        clients.shutdown(Duration::from_secs(6))
+        .await;
+        let _ = tx.send(result);
     });
     Ok((
         base,
         Server {
-            alive,
-            worker: Some(worker),
+            cancel,
+            done: Some(done),
         },
     ))
 }
-fn respond(
-    mut socket: TcpStream,
-    tg: Telegram,
-    alive: Arc<AtomicBool>,
-    token: &str,
-) -> Result<(), String> {
-    socket.set_read_timeout(Some(Duration::from_secs(5))).ok();
-    socket.set_write_timeout(Some(Duration::from_secs(5))).ok();
-    let mut data = Vec::new();
-    let mut byte = [0];
-    while data.len() < 8192 && alive.load(Ordering::Acquire) {
-        if socket.read(&mut byte).map_err(|e| e.to_string())? == 0 {
-            return Ok(());
-        }
-        data.push(byte[0]);
-        if data.ends_with(b"\r\n\r\n") {
-            break;
-        }
+fn status_response(status: StatusCode) -> Response {
+    let mut response = status.into_response();
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, "close".parse().unwrap());
+    response
+}
+async fn respond(
+    State(endpoint): State<Endpoint>,
+    Path((token, id)): Path<(String, i64)>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    if token != endpoint.token || id <= 0 {
+        return status_response(StatusCode::NOT_FOUND);
     }
-    let request = String::from_utf8_lossy(&data);
-    let first = request.lines().next().unwrap_or("");
-    let path = first.split_whitespace().nth(1).unwrap_or("");
-    let Some(file) = path.strip_prefix(&format!("/{token}/")) else {
-        socket
-            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .ok();
-        return Ok(());
+    let Ok(admission) = endpoint.admission.clone().try_acquire_owned() else {
+        return status_response(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let id: i64 = file.parse().map_err(|_| "invalid file")?;
-    let info = tg.call(json!({"@type":"getFile","file_id":id}))?;
-    let size = info["size"].as_u64().unwrap_or(0);
-    if size == 0 {
-        return Err("Unknown file size".into());
+    let active = tokio::select! {
+        biased;
+        _ = endpoint.cancel.cancelled() => return status_response(StatusCode::SERVICE_UNAVAILABLE),
+        permit = endpoint.active.clone().acquire_owned() => match permit { Ok(p) => p, Err(_) => return status_response(StatusCode::SERVICE_UNAVAILABLE) },
+    };
+    match response(endpoint, id, method, headers, admission, active).await {
+        Ok(response) => response,
+        Err(_) => status_response(StatusCode::BAD_GATEWAY),
     }
-    let range = request.lines().find_map(|l| {
-        l.to_ascii_lowercase()
-            .strip_prefix("range: bytes=")
-            .map(str::to_owned)
-    });
-    let (start, end) = match parse_range(range.as_deref(), size) {
+}
+async fn response(
+    endpoint: Endpoint,
+    id: i64,
+    method: Method,
+    headers: HeaderMap,
+    admission: OwnedSemaphorePermit,
+    active: OwnedSemaphorePermit,
+) -> Result<Response, String> {
+    let info = endpoint
+        .tg
+        .call_async(json!({"@type":"getFile","file_id":id}), &endpoint.cancel)
+        .await
+        .map_err(|e| e.to_string())?;
+    let size = info["size"].as_u64().ok_or("Unknown file size")?;
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    // Multiple ranges are deliberately ignored, including overlapping ranges.
+    let range = range.filter(|v| !v.contains(','));
+    let parsed = parse_range(range.map(|v| v.strip_prefix("bytes=").unwrap_or(v)), size);
+    let (start, end) = match parsed {
         Ok(r) => r,
         Err(_) => {
-            let response=format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{size}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-            socket.write_all(response.as_bytes()).ok();
-            return Ok(());
+            return Ok(Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{size}"))
+                .header(header::CONNECTION, "close")
+                .header(header::CONTENT_LENGTH, "0")
+                .body(Body::empty())
+                .unwrap())
         }
     };
-    if start > end {
-        socket
-            .write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nConnection: close\r\n\r\n")
-            .ok();
-        return Ok(());
+    let mut builder = Response::builder()
+        .status(if range.is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, (end - start + 1).to_string())
+        .header(header::CONNECTION, "close");
+    if range.is_some() {
+        builder = builder.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
     }
-    let status = if range.is_some() {
-        "206 Partial Content"
-    } else {
-        "200 OK"
+    if method == Method::HEAD {
+        return Ok(builder.body(Body::empty()).unwrap());
+    }
+    let transfer = Transfer {
+        endpoint,
+        id,
+        position: start,
+        end,
+        _admission: admission,
+        _active: active,
+        lease: None,
     };
-    let header=format!("HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{size}\r\nConnection: close\r\n\r\n",end-start+1);
-
-    socket
-        .write_all(header.as_bytes())
-        .map_err(|e| e.to_string())?;
-    if first.starts_with("HEAD ") {
-        return Ok(());
-    }
-    tg.call(json!({"@type":"downloadFile","file_id":id,"priority":32,"offset":start,"limit":0,"synchronous":false}))?;
-    let mut pos = start;
-    let mut idle = 0;
-    while pos <= end && alive.load(Ordering::Relaxed) {
-        let prefix = tg
-            .call(json!({"@type":"getFileDownloadedPrefixSize","file_id":id,"offset":pos}))?
-            ["size"]
-            .as_u64()
-            .unwrap_or(0);
-        if prefix == 0 {
-            idle += 1;
-            if idle % 20 == 0 {
-                tg.call(json!({"@type":"downloadFile","file_id":id,"priority":32,"offset":pos,"limit":0,"synchronous":false}))?;
-            }
-            if idle > 300 {
-                return Err("Download stalled".into());
-            }
-            std::thread::sleep(Duration::from_millis(100));
-            continue;
+    let stream = futures_util::stream::try_unfold(transfer, |mut transfer| async move {
+        if transfer.position > transfer.end {
+            return Ok::<_, io::Error>(None);
         }
-        idle = 0;
-        let info = tg.call(json!({"@type":"getFile","file_id":id}))?;
-        let path = info["local"]["path"].as_str().ok_or("No local file")?;
-        let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        file.seek(std::io::SeekFrom::Start(pos))
-            .map_err(|e| e.to_string())?;
-        let mut buf = vec![0; prefix.min(65536).min(end - pos + 1) as usize];
-        file.read_exact(&mut buf).map_err(|e| e.to_string())?;
-        socket.write_all(&buf).map_err(|e| e.to_string())?;
-        pos += buf.len() as u64;
-    }
-    Ok(())
+        let bytes = transfer.next().await.map_err(io::Error::other)?;
+        Ok(Some((Bytes::from(bytes), transfer)))
+    });
+    Ok(builder.body(Body::from_stream(stream)).unwrap())
 }
-
-fn parse_range(range: Option<&str>, size: u64) -> Result<(u64, u64), &'static str> {
+struct Transfer {
+    endpoint: Endpoint,
+    id: i64,
+    position: u64,
+    end: u64,
+    _admission: OwnedSemaphorePermit,
+    _active: OwnedSemaphorePermit,
+    lease: Option<super::telegram::DownloadLease>,
+}
+impl Transfer {
+    async fn next(&mut self) -> Result<Vec<u8>, String> {
+        let endpoint = &self.endpoint;
+        if self.lease.is_none() {
+            self.lease = Some(
+                endpoint
+                    .tg
+                    .begin_download(self.id, self.position, false, &endpoint.cancel)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        let read = async {
+            loop {
+                let prefix = endpoint.tg.call_async(json!({"@type":"getFileDownloadedPrefixSize","file_id":self.id,"offset":self.position}), &endpoint.cancel).await.map_err(|e| e.to_string())?["size"].as_u64().unwrap_or(0);
+                if prefix == 0 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                let info = endpoint
+                    .tg
+                    .call_async(
+                        json!({"@type":"getFile","file_id":self.id}),
+                        &endpoint.cancel,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let path = info["local"]["path"].as_str().ok_or("No local file")?;
+                let mut file = tokio::fs::File::open(path)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                file.seek(io::SeekFrom::Start(self.position))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut bytes =
+                    vec![0; prefix.min(65536).min(self.end - self.position + 1) as usize];
+                file.read_exact(&mut bytes)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok::<_, String>(bytes);
+            }
+        };
+        let bytes = tokio::select! {
+            biased;
+            _ = endpoint.cancel.cancelled() => return Err("Transfer cancelled".into()),
+            result = tokio::time::timeout(Duration::from_secs(30), read) => result.map_err(|_| "Download stalled".to_owned())??,
+        };
+        self.position += bytes.len() as u64;
+        Ok(bytes)
+    }
+}
+fn parse_range(range: Option<&str>, size: u64) -> Result<(u64, u64), String> {
     if size == 0 {
-        return Err("Empty resource");
+        return Err("Empty resource".into());
     }
     let Some(range) = range else {
         return Ok((0, size - 1));
     };
-    let (a, b) = range.trim().split_once('-').ok_or("Invalid range")?;
-    let (start, end) = if a.is_empty() {
-        let length = b.parse::<u64>().map_err(|_| "Invalid suffix")?;
-        if length == 0 {
-            return Err("Empty suffix");
-        }
-        (size.saturating_sub(length), size - 1)
-    } else {
-        (
-            a.parse::<u64>().map_err(|_| "Invalid start")?,
-            if b.is_empty() {
-                size - 1
-            } else {
-                b.parse::<u64>().map_err(|_| "Invalid end")?.min(size - 1)
-            },
-        )
-    };
-    if start > end || start >= size {
-        return Err("Unsatisfiable range");
+    let ranges = http_range_header::parse_range_header(&format!("bytes={range}"))
+        .map_err(|e| e.to_string())?
+        .validate(size)
+        .map_err(|e| e.to_string())?;
+    if ranges.len() != 1 {
+        return Err("Multiple ranges".into());
     }
-    Ok((start, end))
+    Ok((*ranges[0].start(), *ranges[0].end()))
 }
 #[cfg(test)]
 #[path = "streaming/tests.rs"]

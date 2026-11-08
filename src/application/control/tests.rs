@@ -16,14 +16,19 @@ fn playlist_selection_rebuilds_queue_and_previous_returns_to_preceding_row() {
     let mut app = app();
     apply(&mut app, Request::Select { row: 2 });
     let tracks = app.playlist_tracks(0);
-    app.state.session.insert(tracks[8].clone(), true);
-    let old_entry = app.state.session.remaining[0].entry_id;
+    app.state
+        .command(tg_player_application::commands::AppCommand::Insert(
+            tracks[8].metadata(),
+            true,
+        ));
+    let old_entry = app.state.view().session.remaining()[0].entry_id;
     apply(&mut app, Request::Select { row: 5 });
-    assert_eq!(app.state.session.remaining.len(), 35);
+    assert_eq!(app.state.view().session.remaining().len(), 35);
     assert!(!app
         .state
+        .view()
         .session
-        .snapshot
+        .snapshot()
         .iter()
         .any(|t| t.entry_id == old_entry));
     for message in [3, 2] {
@@ -62,10 +67,29 @@ fn list_and_select_share_filters_search_and_sort_and_current_row_toggles_pause()
     let expected = list["items"][1]["message_id"].clone();
     let status = apply(&mut app, Request::Select { row: 2 });
     assert_eq!(status["current"]["message_id"], expected);
-    let id = app.state.session.current.as_ref().unwrap().entry_id;
+    let id = app
+        .state
+        .view()
+        .session
+        .current()
+        .as_ref()
+        .unwrap()
+        .entry_id;
     assert_eq!(apply(&mut app, Request::Select { row: 2 })["paused"], true);
-    assert_eq!(app.state.session.current.as_ref().unwrap().entry_id, id);
-    app.state.playlists[0].filters = [false; 3];
+    assert_eq!(
+        app.state
+            .view()
+            .session
+            .current()
+            .as_ref()
+            .unwrap()
+            .entry_id,
+        id
+    );
+    app.state
+        .command(tg_player_application::commands::AppCommand::Filters(
+            0, [false; 3],
+        ));
     assert_eq!(apply(&mut app, Request::Playlist { offset: 0 })["total"], 0);
     assert!(!app.handle_control(Request::Select { row: 1 }).ok);
     app.shutdown_core().unwrap();
@@ -74,12 +98,13 @@ fn list_and_select_share_filters_search_and_sort_and_current_row_toggles_pause()
 #[test]
 fn pagination_handles_large_unicode_and_escaped_metadata_without_leaking_state() {
     let mut app = app();
-    for track in &mut app.state.playlists[0].tracks {
+    let mut fixture = app.state.view().clone();
+    for track in &mut fixture.playlists[0].tracks {
         track.title = "\n\"\u{0001}🎵Музыка".repeat(1000);
         track.artist = track.title.clone();
-        track.cached = Some("private-cache-path".into());
     }
-    app.state.api_hash = "private-api-hash".into();
+    fixture.api_hash = "private-api-hash".into();
+    app.state = tg_player_application::AppCore::new(fixture);
     let mut offset = 0;
     let mut rows = Vec::new();
     loop {
@@ -133,7 +158,7 @@ fn invalid_and_expired_commands_do_not_change_playback() {
     .unwrap();
     app.process_control();
     assert!(!response.recv().unwrap().ok);
-    assert!(app.state.session.current.is_none());
+    assert!(app.state.view().session.current().is_none());
     app.shutdown_core().unwrap();
     assert!(!app.handle_control(Request::Next).ok);
 }
@@ -150,17 +175,23 @@ fn previous_restarts_after_three_seconds_then_switches() {
         seeks: Rc<RefCell<Vec<String>>>,
     }
     impl PlayerBackend for Fake {
-        fn cmd(&self, args: &[&str]) {
-            if args.first() == Some(&"seek") {
-                self.seeks.borrow_mut().push(args[1].into());
-                self.position.set(args[1].parse().unwrap());
+        fn command(
+            &self,
+            command: crate::application::ports::PlayerCommand,
+        ) -> Result<(), tg_player_application::AppError> {
+            if let crate::application::ports::PlayerCommand::Seek(position) = command {
+                self.seeks.borrow_mut().push(position.to_string());
+                self.position.set(position);
             }
+            Ok(())
         }
-        fn number(&self, name: &str) -> f64 {
-            if name == "time-pos" {
-                self.position.get()
-            } else {
-                180.
+        fn snapshot(&self) -> crate::application::ports::PlayerSnapshot {
+            crate::application::ports::PlayerSnapshot {
+                paused: false,
+                seeking: false,
+                position: self.position.get(),
+                duration: 180.,
+                volume: 75.,
             }
         }
         fn drain(&self) -> Vec<PlaybackEvent> {

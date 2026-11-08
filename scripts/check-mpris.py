@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Run inside dbus-run-session; exercises the real demo app's MPRIS commands."""
+import os
 import pathlib
 import subprocess
 import time
 
-binary = pathlib.Path(__file__).resolve().parents[1] / "target/debug/tg-player"
+binary = pathlib.Path(os.environ.get("TG_PLAYER_BINARY", pathlib.Path(__file__).resolve().parents[1] / "target/debug/tg-player"))
 app = subprocess.Popen([str(binary), "--demo", "--desktop-integrations", "--scenario=playing"])
 base = ["gdbus", "call", "--session", "--dest", "org.mpris.MediaPlayer2.tgplayer",
         "--object-path", "/org/mpris/MediaPlayer2", "--method"]

@@ -144,15 +144,24 @@ fn send(slot: &Slot, args: &[String]) -> Reply {
 /// Run before constructing the GUI or opening account data. A control command
 /// never claims a slot, creates an application, or starts a replacement instance.
 pub fn run_cli() -> Option<ExitCode> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    let index = args.iter().position(|a| a == "--ctl")?;
-    let reply = if args[..index].iter().any(|a| a != "--demo") {
-        Reply::failure(USAGE)
-    } else {
-        send(
-            &slot(args[..index].iter().any(|a| a == "--demo")),
-            &args[index + 1..],
-        )
+    let options = crate::launch::control_options()?;
+    let reply = match options {
+        Ok(options)
+            if !options.light
+                && !options.desktop_integrations
+                && !options.smoke_test
+                && options.scenario.is_none()
+                && options.preview_auth.is_none()
+                && options.size.is_none()
+                && options.scale.is_none()
+                && options.screenshot.is_none() =>
+        {
+            send(
+                &slot(options.demo),
+                options.ctl.as_deref().unwrap_or_default(),
+            )
+        }
+        _ => Reply::failure(USAGE),
     };
     println!(
         "{}",

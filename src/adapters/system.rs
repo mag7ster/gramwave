@@ -1,19 +1,15 @@
 use crate::playback::RepeatMode;
-impl From<fastframe_now_playing::Repeat> for RepeatMode {
-    fn from(value: fastframe_now_playing::Repeat) -> Self {
-        match value {
-            fastframe_now_playing::Repeat::Off => Self::Off,
-            fastframe_now_playing::Repeat::Playlist => Self::All,
-            fastframe_now_playing::Repeat::Track => Self::One,
-        }
+pub(crate) fn repeat_from_system(value: fastframe_now_playing::Repeat) -> RepeatMode {
+    match value {
+        fastframe_now_playing::Repeat::Off => RepeatMode::Off,
+        fastframe_now_playing::Repeat::Playlist => RepeatMode::All,
+        fastframe_now_playing::Repeat::Track => RepeatMode::One,
     }
 }
-impl From<RepeatMode> for fastframe_now_playing::Repeat {
-    fn from(value: RepeatMode) -> Self {
-        match value {
-            RepeatMode::Off => Self::Off,
-            RepeatMode::All => Self::Playlist,
-            RepeatMode::One => Self::Track,
-        }
+pub(crate) fn repeat_to_system(value: RepeatMode) -> fastframe_now_playing::Repeat {
+    match value {
+        RepeatMode::Off => fastframe_now_playing::Repeat::Off,
+        RepeatMode::All => fastframe_now_playing::Repeat::Playlist,
+        RepeatMode::One => fastframe_now_playing::Repeat::Track,
     }
 }

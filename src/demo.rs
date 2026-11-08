@@ -1,9 +1,6 @@
 //! Deterministic, account-free visual fixtures; only --demo activates them.
-use crate::{tr, App, Playlist, RepeatMode, RetryAction, State, Track};
-use std::path::PathBuf;
-fn option(prefix: &str) -> Option<String> {
-    std::env::args().find_map(|a| a.strip_prefix(prefix).map(str::to_owned))
-}
+use crate::{tr, App, Playlist, RepeatMode, RetryAction, State};
+use tg_player_application::model::Track;
 pub fn state() -> State {
     State { playlists: (0..5).map(|i| Playlist {
         id: i, title: ["Midnight frequencies", "Saved Messages", "Jazz & coffee", "Electronic archive", "Музыка · Избранное"][i as usize].into(),
@@ -20,68 +17,54 @@ pub fn configure(app: &mut App) {
     if !app.demo {
         return;
     }
-    app.state.light = std::env::args().any(|a| a == "--light");
+    let mut state = app.state.view().clone();
+    state.light = app.options.light;
+    app.state =
+        tg_player_application::AppCore::with_offline(state, app.state.offline().data().clone());
     app.opened_chat = Some(0);
-    if let Some(scenario) = option("--scenario=") {
+    if let Some(scenario) = app.options.scenario.clone() {
         apply(app, &scenario);
     }
 }
 pub fn apply(app: &mut App, scenario: &str) {
-    let tracks = app.state.playlists[0].tracks.clone();
+    let mut state = app.state.view().clone();
+    let tracks = state.playlists[0].tracks.clone();
+    let mut offline = tg_player_application::offline::OfflineCore::new(app.state.offline().data());
     match scenario {
         "playing" | "paused" | "loading" | "error" => {
-            app.state.session.start(&tracks, 0, true);
-            app.state.session.insert(tracks[4].clone(), true);
-            app.state.session.insert(tracks[7].clone(), false);
-            app.state.shuffle = true;
-            app.state.repeat = RepeatMode::One;
+            state.session.start(&tracks, 0, true);
+            state.session.insert(tracks[4].clone(), true);
+            state.session.insert(tracks[7].clone(), false);
+            state.shuffle = true;
+            state.repeat = RepeatMode::One;
             app.queue_open = true;
-            app.paused = scenario == "paused";
-            app.loading = scenario == "loading";
-            app.state.pending_pins.push(tracks[1].clone());
-            app.state.playlists[0].tracks[3].pinned = Some("demo-offline".into());
-            app.pin_errors.insert((0, 5), tr("Download interrupted"));
+            offline.enqueue(tracks[1].clone(), true);
+            offline.publish(tracks[3].clone(), "demo-offline".into());
             if scenario == "error" {
                 app.error = tr("Unable to play track");
                 app.error_retry = Some(RetryAction::Playback(tracks[0].clone()));
-                app.paused = true;
             }
             if scenario == "loading" {
-                app.indexing_chat = Some(0);
+                // Loading playback is represented by the application reducer.
             }
         }
         "settings" => app.settings_open = true,
-        "empty" => app.state.playlists[0].tracks.clear(),
-        "filters" => app.state.playlists[0].filters = [false; 3],
+        "empty" => state.playlists[0].tracks.clear(),
+        "filters" => state.playlists[0].filters = [false; 3],
         "search" => app.search = "no-matching-demo-track".into(),
         "queue" => app.queue_open = true,
         _ => {}
     }
-}
-pub fn window_size() -> [f32; 2] {
-    if std::env::args().any(|a| a == "--demo") {
-        if let Some(size) = option("--size=") {
-            if let Some((w, h)) = size.split_once('x') {
-                if let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>()) {
-                    return [w.max(850.), h.max(550.)];
-                }
-            }
+    app.state = tg_player_application::AppCore::with_offline(state, offline.data());
+    if matches!(scenario, "playing" | "paused" | "loading" | "error") {
+        use tg_player_application::{
+            commands::AppCommand, ports::PlaybackEvent, workflow::AppEvent,
+        };
+        app.state.command(AppCommand::Play(tracks[0].clone()));
+        if scenario != "loading" {
+            app.state.event(AppEvent::Player(PlaybackEvent::Loaded));
         }
+        app.state
+            .command(AppCommand::Pause(matches!(scenario, "paused" | "error")));
     }
-    [1240., 800.]
-}
-pub fn scale() -> Option<f32> {
-    std::env::args()
-        .any(|a| a == "--demo")
-        .then(|| {
-            option("--scale=")
-                .and_then(|v| v.parse::<f32>().ok())
-                .filter(|v| v.is_finite() && *v >= 0.5 && *v <= 3.)
-        })
-        .flatten()
-}
-pub fn preview_path() -> PathBuf {
-    option("--screenshot=")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "/tmp/tg-player-preview.png".into())
 }
