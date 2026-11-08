@@ -26,28 +26,34 @@ msgstr ""
 msgid "Cancel offline downloads"
 msgstr ""
 
-msgid "Chats without matching audio are hidden automatically."
+msgid "Check your messages"
 msgstr ""
 
-msgid "Choose a track"
+msgid "Choose your soundtrack"
 msgstr ""
 
 msgid "Clear automatic cache"
 msgstr ""
 
-msgid "Connect"
-msgstr ""
-
-msgid "Connect Telegram"
-msgstr ""
-
 msgid "Connect Telegram to discover your music"
 msgstr ""
 
-msgid "Connecting to Telegram…"
+msgid "Connect your Telegram"
+msgstr ""
+
+msgid "Connecting securely to Telegram…"
 msgstr ""
 
 msgid "Connecting…"
+msgstr ""
+
+msgid "Connection closed. Please reconnect."
+msgstr ""
+
+msgid "Continue"
+msgstr ""
+
+msgid "Continue with phone"
 msgstr ""
 
 msgid "Copy chat link"
@@ -74,10 +80,16 @@ msgstr ""
 msgid "Download timed out. Try saving again."
 msgstr ""
 
+msgid "Enter a phone number including the country code, for example +44…"
+msgstr ""
+
 msgid "Enter the verification code sent by Telegram."
 msgstr ""
 
-msgid "Get an API ID and API hash"
+msgid "Enter your Telegram password to finish signing in."
+msgstr ""
+
+msgid "Get application credentials"
 msgstr ""
 
 msgid "Library"
@@ -86,7 +98,16 @@ msgstr ""
 msgid "Library is up to date"
 msgstr ""
 
+msgid "Light appearance"
+msgstr ""
+
 msgid "Link copied"
+msgstr ""
+
+msgid "Listening does not announce you online."
+msgstr ""
+
+msgid "Move up"
 msgstr ""
 
 msgid "Music"
@@ -98,25 +119,28 @@ msgstr ""
 msgid "Next"
 msgstr ""
 
-msgid "Next ⏭"
+msgid "Offline library"
 msgstr ""
 
-msgid "Offline library"
+msgid "One-time setup"
 msgstr ""
 
 msgid "Online presence is always disabled by this player."
 msgstr ""
 
-msgid "Open in Telegram"
-msgstr ""
-
 msgid "Open source chat"
 msgstr ""
 
-msgid "PLAYLISTS FROM TELEGRAM"
+msgid "Or sign in with your phone"
+msgstr ""
+
+msgid "Password"
 msgstr ""
 
 msgid "Phone number with country code"
+msgstr ""
+
+msgid "Play"
 msgstr ""
 
 msgid "Play / pause"
@@ -128,7 +152,7 @@ msgstr ""
 msgid "Playback requires libmpv.so.2"
 msgstr ""
 
-msgid "Previous track"
+msgid "Please wait…"
 msgstr ""
 
 msgid "Queue"
@@ -137,61 +161,52 @@ msgstr ""
 msgid "Quit"
 msgstr ""
 
-msgid "Read only · no online presence"
+msgid "Quit TG Player"
 msgstr ""
 
-msgid "Ready to play"
+msgid "Refresh library"
 msgstr ""
 
-msgid "Refresh"
+msgid "Register an app at my.telegram.org, then paste its credentials below. Your login is saved on this device."
+msgstr ""
+
+msgid "Remove"
 msgstr ""
 
 msgid "Remove offline copy"
 msgstr ""
 
-msgid "Repeat"
+msgid "Resend available in {seconds}s"
 msgstr ""
 
 msgid "Resend code"
 msgstr ""
 
-msgid "Save for offline listening"
+msgid "Save offline"
 msgstr ""
 
 msgid "Saved for offline listening"
 msgstr ""
 
-msgid "Search titles, artists and filenames…"
+msgid "Search this playlist"
 msgstr ""
 
-msgid "Session closed. Restart to connect again."
+msgid "Select a track to get started"
 msgstr ""
 
 msgid "Settings"
 msgstr ""
 
-msgid "Show QR code"
-msgstr ""
-
 msgid "Show player"
-msgstr ""
-
-msgid "Shuffle"
 msgstr ""
 
 msgid "Sign in"
 msgstr ""
 
-msgid "Sign in with phone"
+msgid "Sign in to Telegram"
 msgstr ""
 
-msgid "Submit code"
-msgstr ""
-
-msgid "Submit email address"
-msgstr ""
-
-msgid "Submit password"
+msgid "Start over"
 msgstr ""
 
 msgid "TELEGRAM PLAYLIST"
@@ -200,16 +215,28 @@ msgstr ""
 msgid "Telegram does not provide a link for this message"
 msgstr ""
 
-msgid "Telegram requires an email address to continue."
+msgid "Telegram → Settings → Devices → Link Desktop Device"
+msgstr ""
+
+msgid "That code is incorrect. Please try again."
 msgstr ""
 
 msgid "Title"
 msgstr ""
 
-msgid "Two-step verification password"
+msgid "Two-step verification"
 msgstr ""
 
 msgid "Up next"
+msgstr ""
+
+msgid "Verification code"
+msgstr ""
+
+msgid "Verify code"
+msgstr ""
+
+msgid "Verify your email"
 msgstr ""
 
 msgid "Voice message"
@@ -218,28 +245,19 @@ msgstr ""
 msgid "Voice messages"
 msgstr ""
 
-msgid "Volume"
+msgid "We sent a code to your Telegram app."
 msgstr ""
 
-msgid "Your music will appear here"
+msgid "We sent an SMS to your phone."
 msgstr ""
 
-msgid "Your music. Your chats."
+msgid "Your Telegram. Your soundtrack."
 msgstr ""
 
-msgid "Your saved library remains available offline."
+msgid "Your library"
 msgstr ""
 
-msgid "seconds"
-msgstr ""
-
-msgid "{tracks} · read only"
-msgstr ""
-
-msgid "↓ Save playlist"
-msgstr ""
-
-msgid "▶ Play all"
+msgid "Your next favourite is waiting."
 msgstr ""
 
 msgid "{count} track"

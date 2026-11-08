@@ -23,6 +23,29 @@ API ID/hash, then sign in with QR or your phone number. Two-step verification
 and Telegram's email login states are supported. Telegram decides how codes
 are delivered; SMS is not guaranteed for third-party clients.
 
+## Interface and sign-in
+
+The player uses a Spotify-inspired dark layout, SVG controls, an optional queue
+panel, and Telegram artwork when available. Set API credentials once; later
+launches automatically restore the saved session. QR is the initial sign-in
+method; phone, verification code, email and 2FA are separate form steps.
+
+Closing the window (including niri Mod+Q) destroys only the window and keeps
+playback in the tray. Launching again restores the same process. Choose
+**Quit TG Player**, tray **Quit**, or Ctrl+Shift+Q to exit completely. Without
+a tray host, closing exits so the app cannot become inaccessible.
+
+Preview sign-in screens without an account:
+
+```sh
+cargo run -- --demo --preview-auth=setup
+cargo run -- --demo --preview-auth=qr
+cargo run -- --demo --preview-auth=code
+cargo run -- --demo --preview-auth=password
+cargo run -- --demo --preview-auth=email
+cargo run -- --demo --preview-auth=error
+```
+
 ## Behavior
 
 - Music, audio documents and voice messages have separate playlist filters.
@@ -65,7 +88,8 @@ For a UI-only build without TDLib, use `cargo run --no-default-features -- --dem
 The local bundle keeps TDLib in `lib/`; mpv and its C++ dependencies remain system
 dependencies.
 
-The application separates UI (`ui.rs`), Telegram requests (`telegram.rs`),
+The application separates the resident/window lifecycle (`lifecycle.rs`),
+screens (`screens.rs`), sign-in state (`auth.rs`), Telegram requests (`telegram.rs`),
 media output/range streaming (`audio.rs`) and persisted data (`model.rs`).
 Playback uses a loopback HTTP range bridge to feed TDLib's existing cache to
 mpv, with an unpredictable per-process URL. It does not expose a LAN server.

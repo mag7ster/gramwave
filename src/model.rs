@@ -11,6 +11,8 @@ pub struct Track {
     pub kind: usize,
     pub pinned: Option<String>,
     pub cached: Option<String>,
+    pub image_file: i64,
+    pub image_path: Option<String>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -18,6 +20,8 @@ pub struct Playlist {
     pub id: i64,
     pub title: String,
     pub url: String,
+    pub image_file: i64,
+    pub image_path: Option<String>,
     pub tracks: Vec<Track>,
     pub filters: [bool; 3],
     pub pinned: bool,
@@ -96,6 +100,11 @@ pub fn track(chat: i64, v: &serde_json::Value) -> Option<Track> {
         kind,
         pinned: None,
         cached: None,
+        image_file: a["album_cover_thumbnail"]["file"]["id"]
+            .as_i64()
+            .or_else(|| a["thumbnail"]["file"]["id"].as_i64())
+            .unwrap_or(0),
+        image_path: None,
     })
 }
 pub fn default_filters() -> [bool; 3] {

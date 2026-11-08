@@ -1,4 +1,8 @@
+mod auth;
+mod design;
 mod i18n;
+mod lifecycle;
+mod screens;
 mod storage;
 mod ui;
 use i18n::tr;
@@ -13,8 +17,10 @@ enum Event {
     Progress(String),
     SyncDone(Result<(), String>),
     Rename(i64, String),
+    Artwork(i64, String),
     Playlist(Playlist),
     Error(String),
+    AuthResult(u64, Result<(), String>),
     Pinned(i64, i64, String),
     PinFailed(i64, i64, String),
     Link(String),
@@ -33,6 +39,8 @@ struct App {
     selected: usize,
     search: String,
     status: String,
+    notice: String,
+    notice_until: Option<std::time::Instant>,
     auth: Value,
     phone: String,
     code: String,
@@ -50,8 +58,17 @@ struct App {
     sort: usize,
     tray: Option<fastframe_tray::Tray>,
     hidden: bool,
+    show_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    auth_pending: bool,
+    auth_token: u64,
+    last_auth_step: String,
+    image_requests: std::collections::HashSet<i64>,
+    auth_error: String,
+    resend_at: Option<std::time::Instant>,
     quitting: bool,
     frames: usize,
+    preview_started: std::time::Instant,
+    preview_captured: bool,
     settings_open: bool,
     pin_cancel: std::sync::Arc<std::sync::atomic::AtomicU64>,
     last_link: String,
@@ -80,6 +97,9 @@ impl App {
             storage::Store::open(&root.join("library.sqlite")).expect("open library");
         let demo = std::env::args().any(|s| s == "--demo");
         if demo {
+            state.api_id.clear();
+            state.api_hash.clear();
+            state.queue.clear();
             state.playlists = (0..5)
                 .map(|i| Playlist {
                     id: i,
@@ -132,6 +152,8 @@ impl App {
             server: None,
             selected: 0,
             search: String::new(),
+            notice: String::new(),
+            notice_until: None,
             status: if demo {
                 tr("Demo mode · not connected to Telegram")
             } else {
@@ -141,12 +163,16 @@ impl App {
             phone: String::new(),
             code: String::new(),
             password: String::new(),
-            qr: String::new(),
+            qr: if std::env::args().any(|a| a == "--preview-auth=qr") {
+                "tg://login?token=DEMO".into()
+            } else {
+                String::new()
+            },
             current: None,
             history: Vec::new(),
             paused: false,
             volume: 75.,
-            queue_open: true,
+            queue_open: false,
             demo,
             busy: false,
             media: fastframe_now_playing::NowPlaying::start(
@@ -173,8 +199,21 @@ impl App {
                 || {},
             ),
             hidden: false,
+            show_requested: Default::default(),
+            auth_pending: false,
+            auth_token: 0,
+            last_auth_step: String::new(),
+            image_requests: Default::default(),
+            auth_error: if std::env::args().any(|a| a == "--preview-auth=error") {
+                tr("That code is incorrect. Please try again.")
+            } else {
+                String::new()
+            },
+            resend_at: None,
             quitting: false,
             frames: 0,
+            preview_started: std::time::Instant::now(),
+            preview_captured: false,
             settings_open: false,
             pin_cancel: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_link: String::new(),
@@ -189,6 +228,11 @@ impl App {
         }
     }
     fn connect(&mut self) {
+        self.qr.clear();
+        self.auth_error.clear();
+        self.auth_pending = false;
+        self.auth_token += 1;
+
         match telegram::Telegram::start() {
             Ok((tg, rx)) => {
                 tg.offline();
@@ -311,6 +355,7 @@ impl App {
                                     filters: default_filters,
                                     ..Default::default()
                                 });
+                        p.image_file = chat["photo"]["small"]["id"].as_i64().unwrap_or(0);
                         let ty = &chat["type"];
                         let peer = match ty["@type"].as_str().unwrap_or("") {
                             "chatTypeSupergroup" => tg
@@ -504,12 +549,30 @@ impl App {
             match v["@type"].as_str().unwrap_or("") {
                 "updateAuthorizationState" => {
                     self.auth = v["authorization_state"].clone();
+                    if self.auth["@type"] == "authorizationStateWaitCode" {
+                        self.resend_at = Some(
+                            std::time::Instant::now()
+                                + Duration::from_secs(
+                                    self.auth["code_info"]["timeout"].as_u64().unwrap_or(0),
+                                ),
+                        );
+                    }
+                    if self.auth["@type"] == "authorizationStateWaitPhoneNumber" {
+                        self.submit_auth(
+                            json!({"@type":"requestQrCodeAuthentication","other_user_ids":[]}),
+                        );
+                    }
+                    if self.auth["@type"] == "authorizationStateClosed" {
+                        self.tg = None;
+                        self.auth_pending = false;
+                    }
                     match self.auth["@type"].as_str().unwrap_or("") {
                         "authorizationStateWaitTdlibParameters" => {
                             let id = self.state.api_id.parse::<i32>().unwrap_or(0);
                             let path = self.root.join("telegram");
-                            self.send(json!({
+                            self.submit_auth(json!({
 "@type":"setTdlibParameters","database_directory":path,"files_directory":self.root.join("cache"),"use_message_database":true,"use_file_database":true,"use_chat_info_database":true,"use_secret_chats":false,"api_id":id,"api_hash":self.state.api_hash,"system_language_code":"en","device_model":"TG Player","system_version":"Linux","application_version":"0.1.0"}
+
 ));
                         }
                         "authorizationStateWaitOtherDeviceConfirmation" => {
@@ -629,6 +692,18 @@ impl App {
         }
         while let Ok(e) = self.rx.try_recv() {
             match e {
+                Event::Artwork(id, path) => {
+                    for p in &mut self.state.playlists {
+                        if p.image_file == id {
+                            p.image_path = Some(path.clone());
+                        }
+                        for t in &mut p.tracks {
+                            if t.image_file == id {
+                                t.image_path = Some(path.clone());
+                            }
+                        }
+                    }
+                }
                 Event::Rename(id, title) => {
                     if let Some(p) = self.state.playlists.iter_mut().find(|p| p.id == id) {
                         p.title = title;
@@ -638,6 +713,22 @@ impl App {
                 Event::SyncDone(result) => {
                     self.busy = false;
                     self.status = result.err().unwrap_or_else(|| tr("Library is up to date"));
+                }
+                Event::AuthResult(token, result) => {
+                    if token == self.auth_token {
+                        self.auth_pending = false;
+                        self.password.clear();
+                        match result {
+                            Ok(()) => {
+                                self.auth_error.clear();
+                                self.code.clear();
+                            }
+                            Err(e) => {
+                                self.auth_error = auth::friendly_error(&e);
+                                self.last_auth_step.clear();
+                            }
+                        }
+                    }
                 }
                 Event::Error(s) => {
                     self.status = s;
@@ -671,9 +762,16 @@ impl App {
                 }
                 Event::Playlist(mut p) => {
                     if let Some(old) = self.state.playlists.iter_mut().find(|x| x.id == p.id) {
+                        p.image_path = p.image_path.or(old.image_path.clone());
                         p.filters = old.filters;
                         p.pinned = old.pinned;
                         for t in &mut p.tracks {
+                            t.image_path = t.image_path.clone().or_else(|| {
+                                old.tracks
+                                    .iter()
+                                    .find(|x| x.message == t.message)
+                                    .and_then(|x| x.image_path.clone())
+                            });
                             t.pinned = old
                                 .tracks
                                 .iter()
@@ -692,20 +790,7 @@ impl App {
 }
 
 fn main() -> eframe::Result {
-    eframe::run_native(
-        "TG Player",
-        eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1240., 800.])
-                .with_min_inner_size([850., 550.]),
-            ..Default::default()
-        },
-        Box::new(|cc| {
-            cc.egui_ctx
-                .set_fonts(fastframe_fonts::FontSetup::default().definitions());
-            Ok(Box::new(App::new()))
-        }),
-    )
+    lifecycle::run()
 }
 
 fn tray_icon(size: usize) -> Vec<u8> {

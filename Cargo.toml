@@ -24,6 +24,11 @@ fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 
+fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+fastframe-instance = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+egui_extras = { version = "0.36.2", features = ["svg", "image", "file"] }
+
 [build-dependencies]
 tdlib-rs = { version = "=1.4.0", optional = true, features = ["download-tdlib"] }
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4", features = ["build"] }
