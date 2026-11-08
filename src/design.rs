@@ -22,6 +22,14 @@ pub fn style(ctx: &egui::Context, light: bool) {
         v.weak_text_color = Some(egui::Color32::from_gray(165));
         v.widgets.inactive.bg_fill = egui::Color32::from_rgb(38, 38, 38);
     }
+    v.hyperlink_color = if light {
+        egui::Color32::from_rgb(0, 110, 62)
+    } else {
+        egui::Color32::from_rgb(92, 224, 149)
+    };
+    v.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
+    v.widgets.hovered.corner_radius = egui::CornerRadius::same(8);
+    v.widgets.active.corner_radius = egui::CornerRadius::same(8);
     v.selection.bg_fill = egui::Color32::from_rgb(30, 85, 48);
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
@@ -38,4 +46,13 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, label: &'static str) -> bool {
     )
     .on_hover_text(crate::tr(label))
     .clicked()
+}
+
+pub fn primary(ui: &mut egui::Ui, label: String) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).color(egui::Color32::BLACK))
+            .fill(GREEN)
+            .corner_radius(20)
+            .min_size(egui::vec2(ui.available_width(), 40.)),
+    )
 }

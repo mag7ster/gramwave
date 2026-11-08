@@ -413,9 +413,19 @@ impl App {
                     .current
                     .as_ref()
                     .is_some_and(|c| c.chat == t.chat && c.message == t.message);
+                let hovered = ui.rect_contains_pointer(egui::Rect::from_min_size(
+                    ui.next_widget_position(),
+                    egui::vec2(ui.available_width(), 56.),
+                ));
                 egui::Frame::new()
                     .fill(if active {
                         egui::Color32::from_rgb(27, 45, 33)
+                    } else if hovered {
+                        if self.state.light {
+                            egui::Color32::from_gray(230)
+                        } else {
+                            egui::Color32::from_gray(28)
+                        }
                     } else {
                         egui::Color32::TRANSPARENT
                     })

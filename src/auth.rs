@@ -100,15 +100,18 @@ impl App {
         ui.add_enabled_ui(!pending,|ui|{match current{
    Phase::Setup=>{
 ui.heading(tr("Connect your Telegram"));
-ui.label(tr("One-time setup"));
+ui.label(egui::RichText::new(tr("ONE-TIME SETUP")).small().color(design::GREEN));
 ui.weak(tr("Register an app at my.telegram.org, then paste its credentials below. Your login is saved on this device."));
-ui.hyperlink_to(tr("Get application credentials"),"https://my.telegram.org/apps");
+ui.horizontal(|ui| {
+    ui.hyperlink_to(tr("Get application credentials"),"https://my.telegram.org/apps");
+    if ui.small_button(tr("Copy link")).clicked(){ui.ctx().copy_text("https://my.telegram.org/apps".into());}
+});
 ui.add_space(12.);
 ui.label(tr("API ID"));
-ui.add(egui::TextEdit::singleline(&mut self.state.api_id).desired_width(f32::INFINITY).hint_text("12345678"));
+ui.add(egui::TextEdit::singleline(&mut self.state.api_id).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY).hint_text("12345678"));
 ui.label(tr("API hash"));
-ui.add(egui::TextEdit::singleline(&mut self.state.api_hash).password(true).desired_width(f32::INFINITY));
-if ui.add_enabled(credentials(&self.state.api_id,&self.state.api_hash),egui::Button::new(tr("Continue")).fill(design::GREEN)).clicked()||(enter&&credentials(&self.state.api_id,&self.state.api_hash)){
+ui.add(egui::TextEdit::singleline(&mut self.state.api_hash).password(true).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY));
+if ui.add_enabled(credentials(&self.state.api_id,&self.state.api_hash),egui::Button::new(egui::RichText::new(tr("Continue")).color(egui::Color32::BLACK)).fill(design::GREEN).corner_radius(20).min_size(egui::vec2(ui.available_width(),40.))).clicked()||(enter&&credentials(&self.state.api_id,&self.state.api_hash)){
 self.state.api_id=self.state.api_id.trim().into();
 self.state.api_hash=self.state.api_hash.trim().into();
 self.connect();
@@ -138,11 +141,11 @@ ui.label(tr("Telegram → Settings → Devices → Link Desktop Device"));
 ui.add_space(12.);
 ui.separator();
 ui.label(tr("Or sign in with your phone"));
-let response=ui.add(egui::TextEdit::singleline(&mut self.phone).hint_text(tr("Phone number with country code")));
+let response=ui.add(egui::TextEdit::singleline(&mut self.phone).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY).hint_text(tr("Phone number with country code")));
 if changed{
 response.request_focus();
 }
-if ui.button(tr("Continue with phone")).clicked()||enter{
+if design::primary(ui,tr("Continue with phone")).clicked()||enter{
 if self.phone.starts_with('+')&&self.phone.chars().filter(char::is_ascii_digit).count()>=7{
 self.submit_auth(json!({
 "@type":"setAuthenticationPhoneNumber","phone_number":self.phone,"settings":null}
@@ -160,11 +163,11 @@ let delivery=self.auth["code_info"]["type"]["@type"].as_str().unwrap_or("");
 ui.label(match delivery{
 "authenticationCodeTypeTelegramMessage"=>tr("We sent a code to your Telegram app."),"authenticationCodeTypeSms"=>tr("We sent an SMS to your phone."),_=>tr("Enter the verification code sent by Telegram.")}
 );
-let response=ui.add(egui::TextEdit::singleline(&mut self.code).hint_text(tr("Verification code")));
+let response=ui.add(egui::TextEdit::singleline(&mut self.code).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY).hint_text(tr("Verification code")));
 if changed{
 response.request_focus();
 }
-if ui.button(tr("Verify code")).clicked()||enter{
+if design::primary(ui,tr("Verify code")).clicked()||enter{
 let email=self.auth["@type"]=="authorizationStateWaitEmailCode";
 self.submit_auth(if email{
 json!({
@@ -195,11 +198,11 @@ self.submit_auth(json!({
 ui.heading(tr("Two-step verification"));
 ui.label(tr("Enter your Telegram password to finish signing in."));
 ui.weak(self.auth["password_hint"].as_str().unwrap_or(""));
-let response=ui.add(egui::TextEdit::singleline(&mut self.password).password(true).hint_text(tr("Password")));
+let response=ui.add(egui::TextEdit::singleline(&mut self.password).password(true).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY).hint_text(tr("Password")));
 if changed{
 response.request_focus();
 }
-if ui.button(tr("Sign in")).clicked()||enter{
+if design::primary(ui,tr("Sign in")).clicked()||enter{
 self.submit_auth(json!({
 "@type":"checkAuthenticationPassword","password":self.password}
 ));
@@ -208,11 +211,11 @@ self.submit_auth(json!({
 ,
    Phase::Email=>{
 ui.heading(tr("Verify your email"));
-let response=ui.add(egui::TextEdit::singleline(&mut self.phone).hint_text("name@example.com"));
+let response=ui.add(egui::TextEdit::singleline(&mut self.phone).margin(egui::vec2(12.,10.)).desired_width(f32::INFINITY).hint_text("name@example.com"));
 if changed{
 response.request_focus();
 }
-if ui.button(tr("Continue")).clicked()||enter{
+if design::primary(ui,tr("Continue")).clicked()||enter{
 self.submit_auth(json!({
 "@type":"setAuthenticationEmailAddress","email_address":self.phone}
 ));

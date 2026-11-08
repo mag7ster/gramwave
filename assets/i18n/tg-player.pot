@@ -264,3 +264,9 @@ msgid "{count} track"
 msgid_plural "{count} tracks"
 msgstr[0] ""
 msgstr[1] ""
+
+msgid "Copy link"
+msgstr ""
+
+msgid "ONE-TIME SETUP"
+msgstr ""
