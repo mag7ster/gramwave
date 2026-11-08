@@ -7,65 +7,189 @@ impl eframe::App for App {
         self.render(root);
     }
 }
-impl App {}
 impl App {
     pub(crate) fn settings_ui(&mut self, ctx: &egui::Context) {
-        let mut open = self.settings_open;
-        egui::Window::new(tr("Settings")).open(&mut open).show(ctx,|ui|{
-            ui.checkbox(&mut self.state.light,tr("Light appearance"));
-            ui.heading(tr("Default audio filters"));
-            for(i,label)in [tr("Music"),tr("Audio files"),tr("Voice messages")].iter().enumerate(){ui.checkbox(&mut self.state.filters[i],label.as_str());}
-            if ui.button(tr("Apply defaults to all playlists")).clicked(){for p in &mut self.state.playlists{p.filters=self.state.filters;}self.persist();}
-            ui.separator();ui.label(tr("Automatic cache: 2 GiB. Offline copies are kept separately."));
-            if ui.button(tr("Clear automatic cache")).clicked(){
-self.send(json!({
-"@type":"optimizeStorage","size":0,"ttl":0,"count":0,"immunity_delay":0,"file_types":[],"chat_ids":[],"exclude_chat_ids":[],"return_deleted_file_statistics":true,"chat_limit":0}
-));
-}
-
-            if !self.state.pending_pins.is_empty() && ui.button(tr("Cancel offline downloads")).clicked(){
-                self.pin_cancel.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
-                for t in self.state.pending_pins.iter().filter(|t| t.file > 0){self.send(json!({"@type":"cancelDownloadFile","file_id":t.file,"only_if_pending":true}));}
-                self.state.pending_pins.clear();self.persist();
-            }
-            ui.heading(tr("Offline library"));
-            let mut remove=None;
-            egui::ScrollArea::vertical().max_height(220.).show(ui,|ui|{
-                for p in &self.state.playlists{
-for t in &p.tracks{
-if let Some(path)=&t.pinned{
-ui.horizontal(|ui|{
-ui.label(&t.title);
-if ui.button(tr("Remove offline copy")).clicked(){
-remove=Some((t.chat,t.message,path.clone()));
-}
-}
-);
-}
-}
-}
-
+        if !self.settings_open {
+            return;
+        }
+        let p = design::palette(self.state.light);
+        let width = (ctx.content_rect().width() - 80.).clamp(280., 520.);
+        let mut close = false;
+        let mut changed = false;
+        let mut remove = None;
+        let response = egui::Modal::new(egui::Id::new("player-settings"))
+            .frame(
+                egui::Frame::new()
+                    .fill(p.panel)
+                    .corner_radius(16)
+                    .inner_margin(24.),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(width);
+                ui.set_height((ctx.content_rect().height() - 112.).clamp(200., 720.));
+                ui.spacing_mut().scroll.floating = false;
+                ui.spacing_mut().scroll.bar_width = 4.;
+                ui.horizontal(|ui| {
+                    ui.heading(egui::RichText::new(tr("Settings")).size(26.).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close = design::button(ui, design::Icon::Close, "Close settings");
+                    });
+                });
+                ui.add_space(12.);
+                egui::ScrollArea::vertical()
+                    .id_salt("settings-content")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                    .max_height((ctx.content_rect().height() - 160.).max(140.))
+                    .show(ui, |ui| {
+                        design::settings_section(ui, tr("Appearance"), |ui| {
+                            ui.weak(tr("Choose the player’s color scheme."));
+                            ui.horizontal(|ui| {
+                                if design::choice(ui, tr("Dark"), !self.state.light) {
+                                    self.state.light = false;
+                                    changed = true;
+                                }
+                                if design::choice(ui, tr("Light"), self.state.light) {
+                                    self.state.light = true;
+                                    changed = true;
+                                }
+                            });
+                        });
+                        design::settings_section(ui, tr("Playback"), |ui| {
+                            ui.label(tr("Shuffle"));
+                            ui.horizontal(|ui| {
+                                if design::choice(ui, tr("Off"), !self.state.shuffle) {
+                                    self.set_shuffle(false);
+                                }
+                                if design::choice(ui, tr("On"), self.state.shuffle) {
+                                    self.set_shuffle(true);
+                                }
+                            });
+                            ui.add_space(4.);
+                            ui.label(tr("Repeat"));
+                            ui.horizontal_wrapped(|ui| {
+                                for (mode, label) in [
+                                    (RepeatMode::Off, tr("Off")),
+                                    (RepeatMode::All, tr("All tracks")),
+                                    (RepeatMode::One, tr("One track")),
+                                ] {
+                                    if design::choice(ui, label, self.state.repeat == mode) {
+                                        self.set_repeat(mode);
+                                    }
+                                }
+                            });
+                            ui.add_space(4.);
+                            ui.label(tr("Default audio filters"));
+                            ui.horizontal_wrapped(|ui| {
+                                for (i, label) in
+                                    [tr("Music"), tr("Audio files"), tr("Voice messages")]
+                                        .into_iter()
+                                        .enumerate()
+                                {
+                                    if design::choice(ui, label, self.state.filters[i]) {
+                                        self.state.filters[i] = !self.state.filters[i];
+                                        changed = true;
+                                    }
+                                }
+                            });
+                            if ui.button(tr("Apply to all playlists")).clicked() {
+                                for playlist in &mut self.state.playlists {
+                                    playlist.filters = self.state.filters;
+                                }
+                                changed = true;
+                            }
+                        });
+                        design::settings_section(ui, tr("Offline storage"), |ui| {
+                            ui.label(tr("Automatic cache · 2 GiB"));
+                            ui.weak(tr("Saved offline tracks are kept separately."));
+                            if ui.button(tr("Clear automatic cache")).clicked() {
+                                self.clear_automatic_cache();
+                            }
+                            if !self.state.pending_pins.is_empty() {
+                                ui.weak(tr("Downloading offline tracks…"));
+                                if ui.button(tr("Cancel offline downloads")).clicked() {
+                                    self.cancel_offline_downloads();
+                                    changed = true;
+                                }
+                            }
+                            let mut any = false;
+                            for t in self.state.playlists.iter().flat_map(|p| &p.tracks) {
+                                if let Some(path) = &t.pinned {
+                                    if !any {
+                                        ui.add_space(8.);
+                                        ui.strong(tr("Saved tracks"));
+                                    }
+                                    any = true;
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            [ui.available_width() - 44., 36.],
+                                            egui::Label::new(&t.title).truncate(),
+                                        )
+                                        .on_hover_text(&t.title);
+                                        if design::button(
+                                            ui,
+                                            design::Icon::Close,
+                                            "Remove offline copy",
+                                        ) {
+                                            remove = Some((t.chat, t.message, path.clone()));
+                                        }
+                                    });
+                                }
+                            }
+                            if !any {
+                                ui.weak(tr("No offline tracks saved yet."));
+                            }
+                        });
+                        ui.add_space(4.);
+                        ui.small(
+                            egui::RichText::new(tr(
+                                "Online presence is always disabled by this player.",
+                            ))
+                            .weak(),
+                        );
+                    });
             });
-            if let Some((chat,message,path))=remove{
-if std::path::Path::new(&path).starts_with(self.root.join("offline")){
-let _=std::fs::remove_file(path);
-for p in &mut self.state.playlists{
-if p.id==chat{
-p.pinned=false;
-for t in &mut p.tracks{
-if t.message==message{
-t.pinned=None;
-}
-}
-}
-}
-self.persist();
-}
-}
-
-            ui.separator();ui.label(tr("Online presence is always disabled by this player."));
-        });
-        self.settings_open = open;
+        if let Some((chat, message, path)) = remove {
+            if std::path::Path::new(&path).starts_with(self.root.join("offline")) {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        for p in &mut self.state.playlists {
+                            if p.id == chat {
+                                p.pinned = false;
+                                for t in &mut p.tracks {
+                                    if t.message == message {
+                                        t.pinned = None;
+                                    }
+                                }
+                            }
+                        }
+                        changed = true;
+                    }
+                    Err(e) => {
+                        self.error = e.to_string();
+                        self.error_retry = None;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.persist();
+        }
+        if close || response.should_close() {
+            self.settings_open = false;
+        }
+    }
+    fn clear_automatic_cache(&self) {
+        self.send(json!({"@type":"optimizeStorage","size":0,"ttl":0,"count":0,"immunity_delay":0,"file_types":[],"chat_ids":[],"exclude_chat_ids":[],"return_deleted_file_statistics":true,"chat_limit":0}));
+    }
+    fn cancel_offline_downloads(&mut self) {
+        self.pin_cancel
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for t in self.state.pending_pins.iter().filter(|t| t.file > 0) {
+            self.send(
+                json!({"@type":"cancelDownloadFile","file_id":t.file,"only_if_pending":true}),
+            );
+        }
+        self.state.pending_pins.clear();
     }
 }
 
@@ -159,7 +283,7 @@ impl App {
                 if let egui::Event::Screenshot { image, .. } = event {
                     let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
                     let _ = image::save_buffer(
-                        "/tmp/tg-player-preview.png",
+                        demo::preview_path(),
                         &bytes,
                         image.width() as u32,
                         image.height() as u32,
@@ -188,10 +312,7 @@ impl App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                     fastframe_tray::Event::Menu("play") => {
-                        self.paused = !self.paused;
-                        if let Some(p) = &self.player {
-                            p.cmd(&["set", "pause", if self.paused { "yes" } else { "no" }]);
-                        }
+                        self.set_paused(!self.paused);
                     }
                     fastframe_tray::Event::Menu("next") => self.next(),
                     _ => {}
@@ -214,46 +335,46 @@ impl App {
             match command {
                 Command::Next => self.next(),
                 Command::PlayPause | Command::Pause | Command::Play => {
-                    self.paused = match command {
+                    let paused = match command {
                         Command::Play => false,
                         Command::Pause => true,
                         _ => !self.paused,
                     };
-                    if let Some(p) = &self.player {
-                        p.cmd(&["set", "pause", if self.paused { "yes" } else { "no" }]);
-                    }
+                    self.set_paused(paused);
                 }
+
                 Command::SeekBy(ms) => {
-                    if let Some(p) = &self.player {
-                        p.cmd(&["seek", &(ms as f64 / 1000.).to_string(), "relative"]);
-                    }
+                    let pos = self
+                        .player
+                        .as_ref()
+                        .map(|p| p.number("time-pos"))
+                        .unwrap_or(0.);
+                    self.seek(pos + ms as f64 / 1000.);
                 }
                 Command::SetPosition { track_id, position } => {
                     if self
+                        .state
+                        .session
                         .current
                         .as_ref()
                         .is_some_and(|t| format!("{}-{}", t.chat, t.message) == track_id)
                     {
-                        if let Some(p) = &self.player {
-                            p.cmd(&["seek", &position.as_secs_f64().to_string(), "absolute"]);
-                        }
+                        self.seek(position.as_secs_f64());
                     }
                 }
-                Command::SetVolume(v) => {
-                    self.volume = (v * 100.) as f32;
-                    if let Some(p) = &self.player {
-                        p.cmd(&["set", "volume", &self.volume.to_string()]);
-                    }
-                }
-                Command::SetShuffle(v) => self.shuffle = v,
-                Command::SetRepeat(v) => self.repeat = v != fastframe_now_playing::Repeat::Off,
+                Command::SetVolume(v) => self.set_volume((v * 100.) as f32),
+                Command::SetShuffle(v) => self.set_shuffle(v),
+                Command::SetRepeat(v) => self.set_repeat(v.into()),
                 Command::Previous => self.previous(),
                 Command::Stop => {
                     self.playback_generation += 1;
                     if let Some(p) = &self.player {
                         p.cmd(&["stop"]);
                     }
-                    self.current = None;
+                    self.state.session.current = None;
+                    self.loading = false;
+                    self.seek_preview = None;
+                    self.paused = true;
                 }
                 Command::Quit => {
                     self.quitting = true;
@@ -264,14 +385,14 @@ impl App {
             }
         }
         self.media.update(MediaState {
-            playback: if self.current.is_none() {
+            playback: if self.state.session.current.is_none() {
                 Playback::Stopped
-            } else if self.paused {
+            } else if self.paused || self.loading {
                 Playback::Paused
             } else {
                 Playback::Playing
             },
-            track: self.current.as_ref().map(|t| MediaTrack {
+            track: self.state.session.current.as_ref().map(|t| MediaTrack {
                 id: format!("{}-{}", t.chat, t.message),
                 title: t.title.clone(),
                 artists: vec![t.artist.clone()],
@@ -285,8 +406,9 @@ impl App {
                     .unwrap_or(0.)
                     .max(0.),
             ),
-            volume: Some(self.volume as f64 / 100.),
-            shuffle: Some(self.shuffle),
+            volume: Some(self.state.volume as f64 / 100.),
+            shuffle: Some(self.state.shuffle),
+            repeat: Some(self.state.repeat.into()),
             ..Default::default()
         });
 
@@ -294,15 +416,22 @@ impl App {
         let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
         for event in events {
             match event {
-                audio::PlaybackEvent::Finished if self.current.is_some() => {
-                    if self.repeat || !self.state.queue.is_empty() {
-                        self.next();
-                    } else {
-                        self.current = None;
+                audio::PlaybackEvent::Loaded => self.loading = false,
+                audio::PlaybackEvent::Finished if self.state.session.current.is_some() => {
+                    if !self.loading {
+                        self.advance(true);
                     }
                 }
+
                 audio::PlaybackEvent::Failed(error) => {
-                    self.status = format!("{}: {error}", tr("Unable to play track"));
+                    self.error = format!("{}: {error}", tr("Unable to play track"));
+                    self.error_retry = self
+                        .state
+                        .session
+                        .current
+                        .clone()
+                        .map(RetryAction::Playback);
+                    self.loading = false;
                     self.paused = true;
                 }
                 _ => {}

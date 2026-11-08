@@ -79,7 +79,16 @@ impl Playlist {
 pub struct State {
     pub playlists: Vec<Playlist>,
     pub chat_pins: Vec<i64>,
+    // Legacy queue remains the explicit manual queue.
     pub queue: Vec<Track>,
+    #[serde(default)]
+    pub queue_version: u8,
+    pub previous_queue: Vec<Track>,
+    pub session: crate::playback::Session,
+    pub repeat: crate::playback::RepeatMode,
+    pub shuffle: bool,
+    pub volume: f32,
+    pub unmuted_volume: f32,
     pub api_id: String,
     pub api_hash: String,
     pub light: bool,
@@ -93,6 +102,13 @@ impl Default for State {
             playlists: Vec::new(),
             chat_pins: Vec::new(),
             queue: Vec::new(),
+            queue_version: 1,
+            previous_queue: Vec::new(),
+            session: Default::default(),
+            repeat: Default::default(),
+            shuffle: false,
+            volume: 75.,
+            unmuted_volume: 75.,
             api_id: String::new(),
             api_hash: String::new(),
             light: false,
@@ -102,6 +118,36 @@ impl Default for State {
     }
 }
 impl State {
+    /// Older releases stored the automatic tail in `queue`; the first session
+    /// release misclassified it as manual. Repair only a substantial, exact
+    /// suffix already present in the automatic continuation. Keep a backup.
+    pub fn repair_legacy_queue(&mut self) -> bool {
+        if self.queue_version >= 1 {
+            return false;
+        }
+        self.queue_version = 1;
+        let count = self.queue.len();
+        if count < 8 || count > self.session.snapshot.len() {
+            return false;
+        }
+        let suffix = &self.session.snapshot[self.session.snapshot.len() - count..];
+        let automatic = &self.session.remaining;
+        if self
+            .queue
+            .iter()
+            .zip(suffix)
+            .all(|(a, b)| crate::playback::same(a, b))
+            && self
+                .queue
+                .iter()
+                .all(|q| automatic.iter().any(|a| crate::playback::same(q, a)))
+        {
+            self.previous_queue = std::mem::take(&mut self.queue);
+            return true;
+        }
+        false
+    }
+
     pub fn apply_message_deletions(&mut self, update: &serde_json::Value) {
         // TDLib also sends updateDeleteMessages when evicting its own cache.
         // The source messages still exist and our playlist metadata stays valid.
@@ -319,5 +365,70 @@ mod pin_tests {
         let old: State = serde_json::from_str(r#"{"playlists":[{"id":1,"pinned":true}]}"#).unwrap();
         assert!(old.chat_pins.is_empty());
         assert!(old.playlists[0].pinned);
+    }
+}
+
+#[cfg(test)]
+mod queue_repair_tests {
+    use super::*;
+    fn old_state() -> State {
+        let tracks: Vec<_> = (0..131)
+            .map(|message| Track {
+                chat: 7,
+                message,
+                ..Default::default()
+            })
+            .collect();
+        let mut state = State {
+            queue_version: 0,
+            queue: tracks[20..].to_vec(),
+            ..Default::default()
+        };
+        state.session.start(&tracks, 0, false);
+        state.session.remaining.reverse();
+        state
+    }
+    #[test]
+    fn repairs_duplicated_legacy_tail_without_losing_tracks_or_order() {
+        let mut state = old_state();
+        let before = state.session.remaining.clone();
+        let legacy = state.queue.clone();
+        assert!(state.repair_legacy_queue());
+        assert!(state.queue.is_empty());
+        assert_eq!(state.session.remaining, before);
+        assert_eq!(state.previous_queue, legacy);
+        state.session.reorder(false);
+        assert_eq!(state.session.remaining[0].message, 1);
+        assert_eq!(state.session.remaining.last().unwrap().message, 130);
+        assert!(!state.repair_legacy_queue());
+        let saved: State = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(saved.previous_queue, legacy);
+        assert_eq!(saved.queue_version, 1);
+    }
+    #[test]
+    fn leaves_explicit_or_nonduplicated_queues_untouched() {
+        let mut state = old_state();
+        state.queue.swap(0, 1);
+        let queue = state.queue.clone();
+        assert!(!state.repair_legacy_queue());
+        assert_eq!(state.queue, queue);
+        let mut state = old_state();
+        state.session.remaining.clear();
+        assert!(!state.repair_legacy_queue());
+        assert_eq!(state.queue.len(), 111);
+        let mut state = old_state();
+        state.queue_version = 1;
+        assert!(!state.repair_legacy_queue());
+        assert_eq!(state.queue.len(), 111);
+        let mut state = old_state();
+        state.queue = state.queue[105..].to_vec();
+        assert!(!state.repair_legacy_queue());
+        assert_eq!(state.queue.len(), 6);
+    }
+    #[test]
+    fn missing_version_is_detected_but_new_queues_are_versioned() {
+        let old: State = serde_json::from_str(r#"{"queue":[]}"#).unwrap();
+        assert_eq!(old.queue_version, 0);
+        assert_eq!(State::default().queue_version, 1);
     }
 }

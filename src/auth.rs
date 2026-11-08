@@ -231,7 +231,10 @@ self.submit_auth(json!({
             });
         }
         if !self.auth_error.is_empty() {
-            ui.colored_label(egui::Color32::from_rgb(255, 120, 120), &self.auth_error);
+            ui.colored_label(ui.visuals().error_fg_color, &self.auth_error);
+            if ui.button(tr("Copy error")).clicked() {
+                ui.ctx().copy_text(self.auth_error.clone());
+            }
         }
         ui.add_space(18.);
         ui.weak(tr("Listening does not announce you online."));

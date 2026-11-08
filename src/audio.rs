@@ -27,6 +27,7 @@ struct MpvEndFile {
 }
 #[derive(Debug, PartialEq)]
 pub enum PlaybackEvent {
+    Loaded,
     Finished,
     Stopped,
     Failed(String),
@@ -120,6 +121,8 @@ impl Player {
                     4 => events.push(PlaybackEvent::Failed(self.error(end.error))),
                     _ => {}
                 }
+            } else if event.id == 8 {
+                events.push(PlaybackEvent::Loaded);
             } else if event.id == 5 && event.error < 0 {
                 events.push(PlaybackEvent::Failed(self.error(event.error)));
             }
@@ -413,8 +416,10 @@ mod playback_tests {
         std::fs::write(&path, long).unwrap();
         player.cmd(&["loadfile", filename, "replace"]);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while player.number("duration") < 2. && std::time::Instant::now() < deadline {
+        let mut loaded = false;
+        while (!loaded || player.number("duration") < 2.) && std::time::Instant::now() < deadline {
             for event in player.drain() {
+                loaded |= event == PlaybackEvent::Loaded;
                 assert!(!matches!(
                     event,
                     PlaybackEvent::Finished | PlaybackEvent::Failed(_)
@@ -422,7 +427,29 @@ mod playback_tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(player.number("duration") > 2.);
+        assert!(loaded && player.number("duration") > 2.);
+        player.cmd(&["set", "pause", "yes"]);
+        player.cmd(&["seek", "2", "absolute+exact"]);
+        player.cmd(&["set", "volume", "32"]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while (player.number("time-pos") - 2.).abs() > 0.25 && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            (player.number("time-pos") - 2.).abs() < 0.25,
+            "mpv seek failed: position {}, events {:?}",
+            player.number("time-pos"),
+            player.drain()
+        );
+        // The null audio clock includes a small buffered offset while paused.
+        let paused_at = player.number("time-pos");
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(
+            (player.number("time-pos") - paused_at).abs() < 0.01,
+            "mpv pause failed"
+        );
+        assert!((player.number("volume") - 32.).abs() < 0.1);
         player.cmd(&["stop"]);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let mut stopped = false;

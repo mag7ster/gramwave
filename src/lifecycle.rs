@@ -57,6 +57,7 @@ pub fn run() -> eframe::Result {
         _ => return Ok(()),
     };
     let mut app = App::new();
+    demo::configure(&mut app);
     app.show_requested = show;
     if !app.demo && app.state.api_id.parse::<i32>().is_ok() && app.state.api_hash.len() == 32 {
         app.connect();
@@ -68,11 +69,14 @@ pub fn run() -> eframe::Result {
                 "TG Player",
                 eframe::NativeOptions {
                     viewport: egui::ViewportBuilder::default()
-                        .with_inner_size([1240., 800.])
+                        .with_inner_size(demo::window_size())
                         .with_min_inner_size([850., 550.]),
                     ..Default::default()
                 },
                 Box::new(move |cc| {
+                    if let Some(scale) = demo::scale() {
+                        cc.egui_ctx.set_zoom_factor(scale);
+                    }
                     cc.egui_ctx
                         .set_fonts(fastframe_fonts::FontSetup::default().definitions());
                     egui_extras::install_image_loaders(&cc.egui_ctx);

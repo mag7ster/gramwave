@@ -10,8 +10,11 @@ mod storage;
 mod ui;
 use i18n::tr;
 mod audio;
+mod demo;
 mod media_loader;
 mod model;
+mod playback;
+use playback::RepeatMode;
 mod telegram;
 use eframe::egui;
 use model::{Playlist, State, Track};
@@ -32,7 +35,19 @@ enum Event {
     PinFailed(i64, i64, String),
     Link(String),
 }
+enum RetryAction {
+    Playback(Track),
+    Chat(usize),
+    Offline(Track),
+    Catalog,
+}
 struct App {
+    #[cfg(test)]
+    test_rows: std::collections::BTreeMap<i64, (egui::Rect, egui::Rect)>,
+    #[cfg(test)]
+    test_seek: Option<(egui::Rect, egui::Id)>,
+    #[cfg(test)]
+    test_seeks: Vec<f64>,
     state: State,
     db: storage::Store,
     root: PathBuf,
@@ -65,10 +80,12 @@ struct App {
     code: String,
     password: String,
     qr: String,
-    current: Option<Track>,
-    history: Vec<Track>,
     paused: bool,
-    volume: f32,
+    loading: bool,
+    seek_preview: Option<f64>,
+    error: String,
+    error_retry: Option<RetryAction>,
+    pin_errors: std::collections::HashMap<(i64, i64), String>,
     queue_open: bool,
     demo: bool,
     busy: bool,
@@ -91,8 +108,6 @@ struct App {
     settings_open: bool,
     pin_cancel: std::sync::Arc<std::sync::atomic::AtomicU64>,
     last_link: String,
-    shuffle: bool,
-    repeat: bool,
 }
 fn root() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
@@ -104,7 +119,15 @@ fn root() -> PathBuf {
 }
 impl App {
     fn new() -> Self {
-        let root = root();
+        let demo = std::env::args().any(|s| s == "--demo");
+        let root = if demo {
+            std::env::temp_dir().join(format!("tg-player-demo-{}", std::process::id()))
+        } else {
+            root()
+        };
+        Self::new_at(root, demo)
+    }
+    fn new_at(root: PathBuf, demo: bool) -> Self {
         std::fs::create_dir_all(&root).expect("create app data");
         #[cfg(unix)]
         {
@@ -113,51 +136,21 @@ impl App {
         }
         let (db, mut state) =
             storage::Store::open(&root.join("library.sqlite")).expect("open library");
-        let demo = std::env::args().any(|s| s == "--demo");
         if demo {
-            state.api_id.clear();
-            state.api_hash.clear();
-            state.queue.clear();
-            state.playlists = (0..5)
-                .map(|i| Playlist {
-                    id: i,
-                    title: [
-                        "Midnight frequencies",
-                        "Saved Messages",
-                        "Jazz & coffee",
-                        "Electronic archive",
-                        "Music discoveries",
-                    ][i as usize]
-                        .into(),
-                    filters: [true, true, false],
-                    tracks: (0..40)
-                        .map(|j| Track {
-                            chat: i,
-                            message: j,
-                            title: format!(
-                                "{} {:02}",
-                                [
-                                    "Afterglow",
-                                    "Pacific",
-                                    "Blue hour",
-                                    "Signals",
-                                    "Slow motion"
-                                ][j as usize % 5],
-                                j + 1
-                            ),
-                            artist: ["Nils Frahm", "Bonobo", "Ólafur Arnalds", "Tycho"]
-                                [j as usize % 4]
-                                .into(),
-                            duration: 180 + j as u64 * 3,
-                            ..Default::default()
-                        })
-                        .collect(),
-                    ..Default::default()
-                })
-                .collect();
+            state = demo::state();
+        } else {
+            state.repair_legacy_queue();
+            db.save(state.clone());
         }
+
         let (tx, rx) = mpsc::channel();
         Self {
+            #[cfg(test)]
+            test_rows: Default::default(),
+            #[cfg(test)]
+            test_seek: None,
+            #[cfg(test)]
+            test_seeks: vec![],
             state,
             db,
             root,
@@ -198,10 +191,12 @@ impl App {
             } else {
                 String::new()
             },
-            current: None,
-            history: Vec::new(),
-            paused: false,
-            volume: 75.,
+            paused: true,
+            loading: false,
+            seek_preview: None,
+            error: String::new(),
+            error_retry: None,
+            pin_errors: Default::default(),
             queue_open: false,
             demo,
             busy: false,
@@ -247,8 +242,6 @@ impl App {
             settings_open: false,
             pin_cancel: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_link: String::new(),
-            shuffle: false,
-            repeat: false,
         }
     }
     fn persist(&self) {
@@ -322,13 +315,13 @@ impl App {
                         self.stream_base = p;
                         self.server = Some(a)
                     }
-                    Err(e) => self.status = e,
+                    Err(e) => self.error = e,
                 }
                 self.tg = Some(tg);
                 self.updates = Some(rx);
                 self.status = tr("Connecting…")
             }
-            Err(e) => self.status = e,
+            Err(e) => self.error = e,
         }
     }
     fn send(&self, v: Value) {
@@ -431,7 +424,19 @@ impl App {
         });
     }
     fn play(&mut self, t: Track) {
+        self.state
+            .session
+            .prepare_cycle(self.state.repeat, self.state.shuffle);
         self.playback_generation += 1;
+        self.seek_preview = None;
+        self.loading = true;
+        self.paused = false;
+        self.error.clear();
+        self.error_retry = Some(RetryAction::Playback(t.clone()));
+        if let Some(p) = &self.player {
+            p.cmd(&["stop"]);
+            p.drain();
+        }
         if !self.demo
             && t.file == 0
             && !t
@@ -439,7 +444,12 @@ impl App {
                 .as_ref()
                 .is_some_and(|p| std::path::Path::new(p).is_file())
         {
-            let Some(tg) = self.tg.clone() else { return };
+            let Some(tg) = self.tg.clone() else {
+                self.loading = false;
+                self.paused = true;
+                self.error = tr("Telegram is not connected");
+                return;
+            };
             let generation = self.playback_generation;
             let tx = self.tx.clone();
             self.status = tr("Loading track…");
@@ -454,14 +464,10 @@ impl App {
         self.play_ready(t);
     }
     fn play_ready(&mut self, t: Track) {
-        if let Some(old) = &self.current {
-            if (old.chat, old.message) != (t.chat, t.message) {
-                self.history.push(old.clone());
-            }
-        }
         if self.demo {
+            self.loading = false;
             self.status = tr("Demo tracks are fictional");
-            self.current = Some(t);
+            self.state.session.current = Some(t);
             return;
         }
         if let Some(p) = &self.player {
@@ -476,58 +482,135 @@ impl App {
                 })
                 .unwrap_or_else(|| format!("{}/{}", self.stream_base, t.file));
             p.cmd(&["loadfile", &path, "replace"]);
-            p.cmd(&["set", "pause", "no"]);
-            p.cmd(&["set", "volume", &self.volume.to_string()]);
-            self.current = Some(t);
+            p.cmd(&["set", "pause", if self.paused { "yes" } else { "no" }]);
+            p.cmd(&["set", "volume", &self.state.volume.to_string()]);
+            self.state.session.current = Some(t);
             self.status.clear();
-            self.paused = false;
-            if let (Some(tg), Some(next)) = (&self.tg, self.state.queue.first()) {
+            if let (Some(tg), Some(next)) = (
+                &self.tg,
+                self.state
+                    .queue
+                    .first()
+                    .or(self.state.session.remaining.first())
+                    .or(self.state.session.next_cycle.first()),
+            ) {
                 if next.file > 0 {
                     tg.request(json!({"@type":"downloadFile","file_id":next.file,"priority":1,"offset":0,"limit":1048576,"synchronous":false}));
                 }
             }
         } else {
-            self.status = tr("Playback requires libmpv.so.2")
+            self.error = tr("Playback requires libmpv.so.2");
+            self.loading = false;
+            self.paused = true;
         }
     }
-    fn previous(&mut self) {
-        if self
-            .player
-            .as_ref()
-            .is_some_and(|p| p.number("time-pos") > 3.)
-        {
-            if let Some(p) = &self.player {
-                p.cmd(&["seek", "0", "absolute"]);
+    fn retry_error(&mut self) {
+        self.error.clear();
+        match self.error_retry.take() {
+            Some(RetryAction::Playback(t)) => self.play(t),
+            Some(RetryAction::Chat(i)) => self.open_chat(i),
+            Some(RetryAction::Offline(t)) => self.pin(t),
+            Some(RetryAction::Catalog) => self.sync(),
+            None => {}
+        }
+    }
+    fn start_session(&mut self, tracks: &[Track], index: usize) {
+        if let Some(t) = self.state.session.start(tracks, index, self.state.shuffle) {
+            self.play(t);
+            self.persist();
+        }
+    }
+    fn set_paused(&mut self, paused: bool) {
+        if self.state.session.current.is_none() {
+            if !paused {
+                self.next();
             }
             return;
         }
-        if let Some(t) = self.history.pop() {
-            if let Some(current) = self.current.take() {
-                self.state.queue.insert(0, current);
+        self.paused = paused;
+        if let Some(p) = &self.player {
+            p.cmd(&["set", "pause", if paused { "yes" } else { "no" }]);
+        }
+    }
+    fn toggle_mute(&mut self) {
+        self.set_volume(if self.state.volume == 0. {
+            self.state.unmuted_volume.max(1.)
+        } else {
+            0.
+        });
+    }
+    fn set_volume(&mut self, volume: f32) {
+        if !volume.is_finite() {
+            return;
+        }
+        self.state.volume = volume.clamp(0., 100.);
+        if self.state.volume > 0. {
+            self.state.unmuted_volume = self.state.volume;
+        }
+        if let Some(p) = &self.player {
+            p.cmd(&["set", "volume", &self.state.volume.to_string()]);
+        }
+        self.persist();
+    }
+    fn set_shuffle(&mut self, shuffle: bool) {
+        if self.state.shuffle != shuffle {
+            self.state.shuffle = shuffle;
+            self.state.session.reorder(shuffle);
+            self.state.session.prepare_cycle(self.state.repeat, shuffle);
+            self.persist();
+        }
+    }
+    fn set_repeat(&mut self, repeat: RepeatMode) {
+        self.state.repeat = repeat;
+        self.state.session.prepare_cycle(repeat, self.state.shuffle);
+        self.persist();
+    }
+    fn seek(&mut self, position: f64) {
+        #[cfg(test)]
+        self.test_seeks.push(position);
+        self.seek_preview = None;
+        if !self.loading {
+            if let Some(p) = &self.player {
+                p.cmd(&["seek", &position.max(0.).to_string(), "absolute+exact"]);
             }
+        }
+    }
+    fn previous(&mut self) {
+        if !self.loading
+            && self
+                .player
+                .as_ref()
+                .is_some_and(|p| p.number("time-pos") > 3.)
+        {
+            self.seek(0.);
+            return;
+        }
+        if let Some(t) = self.state.session.previous(&mut self.state.queue) {
             self.play(t);
+            self.persist();
         }
     }
     fn next(&mut self) {
-        if self.repeat {
-            if let Some(t) = self.current.clone() {
-                self.play(t);
-                return;
+        self.advance(false);
+    }
+    fn advance(&mut self, eof: bool) {
+        if let Some(t) = self.state.session.advance(
+            &mut self.state.queue,
+            self.state.repeat,
+            self.state.shuffle,
+            eof,
+        ) {
+            self.play(t);
+        } else {
+            self.playback_generation += 1;
+            self.loading = false;
+            self.seek_preview = None;
+            self.paused = true;
+            if let Some(p) = &self.player {
+                p.cmd(&["stop"]);
             }
         }
-        if !self.state.queue.is_empty() {
-            let index = if self.shuffle {
-                (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos() as usize)
-                    % self.state.queue.len()
-            } else {
-                0
-            };
-            let t = self.state.queue.remove(index);
-            self.play(t)
-        }
+        self.persist();
     }
     fn pin(&mut self, t: Track) {
         if t.pinned.is_some()
@@ -539,6 +622,7 @@ impl App {
         {
             return;
         }
+        self.pin_errors.remove(&(t.chat, t.message));
         self.state.pending_pins.push(t.clone());
         self.persist();
         if let Some(jobs) = &self.pin_jobs {
@@ -567,8 +651,12 @@ impl App {
             .iter_mut()
             .flat_map(|p| p.tracks.iter_mut())
             .chain(self.state.queue.iter_mut())
+            .chain(self.state.session.remaining.iter_mut())
+            .chain(self.state.session.next_cycle.iter_mut())
+            .chain(self.state.session.snapshot.iter_mut())
+            .chain(self.state.session.history.iter_mut())
             .chain(self.state.pending_pins.iter_mut())
-            .chain(self.current.iter_mut())
+            .chain(self.state.session.current.iter_mut())
         {
             if (t.chat, t.message) == (track.chat, track.message) {
                 t.file = track.file;
@@ -589,7 +677,16 @@ impl App {
                 }
             }
         }
-        for t in self.state.queue.iter_mut().chain(self.current.iter_mut()) {
+        for t in self
+            .state
+            .queue
+            .iter_mut()
+            .chain(self.state.session.remaining.iter_mut())
+            .chain(self.state.session.next_cycle.iter_mut())
+            .chain(self.state.session.snapshot.iter_mut())
+            .chain(self.state.session.history.iter_mut())
+            .chain(self.state.session.current.iter_mut())
+        {
             if t.image_file == id {
                 t.image_path = Some(path.into());
             }
@@ -615,7 +712,7 @@ impl App {
                 self.state
                     .queue
                     .iter()
-                    .chain(self.current.iter())
+                    .chain(self.state.session.current.iter())
                     .find_map(|t| {
                         (t.image_file == id)
                             .then_some(t.image_path.as_deref())
@@ -630,7 +727,8 @@ impl App {
     }
     fn process(&mut self, ctx: &egui::Context) {
         if let Some(error) = self.db.error() {
-            self.status = error;
+            self.error_retry = None;
+            self.error = error;
         }
         let mut updates = Vec::new();
         if let Some(rx) = &self.updates {
@@ -800,7 +898,11 @@ impl App {
                             self.apply_track_media(&t);
                             self.play_ready(t);
                         }
-                        Err(e) => self.status = format!("{}: {e}", tr("Unable to play track")),
+                        Err(e) => {
+                            self.loading = false;
+                            self.paused = true;
+                            self.error = format!("{}: {e}", tr("Unable to play track"));
+                        }
                     }
                 }
                 Event::Artwork(id, result) => {
@@ -837,7 +939,8 @@ impl App {
                     }
                 }
                 Event::Error(s) => {
-                    self.status = s;
+                    self.error = s;
+                    self.error_retry = None;
                     self.busy = false
                 }
                 Event::Link(s) => {
@@ -846,10 +949,18 @@ impl App {
                     self.status = tr("Link copied")
                 }
                 Event::PinFailed(c, m, error) => {
+                    self.error_retry = self
+                        .state
+                        .pending_pins
+                        .iter()
+                        .find(|t| t.chat == c && t.message == m)
+                        .cloned()
+                        .map(RetryAction::Offline);
                     self.state
                         .pending_pins
                         .retain(|t| t.chat != c || t.message != m);
-                    self.status = error;
+                    self.pin_errors.insert((c, m), error.clone());
+                    self.error = error;
                     self.persist();
                 }
                 Event::Pinned(c, m, path) => {
@@ -860,6 +971,21 @@ impl App {
                             }
                         }
                     }
+                    for t in self
+                        .state
+                        .queue
+                        .iter_mut()
+                        .chain(self.state.session.snapshot.iter_mut())
+                        .chain(self.state.session.remaining.iter_mut())
+                        .chain(self.state.session.next_cycle.iter_mut())
+                        .chain(self.state.session.current.iter_mut())
+                        .chain(self.state.session.history.iter_mut())
+                    {
+                        if t.chat == c && t.message == m {
+                            t.pinned = Some(path.clone());
+                        }
+                    }
+                    self.pin_errors.remove(&(c, m));
                     self.state
                         .pending_pins
                         .retain(|t| t.chat != c || t.message != m);
@@ -869,13 +995,22 @@ impl App {
                 Event::Indexed(g, result) => {
                     if g == self.index_epoch.load(std::sync::atomic::Ordering::Relaxed) {
                         self.indexing_chat = None;
-                        self.status = result.err().unwrap_or_else(|| tr("Music loaded"));
+                        match result {
+                            Ok(()) => self.status = tr("Music loaded"),
+                            Err(e) => {
+                                self.error = e;
+                                self.error_retry = Some(RetryAction::Chat(self.selected));
+                            }
+                        }
                     }
                 }
                 Event::Catalog(result) => {
                     self.busy = false;
                     match result {
-                        Err(e) => self.status = e,
+                        Err(e) => {
+                            self.error = e;
+                            self.error_retry = Some(RetryAction::Catalog);
+                        }
                         Ok(chats) => {
                             for p in chats {
                                 if let Some(old) =

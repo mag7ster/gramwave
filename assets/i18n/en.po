@@ -1,5 +1,614 @@
 msgid ""
 msgstr ""
-"Content-Type: text/plain; charset=UTF-8\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-08 15:23+0300\n"
 "Language: en\n"
+"Content-Type: text/plain; charset=UTF-8\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: src/auth.rs:110
+msgid "API ID"
+msgstr ""
+
+#: src/auth.rs:112
+msgid "API hash"
+msgstr ""
+
+#: src/screens.rs:875
+msgid "Add to queue"
+msgstr ""
+
+#: src/screens.rs:1060
+msgid "Added by you"
+msgstr ""
+
+#: src/screens.rs:722
+msgid "All filters are off"
+msgstr ""
+
+#: src/ui.rs:72
+msgid "All tracks"
+msgstr ""
+
+#: src/ui.rs:44
+msgid "Appearance"
+msgstr ""
+
+#: src/ui.rs:94
+msgid "Apply to all playlists"
+msgstr ""
+
+#: src/screens.rs:645
+msgid "Artist"
+msgstr ""
+
+#: src/screens.rs:667 src/ui.rs:84
+msgid "Audio files"
+msgstr ""
+
+#: src/ui.rs:102
+msgid "Automatic cache · 2 GiB"
+msgstr ""
+
+#: src/ui.rs:109
+msgid "Cancel offline downloads"
+msgstr ""
+
+#: src/auth.rs:161
+msgid "Check your messages"
+msgstr ""
+
+#: src/screens.rs:549
+msgid "Choose a chat"
+msgstr ""
+
+#: src/ui.rs:45
+msgid "Choose the player’s color scheme."
+msgstr ""
+
+#: src/screens.rs:352
+msgid "Choose your soundtrack"
+msgstr ""
+
+#: src/ui.rs:104
+msgid "Clear automatic cache"
+msgstr ""
+
+#: src/screens.rs:1031
+msgid "Close queue"
+msgstr ""
+
+#: src/screens.rs:128
+msgid "Close search"
+msgstr ""
+
+#: src/ui.rs:35
+msgid "Close settings"
+msgstr ""
+
+#: src/main.rs:183
+msgid "Connect Telegram to discover your music"
+msgstr ""
+
+#: src/auth.rs:102
+msgid "Connect your Telegram"
+msgstr ""
+
+#: src/auth.rs:225
+msgid "Connecting securely to Telegram…"
+msgstr ""
+
+#: src/main.rs:322
+msgid "Connecting…"
+msgstr ""
+
+#: src/auth.rs:225
+msgid "Connection closed. Please reconnect."
+msgstr ""
+
+#: src/auth.rs:114 src/auth.rs:218
+msgid "Continue"
+msgstr ""
+
+#: src/auth.rs:148
+msgid "Continue with phone"
+msgstr ""
+
+#: src/screens.rs:635
+msgid "Copy chat link"
+msgstr ""
+
+#: src/auth.rs:235 src/screens.rs:301
+msgid "Copy error"
+msgstr ""
+
+#: src/auth.rs:107
+msgid "Copy link"
+msgstr ""
+
+#: src/screens.rs:877
+msgid "Copy message link"
+msgstr ""
+
+#: src/screens.rs:878
+msgid "Copy title"
+msgstr ""
+
+#: src/ui.rs:47
+msgid "Dark"
+msgstr ""
+
+#: src/ui.rs:81
+msgid "Default audio filters"
+msgstr ""
+
+#: src/main.rs:181
+msgid "Demo mode · not connected to Telegram"
+msgstr ""
+
+#: src/main.rs:469
+msgid "Demo tracks are fictional"
+msgstr ""
+
+#: src/screens.rs:307
+msgid "Dismiss"
+msgstr ""
+
+#: src/main.rs:281
+msgid "Download cancelled"
+msgstr ""
+
+#: src/screens.rs:828 src/screens.rs:898
+msgid "Download failed · Save offline to retry"
+msgstr ""
+
+#: src/demo.rs:43
+msgid "Download interrupted"
+msgstr ""
+
+#: src/main.rs:295
+msgid "Download timed out. Try saving again."
+msgstr ""
+
+#: src/ui.rs:108
+msgid "Downloading offline tracks…"
+msgstr ""
+
+#: src/screens.rs:826 src/screens.rs:894
+msgid "Downloading…"
+msgstr ""
+
+#: src/auth.rs:155
+msgid "Enter a phone number including the country code, for example +44…"
+msgstr ""
+
+#: src/auth.rs:164
+msgid "Enter the verification code sent by Telegram."
+msgstr ""
+
+#: src/auth.rs:199
+msgid "Enter your Telegram password to finish signing in."
+msgstr ""
+
+#: src/screens.rs:63 src/screens.rs:121
+msgid "Find a chat"
+msgstr ""
+
+#: src/screens.rs:1063
+msgid "From this session"
+msgstr ""
+
+#: src/auth.rs:106
+msgid "Get application credentials"
+msgstr ""
+
+#: src/i18n.rs:19
+msgid "Library"
+msgstr ""
+
+#: src/ui.rs:51
+msgid "Light"
+msgstr ""
+
+#: src/main.rs:949
+msgid "Link copied"
+msgstr ""
+
+#: src/auth.rs:240
+msgid "Listening does not announce you online."
+msgstr ""
+
+#: src/screens.rs:929
+msgid "Load more music"
+msgstr ""
+
+#: src/main.rs:344
+msgid "Loading chat list…"
+msgstr ""
+
+#: src/screens.rs:710
+msgid "Loading music from this chat…"
+msgstr ""
+
+#: src/screens.rs:726
+msgid "Loading music…"
+msgstr ""
+
+#: src/main.rs:455 src/screens.rs:367
+msgid "Loading track…"
+msgstr ""
+
+#: src/screens.rs:1092
+msgid "Move up"
+msgstr ""
+
+#: src/screens.rs:667 src/ui.rs:84
+msgid "Music"
+msgstr ""
+
+#: src/main.rs:999
+msgid "Music loaded"
+msgstr ""
+
+#: src/screens.rs:550
+msgid "Music loads only when you open a chat."
+msgstr ""
+
+#: src/screens.rs:523
+msgid "Mute"
+msgstr ""
+
+#: src/screens.rs:645
+msgid "Newest first"
+msgstr ""
+
+#: src/main.rs:219 src/screens.rs:401
+msgid "Next"
+msgstr ""
+
+#: src/screens.rs:1068
+msgid "Next cycle"
+msgstr ""
+
+#: src/screens.rs:141
+msgid "No chats found"
+msgstr ""
+
+#: src/screens.rs:724
+msgid "No matching tracks"
+msgstr ""
+
+#: src/screens.rs:728
+msgid "No music in this chat yet"
+msgstr ""
+
+#: src/ui.rs:139
+msgid "No offline tracks saved yet."
+msgstr ""
+
+#: src/auth.rs:103
+msgid "ONE-TIME SETUP"
+msgstr ""
+
+#: src/ui.rs:60 src/ui.rs:71
+msgid "Off"
+msgstr ""
+
+#: src/ui.rs:101
+msgid "Offline storage"
+msgstr ""
+
+#: src/ui.rs:63
+msgid "On"
+msgstr ""
+
+#: src/ui.rs:73
+msgid "One track"
+msgstr ""
+
+#: src/ui.rs:145
+msgid "Online presence is always disabled by this player."
+msgstr ""
+
+#: src/main.rs:1028
+msgid "Open a chat to load its music"
+msgstr ""
+
+#: src/screens.rs:634
+msgid "Open source chat"
+msgstr ""
+
+#: src/auth.rs:143
+msgid "Or sign in with your phone"
+msgstr ""
+
+#: src/auth.rs:201
+msgid "Password"
+msgstr ""
+
+#: src/auth.rs:144
+msgid "Phone number with country code"
+msgstr ""
+
+#: src/screens.rs:198 src/screens.rs:623
+msgid "Pin chat"
+msgstr ""
+
+#: src/screens.rs:143
+msgid "Pin chats here, or find one using search."
+msgstr ""
+
+#: src/screens.rs:873 src/screens.rs:1075
+msgid "Play"
+msgstr ""
+
+#: src/main.rs:218 src/screens.rs:397
+msgid "Play / pause"
+msgstr ""
+
+#: src/screens.rs:874
+msgid "Play next"
+msgstr ""
+
+#: src/ui.rs:57
+msgid "Playback"
+msgstr ""
+
+#: src/main.rs:502
+msgid "Playback requires libmpv.so.2"
+msgstr ""
+
+#: src/screens.rs:1040
+msgid "Playback uses the tracks loaded when you started."
+msgstr ""
+
+#: src/screens.rs:1038
+msgid "Playlist order"
+msgstr ""
+
+#: src/auth.rs:230
+msgid "Please wait…"
+msgstr ""
+
+#: src/screens.rs:387
+msgid "Previous"
+msgstr ""
+
+#: src/screens.rs:224
+msgid "Queue"
+msgstr ""
+
+#: src/screens.rs:508
+msgid "Queue closed · Open queue"
+msgstr ""
+
+#: src/screens.rs:506
+msgid "Queue open · Close queue"
+msgstr ""
+
+#: src/main.rs:221
+msgid "Quit"
+msgstr ""
+
+#: src/screens.rs:80 src/screens.rs:110
+msgid "Quit TG Player"
+msgstr ""
+
+#: src/screens.rs:639 src/screens.rs:731
+msgid "Refresh library"
+msgstr ""
+
+#: src/auth.rs:104
+msgid ""
+"Register an app at my.telegram.org, then paste its credentials below. Your "
+"login is saved on this device."
+msgstr ""
+
+#: src/screens.rs:1097
+msgid "Remove"
+msgstr ""
+
+#: src/ui.rs:131
+msgid "Remove offline copy"
+msgstr ""
+
+#: src/ui.rs:68
+msgid "Repeat"
+msgstr ""
+
+#: src/screens.rs:406
+msgid "Repeat all · Repeat one"
+msgstr ""
+
+#: src/screens.rs:405
+msgid "Repeat off · Repeat all"
+msgstr ""
+
+#: src/screens.rs:407
+msgid "Repeat one · Turn off"
+msgstr ""
+
+#: src/auth.rs:187
+#, rust-format
+msgid "Resend available in {seconds}s"
+msgstr ""
+
+#: src/auth.rs:189
+msgid "Resend code"
+msgstr ""
+
+#: src/screens.rs:304
+msgid "Retry"
+msgstr ""
+
+#: src/screens.rs:876
+msgid "Save offline"
+msgstr ""
+
+#: src/screens.rs:629
+msgid "Save playlist offline"
+msgstr ""
+
+#: src/main.rs:992
+msgid "Saved for offline listening"
+msgstr ""
+
+#: src/screens.rs:824 src/screens.rs:887
+msgid "Saved offline"
+msgstr ""
+
+#: src/ui.rs:103
+msgid "Saved offline tracks are kept separately."
+msgstr ""
+
+#: src/ui.rs:119
+msgid "Saved tracks"
+msgstr ""
+
+#: src/screens.rs:663
+msgid "Search this playlist"
+msgstr ""
+
+#: src/screens.rs:467
+msgid "Seek"
+msgstr ""
+
+#: src/screens.rs:355
+msgid "Select a track to get started"
+msgstr ""
+
+#: src/screens.rs:76 src/screens.rs:106 src/ui.rs:33
+msgid "Settings"
+msgstr ""
+
+#: src/main.rs:217
+msgid "Show player"
+msgstr ""
+
+#: src/ui.rs:58
+msgid "Shuffle"
+msgstr ""
+
+#: src/screens.rs:382
+msgid "Shuffle off · Turn on"
+msgstr ""
+
+#: src/screens.rs:380
+msgid "Shuffle on · Turn off"
+msgstr ""
+
+#: src/screens.rs:1036
+msgid "Shuffled order"
+msgstr ""
+
+#: src/auth.rs:205
+msgid "Sign in"
+msgstr ""
+
+#: src/auth.rs:123
+msgid "Sign in to Telegram"
+msgstr ""
+
+#: src/screens.rs:291
+msgid "Something went wrong"
+msgstr ""
+
+#: src/auth.rs:241
+msgid "Start over"
+msgstr ""
+
+#: src/screens.rs:586
+msgid "TELEGRAM PLAYLIST"
+msgstr ""
+
+#: src/main.rs:643
+msgid "Telegram does not provide a link for this message"
+msgstr ""
+
+#: src/main.rs:450
+msgid "Telegram is not connected"
+msgstr ""
+
+#: src/auth.rs:140
+msgid "Telegram → Settings → Devices → Link Desktop Device"
+msgstr ""
+
+#: src/main.rs:233
+msgid "That code is incorrect. Please try again."
+msgstr ""
+
+#: src/media_loader.rs:15
+msgid "This message no longer contains playable audio"
+msgstr ""
+
+#: src/screens.rs:645
+msgid "Title"
+msgstr ""
+
+#: src/auth.rs:198
+msgid "Two-step verification"
+msgstr ""
+
+#: src/demo.rs:45 src/main.rs:904 src/ui.rs:427
+msgid "Unable to play track"
+msgstr ""
+
+#: src/screens.rs:521
+msgid "Unmute"
+msgstr ""
+
+#: src/screens.rs:196 src/screens.rs:621
+msgid "Unpin chat"
+msgstr ""
+
+#: src/screens.rs:1030
+msgid "Up next"
+msgstr ""
+
+#: src/auth.rs:166
+msgid "Verification code"
+msgstr ""
+
+#: src/auth.rs:170
+msgid "Verify code"
+msgstr ""
+
+#: src/auth.rs:213
+msgid "Verify your email"
+msgstr ""
+
+#: src/model.rs:229
+msgid "Voice message"
+msgstr ""
+
+#: src/screens.rs:667 src/ui.rs:84
+msgid "Voice messages"
+msgstr ""
+
+#: src/screens.rs:535
+msgid "Volume"
+msgstr ""
+
+#: src/auth.rs:164
+msgid "We sent a code to your Telegram app."
+msgstr ""
+
+#: src/auth.rs:164
+msgid "We sent an SMS to your phone."
+msgstr ""
+
+#: src/screens.rs:28
+msgid "Your Telegram. Your soundtrack."
+msgstr ""
+
+#: src/screens.rs:60 src/screens.rs:104
+msgid "Your library"
+msgstr ""
+
+#: src/screens.rs:556
+msgid "Your next favourite is waiting."
+msgstr ""
+
+#: src/screens.rs:1045
+msgid "Your queue is empty"
+msgstr ""

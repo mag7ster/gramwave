@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 enum Request {
-    Save(State),
+    Save(Box<State>),
     Flush(mpsc::Sender<()>),
 }
 pub struct Store {
@@ -54,7 +54,7 @@ impl Store {
         Ok((Self { tx, error }, state))
     }
     pub fn save(&self, state: State) {
-        let _ = self.tx.send(Request::Save(state));
+        let _ = self.tx.send(Request::Save(Box::new(state)));
     }
     pub fn flush(&self) {
         let (tx, rx) = mpsc::channel();

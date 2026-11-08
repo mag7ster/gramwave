@@ -25,14 +25,15 @@ are delivered; SMS is not guaranteed for third-party clients.
 
 ## Interface and sign-in
 
-The player uses a Spotify-inspired dark layout, SVG controls, an optional queue
-panel, and Telegram artwork when available. Set API credentials once; later
+The player uses compact dark or light surfaces, SVG controls, an optional queue
+panel, and Telegram artwork when available. The queue floats over the content
+on narrow windows. At large UI scales the library moves into a compact menu. Set API credentials once; later
 launches automatically restore the saved session. QR is the initial sign-in
 method; phone, verification code, email and 2FA are separate form steps.
 
 Closing the window (including niri Mod+Q) destroys only the window and keeps
 playback in the tray. Launching again restores the same process. Choose
-**Quit TG Player**, tray **Quit**, or Ctrl+Shift+Q to exit completely. Without
+**Your library → … → Quit TG Player**, tray **Quit**, or Ctrl+Shift+Q to exit completely. Without
 a tray host, closing exits so the app cannot become inaccessible.
 
 Preview sign-in screens without an account:
@@ -65,8 +66,32 @@ cargo run -- --demo --preview-auth=error
   including offline downloads. This prevents audio and artwork IDs from being mixed.
 - Music, audio documents and voice messages have separate playlist filters.
 - Playback advances on mpv end-of-file events; manual stop does not advance it.
-- Double-click a track to play it. `+` adds it to the queue; `⤒` plays it next.
-- Queue order is independent of Telegram. Nothing edits source messages.
+- Click anywhere on a track row to play it; click the current track to pause or
+  resume. A double click does not immediately pause a newly started track.
+  Row menus have independent actions, including copying the title.
+- Starting a track snapshots the currently loaded, filtered and sorted list.
+  Changing chats, search, sorting or loading more pages leaves this session intact.
+  Without shuffle, playback continues with the following row. With shuffle, the
+  chosen track plays first and the other snapshot tracks play once per cycle.
+- Shuffle rebuilds only the remaining automatic order. The queue displays that
+  exact order, including the prepared next cycle at a Repeat All boundary.
+  **Play next** prepends to the manual queue; **Add to queue** appends to it.
+  Manual entries play before automatic tracks and never shuffle or repeat as
+  manual additions. Starting another row preserves these explicit additions.
+- Repeat cycles **Off → All → One → Off**. One repeats natural EOF only;
+  Next always advances. All starts another snapshot cycle. Previous restarts
+  after three seconds; earlier it returns through history and restores the
+  current track to the immediate continuation.
+- Tab reaches controls and rows; Enter activates a focused row. Space controls
+  playback outside text fields. Seek supports click, drag preview and keyboard
+  arrows (five seconds), Home and End. Volume arrows change one percent. Unknown
+  duration disables seek. Mute restores the last nonzero volume.
+- Modes, volume and the upcoming queue survive restart, without starting playback.
+  Old saved queues are imported as manual entries. A duplicated legacy playlist
+  tail already present in the automatic queue is repaired once on startup; its
+  original entries remain in the saved `previous_queue` backup. Explicit manual
+  additions are preserved. Selecting a later queue entry skips to it and continues
+  with the entries that follow. Queue order is independent of Telegram. Nothing edits source messages.
 - The download button saves a separate offline copy; saving a playlist also
   enables saving new matching tracks. Offline copies survive cache cleanup.
 - Public chat links and available message links open in Telegram. Some private
@@ -96,9 +121,32 @@ Automated checks cover the native TDLib bootstrap, read-only presence policy,
 audio parsing, SQLite persistence and loopback range streaming. Full QR/2FA
 login and playback from Telegram still need verification with a real account.
 
-`--demo` uses fictional library metadata and does not connect to Telegram.
-`--demo --smoke-test` opens the window briefly, saves an application-only
-preview to `/tmp/tg-player-preview.png`, and exits.
+`--demo` uses fictional library metadata, an isolated temporary data directory
+and no Telegram connection. `--demo --smoke-test` opens the window briefly,
+saves an application-only preview to `/tmp/tg-player-preview.png`, and exits.
+Reproduce visual fixtures with long Latin/Cyrillic metadata, missing artwork,
+unknown duration, offline badges and active controls:
+
+```sh
+cargo run -- --demo --scenario=playing --size=850x550 --smoke-test --screenshot=/tmp/dark-small.png
+cargo run -- --demo --scenario=playing --size=1240x800 --light --smoke-test --screenshot=/tmp/light-large.png
+cargo run -- --demo --scenario=loading --size=1240x800 --scale=2 --smoke-test --screenshot=/tmp/loading-200.png
+cargo run -- --demo --scenario=error --size=1240x800 --scale=2 --light --smoke-test --screenshot=/tmp/error-200.png
+```
+
+Scenarios: `playing`, `paused`, `loading`, `error`, `settings`, `empty`, `filters`, `search`,
+`queue` (empty queue). `--light` and `--scale=2` work with every scenario.
+Sizes are logical window units; the compositor may override requested sizes,
+and native display scaling changes screenshot pixel dimensions. Resize or float
+this demo window when comparing exact sizes under a tiling compositor.
+
+Tests include session transitions and legacy JSON, egui pointer/keyboard events,
+text/control contrast in both palettes, and libmpv EOF, pause, volume and seeking
+using null audio output. For real MPRIS round trips in an isolated bus, build the
+debug binary and run `dbus-run-session python3 scripts/check-mpris.py` (requires
+`gdbus` and a graphical session). Demo and null-output tests do not verify audible
+output or authenticated Telegram streaming; those still require a real account
+and listening device.
 
 For a UI-only build without TDLib, use `cargo run --no-default-features -- --demo`.
 The local bundle keeps TDLib in `lib/`; mpv and its C++ dependencies remain system
@@ -106,7 +154,8 @@ dependencies.
 
 The application separates the resident/window lifecycle (`lifecycle.rs`),
 screens (`screens.rs`), sign-in state (`auth.rs`), Telegram requests (`telegram.rs`),
-media output/range streaming (`audio.rs`) and persisted data (`model.rs`).
+media output/range streaming (`audio.rs`), playback sessions (`playback.rs`),
+visual fixtures (`demo.rs`) and persisted data (`model.rs`).
 Playback uses a loopback HTTP range bridge to feed TDLib's existing cache to
 mpv, with an unpredictable per-process URL. It does not expose a LAN server.
 
