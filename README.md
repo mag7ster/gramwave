@@ -57,6 +57,9 @@ cargo run -- --demo --preview-auth=error
 - Startup loads chat names only, without searching message history or counting tracks.
 - Opening a chat loads one page per enabled audio type. Scroll to load more;
   switching chats cancels further work for the previous one. No track totals are shown.
+- Saved tracks retain message identities, not TDLib runtime file IDs. After a
+  restart, file metadata is resolved only for visible tracks or a requested track,
+  including offline downloads. This prevents audio and artwork IDs from being mixed.
 - Music, audio documents and voice messages have separate playlist filters.
 - Double-click a track to play it. `+` adds it to the queue; `⤒` plays it next.
 - Queue order is independent of Telegram. Nothing edits source messages.

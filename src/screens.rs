@@ -4,6 +4,7 @@ impl App {
     pub(crate) fn render(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
         self.image_wanted.clear();
+        self.track_wanted.clear();
         design::style(&ctx, self.state.light);
         if !ctx.egui_wants_keyboard_input() {
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
@@ -497,6 +498,9 @@ impl App {
                 for i in range {
                     let t = &tracks[i];
                     self.image_wanted.push(t.image_file);
+                    if t.file == 0 {
+                        self.track_wanted.push(t.clone());
+                    }
                     let active = self
                         .current
                         .as_ref()

@@ -4,14 +4,18 @@ use serde::{Deserialize, Serialize};
 pub struct Track {
     pub chat: i64,
     pub message: i64,
+    #[serde(skip)]
     pub file: i64,
     pub title: String,
     pub artist: String,
     pub duration: u64,
     pub kind: usize,
     pub pinned: Option<String>,
+    #[serde(skip)]
     pub cached: Option<String>,
+    #[serde(skip)]
     pub image_file: i64,
+    #[serde(skip)]
     pub image_path: Option<String>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -20,7 +24,9 @@ pub struct Playlist {
     pub id: i64,
     pub title: String,
     pub url: String,
+    #[serde(skip)]
     pub image_file: i64,
+    #[serde(skip)]
     pub image_path: Option<String>,
     pub tracks: Vec<Track>,
     pub filters: [bool; 3],
@@ -134,13 +140,24 @@ pub fn track(chat: i64, v: &serde_json::Value) -> Option<Track> {
         duration: a["duration"].as_u64().unwrap_or(0),
         kind,
         pinned: None,
-        cached: None,
+        cached: local_path(f),
         image_file: a["album_cover_thumbnail"]["file"]["id"]
             .as_i64()
             .or_else(|| a["thumbnail"]["file"]["id"].as_i64())
             .unwrap_or(0),
-        image_path: None,
+        image_path: local_path(&a["album_cover_thumbnail"]["file"])
+            .or_else(|| local_path(&a["thumbnail"]["file"])),
     })
+}
+fn local_path(file: &serde_json::Value) -> Option<String> {
+    (file["local"]["is_downloading_completed"] == true)
+        .then(|| {
+            file["local"]["path"]
+                .as_str()
+                .filter(|p| !p.is_empty())
+                .map(str::to_owned)
+        })
+        .flatten()
 }
 pub fn default_filters() -> [bool; 3] {
     [true, true, false]

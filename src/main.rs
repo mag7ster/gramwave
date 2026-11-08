@@ -10,6 +10,7 @@ mod storage;
 mod ui;
 use i18n::tr;
 mod audio;
+mod media_loader;
 mod model;
 mod telegram;
 use eframe::egui;
@@ -18,6 +19,8 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, sync::mpsc, time::Duration};
 enum Event {
     Progress(String),
+    TrackReady((i64, i64), Result<Track, String>),
+    PlaybackReady(u64, Result<Track, String>),
     Artwork(i64, Result<String, String>),
     Playlist(u64, Playlist),
     Catalog(Result<Vec<Playlist>, String>),
@@ -46,6 +49,10 @@ struct App {
     chat_query: String,
     chat_search_active: bool,
     image_wanted: Vec<i64>,
+    track_wanted: Vec<Track>,
+    track_requests: std::collections::HashSet<(i64, i64)>,
+    track_retry: std::collections::HashMap<(i64, i64), std::time::Instant>,
+    playback_generation: u64,
     image_retry: std::collections::HashMap<i64, std::time::Instant>,
     search: String,
     status: String,
@@ -167,6 +174,10 @@ impl App {
             chat_query: String::new(),
             chat_search_active: false,
             image_wanted: Vec::new(),
+            track_wanted: Vec::new(),
+            track_requests: Default::default(),
+            track_retry: Default::default(),
+            playback_generation: 0,
             image_retry: Default::default(),
             search: String::new(),
             notice: String::new(),
@@ -267,6 +278,7 @@ impl App {
                             continue;
                         }
                         let result = (|| -> Result<String, String> {
+                            let t = media_loader::resolve(&downloader, &t)?;
                             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                             downloader.call(json!({"@type":"downloadFile","file_id":t.file,"priority":8,"offset":0,"limit":0,"synchronous":false}))?;
                             let mut complete = None;
@@ -385,6 +397,29 @@ impl App {
         });
     }
     fn play(&mut self, t: Track) {
+        self.playback_generation += 1;
+        if !self.demo
+            && t.file == 0
+            && !t
+                .pinned
+                .as_ref()
+                .is_some_and(|p| std::path::Path::new(p).is_file())
+        {
+            let Some(tg) = self.tg.clone() else { return };
+            let generation = self.playback_generation;
+            let tx = self.tx.clone();
+            self.status = tr("Loading track…");
+            std::thread::spawn(move || {
+                let _ = tx.send(Event::PlaybackReady(
+                    generation,
+                    media_loader::resolve(&tg, &t),
+                ));
+            });
+            return;
+        }
+        self.play_ready(t);
+    }
+    fn play_ready(&mut self, t: Track) {
         if let Some(old) = &self.current {
             if (old.chat, old.message) != (t.chat, t.message) {
                 self.history.push(old.clone());
@@ -399,17 +434,24 @@ impl App {
             let path = t
                 .pinned
                 .clone()
-                .or(t.cached.clone())
                 .filter(|p| std::path::Path::new(p).is_file())
+                .or_else(|| {
+                    t.cached
+                        .clone()
+                        .filter(|p| std::path::Path::new(p).is_file())
+                })
                 .unwrap_or_else(|| format!("{}/{}", self.stream_base, t.file));
             p.cmd(&["loadfile", &path, "replace"]);
             p.cmd(&["set", "pause", "no"]);
             p.cmd(&["set", "volume", &self.volume.to_string()]);
             self.current = Some(t);
+            self.status.clear();
             self.paused = false;
             self.started = false;
             if let (Some(tg), Some(next)) = (&self.tg, self.state.queue.first()) {
-                tg.request(json!({"@type":"downloadFile","file_id":next.file,"priority":1,"offset":0,"limit":1048576,"synchronous":false}));
+                if next.file > 0 {
+                    tg.request(json!({"@type":"downloadFile","file_id":next.file,"priority":1,"offset":0,"limit":1048576,"synchronous":false}));
+                }
             }
         } else {
             self.status = tr("Playback requires libmpv.so.2")
@@ -484,6 +526,24 @@ impl App {
                 Err(_) => Event::Error(tr("Telegram does not provide a link for this message")),
             });
         });
+    }
+    fn apply_track_media(&mut self, track: &Track) {
+        for t in self
+            .state
+            .playlists
+            .iter_mut()
+            .flat_map(|p| p.tracks.iter_mut())
+            .chain(self.state.queue.iter_mut())
+            .chain(self.state.pending_pins.iter_mut())
+            .chain(self.current.iter_mut())
+        {
+            if (t.chat, t.message) == (track.chat, track.message) {
+                t.file = track.file;
+                t.cached = track.cached.clone();
+                t.image_file = track.image_file;
+                t.image_path = track.image_path.clone();
+            }
+        }
     }
     fn apply_artwork(&mut self, id: i64, path: &str) {
         for p in &mut self.state.playlists {
@@ -683,6 +743,31 @@ impl App {
         }
         while let Ok(e) = self.rx.try_recv() {
             match e {
+                Event::TrackReady(key, result) => {
+                    self.track_requests.remove(&key);
+                    match result {
+                        Ok(t) => {
+                            self.track_retry.remove(&key);
+                            self.apply_track_media(&t);
+                        }
+                        Err(_) => {
+                            self.track_retry
+                                .insert(key, std::time::Instant::now() + Duration::from_secs(15));
+                        }
+                    }
+                }
+                Event::PlaybackReady(generation, result) => {
+                    if generation != self.playback_generation {
+                        continue;
+                    }
+                    match result {
+                        Ok(t) => {
+                            self.apply_track_media(&t);
+                            self.play_ready(t);
+                        }
+                        Err(e) => self.status = format!("{}: {e}", tr("Unable to play track")),
+                    }
+                }
                 Event::Artwork(id, result) => {
                     self.image_requests.remove(&id);
                     let path = match result {
@@ -780,16 +865,28 @@ impl App {
                         continue;
                     }
                     if let Some(old) = self.state.playlists.iter_mut().find(|x| x.id == p.id) {
-                        p.image_path = p.image_path.or(old.image_path.clone());
+                        if p.image_file == 0 {
+                            p.image_file = old.image_file;
+                        }
+                        if p.image_file == old.image_file {
+                            p.image_path = p.image_path.or(old.image_path.clone());
+                        }
                         p.filters = old.filters;
                         p.pinned = old.pinned;
                         for t in &mut p.tracks {
-                            t.image_path = t.image_path.clone().or_else(|| {
-                                old.tracks
-                                    .iter()
-                                    .find(|x| x.message == t.message)
-                                    .and_then(|x| x.image_path.clone())
-                            });
+                            if let Some(previous) =
+                                old.tracks.iter().find(|x| x.message == t.message)
+                            {
+                                if t.file == 0 {
+                                    t.file = previous.file;
+                                    t.cached = previous.cached.clone();
+                                    t.image_file = previous.image_file;
+                                }
+                                if t.image_file == previous.image_file {
+                                    t.image_path =
+                                        t.image_path.clone().or(previous.image_path.clone());
+                                }
+                            }
                             t.pinned = old
                                 .tracks
                                 .iter()

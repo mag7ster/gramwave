@@ -25,7 +25,7 @@ self.send(json!({
 
             if !self.state.pending_pins.is_empty() && ui.button(tr("Cancel offline downloads")).clicked(){
                 self.pin_cancel.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
-                for t in &self.state.pending_pins{self.send(json!({"@type":"cancelDownloadFile","file_id":t.file,"only_if_pending":true}));}
+                for t in self.state.pending_pins.iter().filter(|t| t.file > 0){self.send(json!({"@type":"cancelDownloadFile","file_id":t.file,"only_if_pending":true}));}
                 self.state.pending_pins.clear();self.persist();
             }
             ui.heading(tr("Offline library"));
@@ -73,6 +73,24 @@ impl App {
     pub fn background(&mut self, ctx: &egui::Context, window_present: bool) {
         self.process(ctx);
         if let Some(tg) = &self.tg {
+            for t in self.track_wanted.clone() {
+                let key = (t.chat, t.message);
+                if self.track_requests.len() >= 4
+                    || self.track_requests.contains(&key)
+                    || self
+                        .track_retry
+                        .get(&key)
+                        .is_some_and(|at| *at > std::time::Instant::now())
+                {
+                    continue;
+                }
+                self.track_requests.insert(key);
+                let tg = tg.clone();
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Event::TrackReady(key, media_loader::resolve(&tg, &t)));
+                });
+            }
             for id in self.image_wanted.clone() {
                 if id == 0 || self.image_requests.len() >= 4 {
                     continue;
@@ -234,6 +252,7 @@ impl App {
                 Command::SetRepeat(v) => self.repeat = v != fastframe_now_playing::Repeat::Off,
                 Command::Previous => self.previous(),
                 Command::Stop => {
+                    self.playback_generation += 1;
                     if let Some(p) = &self.player {
                         p.cmd(&["stop"]);
                     }

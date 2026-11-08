@@ -309,3 +309,12 @@ msgstr ""
 
 msgid "Unpin chat"
 msgstr ""
+
+msgid "Loading track…"
+msgstr ""
+
+msgid "Unable to play track"
+msgstr ""
+
+msgid "This message no longer contains playable audio"
+msgstr ""
