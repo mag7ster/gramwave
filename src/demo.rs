@@ -1,5 +1,6 @@
 //! Deterministic, account-free visual fixtures; only --demo activates them.
-use crate::*;
+use crate::{tr, App, Playlist, RepeatMode, RetryAction, State, Track};
+use std::path::PathBuf;
 fn option(prefix: &str) -> Option<String> {
     std::env::args().find_map(|a| a.strip_prefix(prefix).map(str::to_owned))
 }

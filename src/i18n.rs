@@ -13,9 +13,5 @@ pub fn tr(source: &'static str) -> String {
     fastframe_i18n::gettext(Locale::English, source).into_owned()
 }
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn english_is_fallback() {
-        assert_eq!(super::tr("Library"), "Library");
-    }
-}
+#[path = "i18n/tests.rs"]
+mod tests;

@@ -1,4 +1,6 @@
-use crate::*;
+use crate::{design, tr, App, Event};
+use eframe::egui;
+use serde_json::{json, Value};
 #[derive(Debug, PartialEq)]
 enum Phase {
     Setup,
@@ -75,7 +77,7 @@ impl App {
         self.auth_pending = true;
         self.auth_error.clear();
         let tx = self.tx.clone();
-        std::thread::spawn(move || {
+        self.spawn(move || {
             let result = tg.call(v).map(|_| ());
             let _ = tx.send(Event::AuthResult(token, result));
         });
@@ -244,19 +246,5 @@ self.submit_auth(json!({
     }
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn credential_validation() {
-        assert!(credentials("123", "0123456789abcdef0123456789abcdef"));
-        assert!(!credentials("0", "0123456789abcdef0123456789abcdef"));
-        assert!(!credentials("123", "wrong"));
-    }
-    #[test]
-    fn qr_can_require_password() {
-        assert_eq!(
-            phase(true, &json!({"@type":"authorizationStateWaitPassword"})),
-            Phase::Password
-        );
-    }
-}
+#[path = "auth/tests.rs"]
+mod tests;

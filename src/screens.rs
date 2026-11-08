@@ -1,5 +1,8 @@
-use crate::*;
+use crate::application::commands::AppCommand;
+use crate::{design, playback, tr, App, RepeatMode};
 use design::{button, Icon};
+use eframe::egui;
+use std::time::Duration;
 impl App {
     pub(crate) fn render(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
@@ -11,7 +14,7 @@ impl App {
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {
-            self.set_paused(!self.paused);
+            self.execute(AppCommand::Pause(!self.paused));
         }
 
         if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Q)) {
@@ -408,10 +411,10 @@ impl App {
                             tr("Shuffle off · Turn on")
                         };
                         if design::toggle(ui, Icon::Shuffle, self.state.shuffle, "", shuffle_hint) {
-                            self.set_shuffle(!self.state.shuffle);
+                            self.execute(AppCommand::Shuffle(!self.state.shuffle));
                         }
                         if button(ui, Icon::Previous, "Previous") {
-                            self.previous();
+                            self.execute(AppCommand::Previous);
                         }
                         if button(
                             ui,
@@ -422,10 +425,10 @@ impl App {
                             },
                             "Play / pause",
                         ) {
-                            self.set_paused(!self.paused);
+                            self.execute(AppCommand::Pause(!self.paused));
                         }
                         if button(ui, Icon::Next, "Next") {
-                            self.next();
+                            self.execute(AppCommand::Next);
                         }
                         let hint = match self.state.repeat {
                             RepeatMode::Off => tr("Repeat off · Repeat all"),
@@ -443,7 +446,7 @@ impl App {
                             },
                             hint,
                         ) {
-                            self.set_repeat(self.state.repeat.next());
+                            self.execute(AppCommand::Repeat(self.state.repeat.next()));
                         }
                     });
                     let duration = if self.loading {
@@ -509,7 +512,7 @@ impl App {
                                 || response.clicked()
                                 || (response.changed() && !response.is_pointer_button_down_on()))
                         {
-                            self.seek(preview);
+                            self.execute(AppCommand::Seek(preview));
                         }
                         ui.small(if enabled {
                             clock(duration)
@@ -563,7 +566,7 @@ impl App {
                         )
                         .changed()
                     {
-                        self.set_volume(volume as f32);
+                        self.execute(AppCommand::Volume(volume as f32));
                     }
                 });
             });
@@ -577,7 +580,15 @@ impl App {
             return;
         }
 
-        let Some(p) = self.state.playlists.get(self.selected) else {
+        let Some(selected) = self
+            .state
+            .playlists
+            .iter()
+            .position(|p| Some(p.id) == self.opened_chat.or(self.demo.then_some(0)))
+        else {
+            return;
+        };
+        let Some(p) = self.state.playlists.get(selected) else {
             ui.add_space(80.);
             ui.heading(tr("Your next favourite is waiting."));
             ui.weak(&self.status);
@@ -663,7 +674,7 @@ impl App {
                     }
                 }
                 if ui.button(tr("Refresh library")).clicked() {
-                    self.open_chat(self.selected);
+                    self.open_chat(selected);
                     ui.close();
                 }
             });
@@ -681,7 +692,7 @@ impl App {
         if toggle_pin {
             self.toggle_chat_pin(chat_id);
         }
-        let before_filters = self.state.playlists[self.selected].filters;
+        let before_filters = self.state.playlists[selected].filters;
         ui.horizontal_wrapped(|ui| {
             ui.add(Icon::Search.image(egui::Color32::GRAY, 18.));
             ui.add(
@@ -689,7 +700,7 @@ impl App {
                     .hint_text(tr("Search this playlist"))
                     .desired_width(200.),
             );
-            let p = &mut self.state.playlists[self.selected];
+            let p = &mut self.state.playlists[selected];
             for (i, label) in [tr("Music"), tr("Audio files"), tr("Voice messages")]
                 .iter()
                 .enumerate()
@@ -698,32 +709,15 @@ impl App {
             }
         });
         ui.add_space(12.);
-        if before_filters != self.state.playlists[self.selected].filters {
-            self.open_chat(self.selected);
+        if before_filters != self.state.playlists[selected].filters {
+            self.open_chat(selected);
         }
-        let p = &self.state.playlists[self.selected];
-        let q = self.search.to_lowercase();
-        let mut tracks: Vec<_> = p
-            .tracks
-            .iter()
-            .filter(|t| {
-                p.filters[t.kind]
-                    && format!("{} {}", t.title, t.artist)
-                        .to_lowercase()
-                        .contains(&q)
-            })
-            .cloned()
-            .collect();
-        match self.sort {
-            1 => tracks.sort_by(|a, b| a.title.cmp(&b.title)),
-            2 => tracks.sort_by(|a, b| a.artist.cmp(&b.artist)),
-            _ => {}
-        }
+        let tracks = self.playlist_tracks(selected);
         if play_all {
             self.start_session(&tracks, 0);
         }
         if pin_all {
-            self.state.playlists[self.selected].pinned = true;
+            self.state.playlists[selected].pinned = true;
             for t in &tracks {
                 self.pin(t.clone());
             }
@@ -740,11 +734,7 @@ impl App {
         if tracks.is_empty() {
             ui.add_space(24.);
             ui.heading(
-                if !self.state.playlists[self.selected]
-                    .filters
-                    .iter()
-                    .any(|v| *v)
-                {
+                if !self.state.playlists[selected].filters.iter().any(|v| *v) {
                     tr("All filters are off")
                 } else if !self.search.is_empty() {
                     tr("No matching tracks")
@@ -755,7 +745,7 @@ impl App {
                 },
             );
             if ui.button(tr("Refresh library")).clicked() {
-                self.open_chat(self.selected);
+                self.open_chat(selected);
             }
         }
         let mut action = None;
@@ -903,7 +893,12 @@ impl App {
                                         (4, tr("Copy message link")),
                                         (5, tr("Copy title")),
                                     ] {
-                                        if ui.button(label).clicked() {
+                                        let button = ui.button(label);
+                                        #[cfg(test)]
+                                        if kind == 0 {
+                                            self.test_play_buttons.insert(t.message, button.rect);
+                                        }
+                                        if button.clicked() {
                                             action = Some((kind, i));
                                             ui.close();
                                         }
@@ -929,6 +924,8 @@ impl App {
                                 response.context_menu(&mut contents);
                                 #[cfg(test)]
                                 self.test_rows.insert(t.message, (rect, menu.response.rect));
+                                #[cfg(test)]
+                                self.test_row_ids.insert(t.message, response.id);
                                 menu_clicked = menu.response.contains_pointer()
                                     || menu.response.has_focus()
                                     || menu.inner.is_some();
@@ -950,31 +947,19 @@ impl App {
                 }
             });
         design::middle_scroll(ui, scroll.id, scroll.inner_rect, scroll.content_size.y);
-        let more = self.state.playlists[self.selected].has_more();
+        let more = self.state.playlists[selected].has_more();
         if more && self.indexing_chat.is_none() && !self.demo {
             let at_bottom = scroll.state.offset.y > 0.
                 && scroll.state.offset.y + scroll.inner_rect.height()
                     >= scroll.content_size.y - 120.;
             if ui.button(tr("Load more music")).clicked() || at_bottom {
-                self.load_chat(self.selected, false);
+                self.load_chat(selected, false);
             }
         }
         if let Some((kind, i)) = action {
             match kind {
                 0 => self.choose_session(&tracks, i),
-                6 => {
-                    if self
-                        .state
-                        .session
-                        .current
-                        .as_ref()
-                        .is_some_and(|c| playback::same(c, &tracks[i]))
-                    {
-                        self.set_paused(!self.paused);
-                    } else {
-                        self.choose_session(&tracks, i);
-                    }
-                }
+                6 => self.execute(AppCommand::SelectPlaylistRow(i)),
                 5 => ui.ctx().copy_text(tracks[i].title.clone()),
                 1 => self.state.session.insert(tracks[i].clone(), true),
                 2 => self.state.session.insert(tracks[i].clone(), false),
@@ -1107,7 +1092,7 @@ impl App {
                             ),
                         );
                         if button(ui, Icon::Play, "Play") {
-                            play = Some(i);
+                            play = Some(t.entry_id);
                         }
                         ui.allocate_ui(
                             egui::vec2((ui.available_width() - 50.).max(60.), 44.),
@@ -1156,11 +1141,8 @@ impl App {
             self.state.session.move_before(from, to);
             self.persist();
         }
-        if let Some(i) = play {
-            if let Some(t) = self.state.session.jump_to(&mut self.state.queue, i) {
-                self.play(t);
-                self.persist();
-            }
+        if let Some(id) = play {
+            self.execute(AppCommand::PlayQueue(id));
         }
         if let Some(i) = remove {
             self.state.session.remove(i);
@@ -1178,231 +1160,5 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn long_metadata_fits_virtual_list_row_height() {
-        let ctx = egui::Context::default();
-        design::style(&ctx, false);
-        let long = "A very long title or artist name ".repeat(40);
-        let mut height = 0.;
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            ui.set_width(600.);
-            let row = egui::Frame::new().inner_margin(6.).show(ui, |ui| {
-                ui.set_min_height(48.);
-                ui.horizontal(|ui| {
-                    track_labels(ui, &long, &long, false);
-                });
-            });
-            height = row.response.rect.height();
-        });
-        output.textures_delta.clear();
-        assert!(
-            (height - design::ROW_HEIGHT).abs() < 0.1,
-            "Rendered row {height} differs from virtual row height 60"
-        );
-    }
-}
-
-#[cfg(test)]
-mod interaction_tests {
-    use super::*;
-    struct Harness {
-        app: App,
-        ctx: egui::Context,
-        time: f64,
-    }
-    impl Harness {
-        fn new() -> Self {
-            static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "tg-player-ui-test-{}-{}",
-                std::process::id(),
-                SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            let mut app = App::new_at(root, true);
-            app.player = None;
-            app.opened_chat = Some(0);
-            let ctx = egui::Context::default();
-            design::install(&ctx);
-            ctx.set_fonts(fastframe_fonts::FontSetup::default().definitions());
-            let mut h = Self { app, ctx, time: 0. };
-            h.frame(vec![]);
-            h.frame(vec![]);
-            h
-        }
-        fn frame(&mut self, events: Vec<egui::Event>) {
-            self.time += 0.02;
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(850., 550.),
-                )),
-                time: Some(self.time),
-                events,
-                ..Default::default()
-            };
-            let mut output = self.ctx.run_ui(input, |ui| self.app.render(ui));
-            output.textures_delta.clear();
-        }
-        fn pointer(&mut self, p: egui::Pos2, pressed: bool) {
-            self.frame(vec![
-                egui::Event::PointerMoved(p),
-                egui::Event::PointerButton {
-                    pos: p,
-                    button: egui::PointerButton::Primary,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ]);
-        }
-        fn click(&mut self, p: egui::Pos2) {
-            self.pointer(p, true);
-            self.pointer(p, false);
-        }
-        fn key(&mut self, key: egui::Key) {
-            self.frame(vec![egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            }]);
-            self.frame(vec![egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: false,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            }]);
-        }
-    }
-    #[test]
-    fn right_click_opens_track_menu_without_starting_playback() {
-        let mut h = Harness::new();
-        let row = h.app.test_rows[&0].0;
-        let p = row.center();
-        for pressed in [true, false] {
-            h.frame(vec![
-                egui::Event::PointerMoved(p),
-                egui::Event::PointerButton {
-                    pos: p,
-                    button: egui::PointerButton::Secondary,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ]);
-        }
-        assert!(h.app.state.session.current.is_none());
-        assert!(egui::Popup::is_any_open(&h.ctx));
-        h.key(egui::Key::Escape);
-    }
-    #[test]
-    fn row_mouse_keyboard_menu_and_seek_contract() {
-        let mut h = Harness::new();
-        let (row, menu) = h.app.test_rows[&0];
-        assert!(
-            row.right() <= 850. && row.bottom() < 454.,
-            "row overflow: {row:?}"
-        );
-        assert_eq!(row.height(), design::ROW_HEIGHT);
-        // Cover, title and blank row space all activate the same row.
-        for x in [row.left() + 50., row.left() + 160., row.right() - 60.] {
-            h.app.state.session.current = None;
-            h.time += 1.;
-            h.click(egui::pos2(x, row.center().y));
-            assert_eq!(
-                h.app.state.session.current.as_ref().map(|t| t.message),
-                Some(0)
-            );
-            assert!(!h.app.paused);
-        }
-        h.time += 1.;
-        h.click(row.center());
-        assert!(h.app.paused);
-        h.time += 1.;
-        h.click(row.center());
-        h.click(row.center());
-        assert!(!h.app.paused, "double click must not pause after starting");
-        h.time += 1.;
-        h.click(menu.center());
-        assert!(!h.app.paused, "menu must not activate row");
-        h.key(egui::Key::Escape);
-        h.time += 1.;
-        h.click(row.center());
-        assert!(h.app.paused);
-        h.key(egui::Key::Enter);
-        assert!(!h.app.paused);
-        h.key(egui::Key::Space);
-        assert!(h.app.paused, "Space on row toggles playback");
-        // Click seeks once; a drag previews until release, independent of mpv position.
-        let (rect, id) = h.app.test_seek.unwrap();
-        h.time += 1.;
-        h.click(rect.center());
-        assert_eq!(h.app.test_seeks.len(), 1);
-        assert!((h.app.test_seeks[0] - 90.).abs() < 1.);
-        h.time += 1.;
-        h.pointer(rect.center(), true);
-        h.frame(vec![egui::Event::PointerMoved(egui::pos2(
-            rect.right() - 8.,
-            rect.center().y,
-        ))]);
-        assert_eq!(h.app.test_seeks.len(), 1);
-        assert!(h.app.seek_preview.unwrap() > 170.);
-        h.frame(vec![]);
-        assert!(h.app.seek_preview.unwrap() > 170.);
-        h.pointer(egui::pos2(rect.right() - 8., rect.center().y), false);
-        assert_eq!(h.app.test_seeks.len(), 2);
-        assert!(h.app.seek_preview.is_none());
-        h.ctx.memory_mut(|m| m.request_focus(id));
-        h.app.seek_preview = Some(90.);
-        h.key(egui::Key::Home);
-        assert_eq!(*h.app.test_seeks.last().unwrap(), 0.);
-        h.key(egui::Key::End);
-        assert_eq!(*h.app.test_seeks.last().unwrap(), 180.);
-        h.key(egui::Key::ArrowRight);
-        assert_eq!(*h.app.test_seeks.last().unwrap(), 5.); // backend position remains zero in demo
-        h.time += 1.;
-        h.pointer(rect.center(), true);
-        h.app.next();
-        assert!(h.app.seek_preview.is_none());
-        let before = h.app.test_seeks.len();
-        h.pointer(rect.center(), false);
-        assert_eq!(
-            h.app.test_seeks.len(),
-            before,
-            "releasing an old drag must not seek the next track"
-        );
-        // Unknown duration disables seeking, even while holding an old slider.
-        h.app.start_session(&[Track::default()], 0);
-        let before = h.app.test_seeks.len();
-        h.time += 1.;
-        h.click(rect.center());
-        assert_eq!(h.app.test_seeks.len(), before);
-        // Space is text while a search field owns focus.
-        let search = egui::Id::new("chat-search");
-        h.ctx.memory_mut(|m| m.request_focus(search));
-        h.frame(vec![]);
-        let paused = h.app.paused;
-        h.key(egui::Key::Space);
-        assert_eq!(h.app.paused, paused);
-        let mut reached_row = false;
-        for _ in 0..60 {
-            h.key(egui::Key::Tab);
-            let focused = h.ctx.memory(|m| m.focused());
-            if focused
-                .and_then(|id| h.ctx.read_response(id))
-                .is_some_and(|r| r.rect == row)
-            {
-                reached_row = true;
-                break;
-            }
-        }
-        assert!(reached_row, "Tab must reach track rows");
-        h.app.set_volume(32.);
-        h.app.toggle_mute();
-        assert_eq!(h.app.state.volume, 0.);
-        h.app.toggle_mute();
-        assert_eq!(h.app.state.volume, 32.);
-    }
-}
+#[path = "screens/tests.rs"]
+mod tests;

@@ -1,4 +1,8 @@
-use crate::*;
+use crate::application::commands::AppCommand;
+use crate::{audio, demo, design, media_loader, tr, App, Event, RepeatMode, RetryAction};
+use eframe::egui;
+use serde_json::json;
+use std::time::Duration;
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.background(ctx, true);
@@ -58,10 +62,10 @@ impl App {
                             ui.label(tr("Shuffle"));
                             ui.horizontal(|ui| {
                                 if design::choice(ui, tr("Off"), !self.state.shuffle) {
-                                    self.set_shuffle(false);
+                                    self.execute(AppCommand::Shuffle(false));
                                 }
                                 if design::choice(ui, tr("On"), self.state.shuffle) {
-                                    self.set_shuffle(true);
+                                    self.execute(AppCommand::Shuffle(true));
                                 }
                             });
                             ui.add_space(4.);
@@ -73,7 +77,7 @@ impl App {
                                     (RepeatMode::One, tr("One track")),
                                 ] {
                                     if design::choice(ui, label, self.state.repeat == mode) {
-                                        self.set_repeat(mode);
+                                        self.execute(AppCommand::Repeat(mode));
                                     }
                                 }
                             });
@@ -181,7 +185,7 @@ impl App {
     fn clear_automatic_cache(&self) {
         self.send(json!({"@type":"optimizeStorage","size":0,"ttl":0,"count":0,"immunity_delay":0,"file_types":[],"chat_ids":[],"exclude_chat_ids":[],"return_deleted_file_statistics":true,"chat_limit":0}));
     }
-    fn cancel_offline_downloads(&mut self) {
+    pub(crate) fn cancel_offline_downloads(&mut self) {
         self.pin_cancel
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for t in self.state.pending_pins.iter().filter(|t| t.file > 0) {
@@ -196,6 +200,7 @@ impl App {
 impl App {
     pub fn background(&mut self, ctx: &egui::Context, window_present: bool) {
         self.process(ctx);
+        self.process_control();
         if let Some(tg) = &self.tg {
             for t in self.track_wanted.clone() {
                 let key = (t.chat, t.message);
@@ -211,7 +216,7 @@ impl App {
                 self.track_requests.insert(key);
                 let tg = tg.clone();
                 let tx = self.tx.clone();
-                std::thread::spawn(move || {
+                self.spawn(move || {
                     let _ = tx.send(Event::TrackReady(key, media_loader::resolve(&tg, &t)));
                 });
             }
@@ -235,7 +240,7 @@ impl App {
                 if self.image_requests.insert(id) {
                     let tg = tg.clone();
                     let tx = self.tx.clone();
-                    std::thread::spawn(move || {
+                    self.spawn(move || {
                         let result = tg
                             .call(json!({
                                 "@type": "downloadFile", "file_id": id, "priority": 1,
@@ -312,9 +317,9 @@ impl App {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                     fastframe_tray::Event::Menu("play") => {
-                        self.set_paused(!self.paused);
+                        self.execute(AppCommand::Pause(!self.paused));
                     }
-                    fastframe_tray::Event::Menu("next") => self.next(),
+                    fastframe_tray::Event::Menu("next") => self.execute(AppCommand::Next),
                     _ => {}
                 }
             }
@@ -331,16 +336,21 @@ impl App {
         }
 
         use fastframe_now_playing::{Command, Playback, State as MediaState, Track as MediaTrack};
-        for command in self.media.commands() {
+        for command in self
+            .media
+            .as_ref()
+            .map(|m| m.commands())
+            .unwrap_or_default()
+        {
             match command {
-                Command::Next => self.next(),
+                Command::Next => self.execute(AppCommand::Next),
                 Command::PlayPause | Command::Pause | Command::Play => {
                     let paused = match command {
                         Command::Play => false,
                         Command::Pause => true,
                         _ => !self.paused,
                     };
-                    self.set_paused(paused);
+                    self.execute(AppCommand::Pause(paused));
                 }
 
                 Command::SeekBy(ms) => {
@@ -349,7 +359,7 @@ impl App {
                         .as_ref()
                         .map(|p| p.number("time-pos"))
                         .unwrap_or(0.);
-                    self.seek(pos + ms as f64 / 1000.);
+                    self.execute(AppCommand::Seek(pos + ms as f64 / 1000.));
                 }
                 Command::SetPosition { track_id, position } => {
                     if self
@@ -359,13 +369,13 @@ impl App {
                         .as_ref()
                         .is_some_and(|t| format!("{}-{}", t.chat, t.message) == track_id)
                     {
-                        self.seek(position.as_secs_f64());
+                        self.execute(AppCommand::Seek(position.as_secs_f64()));
                     }
                 }
-                Command::SetVolume(v) => self.set_volume((v * 100.) as f32),
-                Command::SetShuffle(v) => self.set_shuffle(v),
-                Command::SetRepeat(v) => self.set_repeat(v.into()),
-                Command::Previous => self.previous(),
+                Command::SetVolume(v) => self.execute(AppCommand::Volume((v * 100.) as f32)),
+                Command::SetShuffle(v) => self.execute(AppCommand::Shuffle(v)),
+                Command::SetRepeat(v) => self.execute(AppCommand::Repeat(v.into())),
+                Command::Previous => self.execute(AppCommand::Previous),
                 Command::Stop => {
                     self.playback_generation += 1;
                     if let Some(p) = &self.player {
@@ -384,33 +394,35 @@ impl App {
                 _ => {}
             }
         }
-        self.media.update(MediaState {
-            playback: if self.state.session.current.is_none() {
-                Playback::Stopped
-            } else if self.paused || self.loading {
-                Playback::Paused
-            } else {
-                Playback::Playing
-            },
-            track: self.state.session.current.as_ref().map(|t| MediaTrack {
-                id: format!("{}-{}", t.chat, t.message),
-                title: t.title.clone(),
-                artists: vec![t.artist.clone()],
-                duration: Some(Duration::from_secs(t.duration)),
+        if let Some(media) = &mut self.media {
+            media.update(MediaState {
+                playback: if self.state.session.current.is_none() {
+                    Playback::Stopped
+                } else if self.paused || self.loading {
+                    Playback::Paused
+                } else {
+                    Playback::Playing
+                },
+                track: self.state.session.current.as_ref().map(|t| MediaTrack {
+                    id: format!("{}-{}", t.chat, t.message),
+                    title: t.title.clone(),
+                    artists: vec![t.artist.clone()],
+                    duration: Some(Duration::from_secs(t.duration)),
+                    ..Default::default()
+                }),
+                position: Duration::from_secs_f64(
+                    self.player
+                        .as_ref()
+                        .map(|p| p.number("time-pos"))
+                        .unwrap_or(0.)
+                        .max(0.),
+                ),
+                volume: Some(self.state.volume as f64 / 100.),
+                shuffle: Some(self.state.shuffle),
+                repeat: Some(self.state.repeat.into()),
                 ..Default::default()
-            }),
-            position: Duration::from_secs_f64(
-                self.player
-                    .as_ref()
-                    .map(|p| p.number("time-pos"))
-                    .unwrap_or(0.)
-                    .max(0.),
-            ),
-            volume: Some(self.state.volume as f64 / 100.),
-            shuffle: Some(self.state.shuffle),
-            repeat: Some(self.state.repeat.into()),
-            ..Default::default()
-        });
+            });
+        }
 
         ctx.request_repaint_after(Duration::from_millis(200));
         let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
@@ -441,14 +453,45 @@ impl App {
 }
 
 impl App {
-    pub fn shutdown_core(&mut self) {
-        self.persist();
-        self.db.flush();
-        if let Some(a) = &self.server {
-            a.store(false, std::sync::atomic::Ordering::Relaxed)
+    pub fn shutdown_core(&mut self) -> Result<(), String> {
+        self.quitting = true;
+        self.playback_generation += 1;
+        self.index_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.pin_cancel
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.pin_jobs.take();
+        if let Some(server) = &self.server {
+            server.stop();
         }
+        self.player.take();
+        let mut errors = Vec::new();
         if let Some(tg) = &self.tg {
-            tg.request(json!({"@type":"close"}));
+            if let Err(e) = tg.shutdown(Duration::from_secs(5)) {
+                errors.push(e);
+            }
+        }
+        if let Err(e) = self.workers.shutdown(Duration::from_secs(7)) {
+            errors.push(e);
+        }
+        if let Some(server) = &mut self.server {
+            if let Err(e) = server.shutdown(Duration::from_secs(7)) {
+                errors.push(e);
+            }
+        }
+        self.persist();
+        if let Some(db) = &mut self.db {
+            if let Err(e) = db.flush() {
+                errors.push(e);
+            }
+            if let Err(e) = db.shutdown() {
+                errors.push(e);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
         }
     }
 }

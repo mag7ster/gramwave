@@ -5,7 +5,7 @@ import subprocess
 import time
 
 binary = pathlib.Path(__file__).resolve().parents[1] / "target/debug/tg-player"
-app = subprocess.Popen([str(binary), "--demo", "--scenario=playing"])
+app = subprocess.Popen([str(binary), "--demo", "--desktop-integrations", "--scenario=playing"])
 base = ["gdbus", "call", "--session", "--dest", "org.mpris.MediaPlayer2.tgplayer",
         "--object-path", "/org/mpris/MediaPlayer2", "--method"]
 player = "org.mpris.MediaPlayer2.Player"

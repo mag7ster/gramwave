@@ -1,4 +1,5 @@
-use crate::*;
+use crate::{demo, App};
+use eframe::egui;
 use fastframe_shell::{Closed, Headless, Held, Resident, Shell, Waker};
 struct Window {
     app: Held<App>,
@@ -36,7 +37,10 @@ impl Resident for App {
         }
     }
     fn shutdown(&mut self) {
-        self.shutdown_core();
+        if let Err(error) = self.shutdown_core() {
+            eprintln!("shutdown: {error}");
+            self.error = error;
+        }
     }
 }
 pub fn run() -> eframe::Result {
@@ -44,14 +48,16 @@ pub fn run() -> eframe::Result {
     let show = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = show.clone();
     let wake = waker.clone();
-    let mut slot = fastframe_instance::Slot::new("org.tgplayer.App");
-    if std::env::args().any(|s| s == "--demo") {
-        slot = slot.scoped("demo");
-    }
-    let _guard = match slot.claim("show", move |_| {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        wake.wake();
-        Some("ok".into())
+    let slot = crate::adapters::control::slot(std::env::args().any(|s| s == "--demo"));
+    let (control_tx, control_rx) = std::sync::mpsc::sync_channel(8);
+    let _guard = match slot.claim("show", move |request| {
+        if request == "show" {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            wake.wake();
+            Some("ok".into())
+        } else {
+            crate::adapters::control::bridge(request, &control_tx, || wake.wake())
+        }
     }) {
         fastframe_instance::Claim::First(g) => g,
         _ => return Ok(()),
@@ -59,6 +65,7 @@ pub fn run() -> eframe::Result {
     let mut app = App::new();
     demo::configure(&mut app);
     app.show_requested = show;
+    app.control = Some(control_rx);
     if !app.demo && app.state.api_id.parse::<i32>().is_ok() && app.state.api_hash.len() == 32 {
         app.connect();
     }

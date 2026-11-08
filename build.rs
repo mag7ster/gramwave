@@ -6,8 +6,19 @@ fn main() {
 }
 #[cfg(feature = "telegram")]
 fn telegram() {
-    let lib = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("tdlib/lib");
+    println!("cargo:rerun-if-env-changed=TG_PLAYER_TDLIB_DIR");
+    let local = std::env::var_os("TG_PLAYER_TDLIB_DIR").map(std::path::PathBuf::from);
+    let lib = local
+        .as_ref()
+        .map(|path| path.join("lib"))
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("tdlib/lib")
+        });
     if !lib.join("libtdjson.so.1.8.61").exists() {
+        assert!(
+            local.is_none(),
+            "TG_PLAYER_TDLIB_DIR must contain lib/libtdjson.so.1.8.61"
+        );
         tdlib_rs::build::build(None);
     }
     println!("cargo:rustc-link-search=native={}", lib.display());

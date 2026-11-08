@@ -7,8 +7,8 @@ use std::{
 };
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
-        mpsc, Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
     },
     time::Duration,
 };
@@ -16,6 +16,8 @@ use std::{
 pub struct Telegram {
     send: mpsc::Sender<(Value, mpsc::Sender<Value>)>,
     serial: Arc<AtomicU64>,
+    stopping: Arc<AtomicBool>,
+    worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 impl Telegram {
     #[cfg(feature = "telegram")]
@@ -27,7 +29,8 @@ impl Telegram {
         }
         let (tx, rx) = mpsc::channel::<(Value, mpsc::Sender<Value>)>();
         let (updates, out) = mpsc::channel();
-        std::thread::spawn(move || {
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker = std::thread::spawn(move || {
             unsafe {
                 td_execute(
                     c"{\"@type\":\"setLogVerbosityLevel\",\"new_verbosity_level\":0}".as_ptr(),
@@ -67,6 +70,8 @@ impl Telegram {
             Self {
                 send: tx,
                 serial: Arc::new(AtomicU64::new(1)),
+                stopping,
+                worker: Arc::new(Mutex::new(Some(worker))),
             },
             out,
         ))
@@ -75,7 +80,7 @@ impl Telegram {
     pub fn start() -> Result<(Self, mpsc::Receiver<Value>), String> {
         Err("Build with the default telegram feature to connect".into())
     }
-    pub fn request(&self, mut v: Value) -> mpsc::Receiver<Value> {
+    pub(crate) fn request(&self, mut v: Value) -> mpsc::Receiver<Value> {
         if !privacy_safe(&v) {
             let (tx, rx) = mpsc::channel();
             let _=tx.send(json!({"@type":"error","message":"This action is disabled in the read-only player"}));
@@ -86,16 +91,48 @@ impl Telegram {
         let _ = self.send.send((v, tx));
         rx
     }
-    pub fn call(&self, v: Value) -> Result<Value, String> {
-        let v = self
-            .request(v)
-            .recv_timeout(Duration::from_secs(60))
-            .map_err(|e| e.to_string())?;
+    pub(crate) fn call(&self, v: Value) -> Result<Value, String> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err("Telegram: shutting down".into());
+        }
+        let rx = self.request(v);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let v = loop {
+            if self.stopping.load(Ordering::Acquire) {
+                return Err("Telegram: request cancelled".into());
+            }
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(v) => break v,
+                Err(mpsc::RecvTimeoutError::Timeout) if std::time::Instant::now() < deadline => {}
+                Err(e) => return Err(format!("Telegram request: {e}")),
+            }
+        };
         if v["@type"] == "error" {
             Err(v["message"].as_str().unwrap_or("Telegram error").into())
         } else {
             Ok(v)
         }
+    }
+    pub fn shutdown(&self, timeout: Duration) -> Result<(), String> {
+        if !self.stopping.swap(true, Ordering::AcqRel) {
+            self.request(json!({"@type":"close"}));
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        let mut worker = self.worker.lock().map_err(|e| e.to_string())?;
+        if let Some(handle) = worker.as_ref() {
+            while !handle.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return Err("Telegram shutdown timed out".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if let Some(handle) = worker.take() {
+            handle
+                .join()
+                .map_err(|_| "Telegram worker panicked".to_owned())?;
+        }
+        Ok(())
     }
     pub fn offline(&self) {
         self.request(json!({"@type":"setOption","name":"online","value":{"@type":"optionValueBoolean","value":false}}));
@@ -104,18 +141,46 @@ impl Telegram {
 
 fn privacy_safe(v: &Value) -> bool {
     let method = v["@type"].as_str().unwrap_or("");
-    !matches!(
+    matches!(
         method,
-        "viewMessages"
-            | "openMessageContent"
-            | "sendChatAction"
-            | "sendMessage"
-            | "deleteMessages"
-            | "editMessageText"
-    ) && !(method == "setOption" && v["name"] == "online" && v["value"]["value"] != false)
+        "getChat"
+            | "getChats"
+            | "loadChats"
+            | "getMessage"
+            | "getMessages"
+            | "searchChatMessages"
+            | "searchChats"
+            | "searchPublicChats"
+            | "searchChatsOnServer"
+            | "getFile"
+            | "getFileDownloadedPrefixSize"
+            | "downloadFile"
+            | "cancelDownloadFile"
+            | "getMessageLink"
+            | "getSupergroup"
+            | "getUser"
+            | "getOption"
+            | "optimizeStorage"
+            | "close"
+            | "setLogVerbosityLevel"
+            | "setTdlibParameters"
+            | "requestQrCodeAuthentication"
+            | "checkAuthenticationCode"
+            | "checkAuthenticationPassword"
+            | "checkAuthenticationEmailCode"
+            | "setAuthenticationEmailAddress"
+            | "setAuthenticationPhoneNumber"
+            | "resendAuthenticationCode"
+    ) || (method == "setOption"
+        && matches!(
+            v["name"].as_str(),
+            Some("use_storage_optimizer" | "storage_max_files_size")
+        ))
+        || (method == "setOption" && v["name"] == "online" && v["value"]["value"] == false)
 }
 #[cfg(test)]
 impl Telegram {
+    #[cfg(feature = "native-tests")]
     pub fn mock_file(path: std::path::PathBuf) -> Self {
         let (send, rx) = mpsc::channel::<(Value, mpsc::Sender<Value>)>();
         std::thread::spawn(move || {
@@ -133,6 +198,8 @@ impl Telegram {
         Self {
             send,
             serial: Arc::new(AtomicU64::new(1)),
+            stopping: Default::default(),
+            worker: Default::default(),
         }
     }
 }
@@ -149,45 +216,12 @@ impl Telegram {
         Self {
             send,
             serial: Arc::new(AtomicU64::new(1)),
+            stopping: Default::default(),
+            worker: Default::default(),
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn read_only_presence_policy() {
-        assert!(!privacy_safe(
-            &json!({"@type":"setOption","name":"online","value":{"@type":"optionValueEmpty"}})
-        ));
-        assert!(!privacy_safe(
-            &json!({"@type":"setOption","name":"online","value":{"value":true}})
-        ));
-        assert!(privacy_safe(
-            &json!({"@type":"setOption","name":"online","value":{"value":false}})
-        ));
-        for method in [
-            "viewMessages",
-            "openMessageContent",
-            "sendChatAction",
-            "sendMessage",
-        ] {
-            assert!(!privacy_safe(&json!({"@type":method})));
-        }
-        assert!(privacy_safe(&json!({"@type":"downloadFile"})));
-    }
-}
-
-#[cfg(all(test, feature = "telegram"))]
-mod native_tests {
-    #[test]
-    fn native_tdlib_version() {
-        let (tg, _) = super::Telegram::start().unwrap();
-        let v = tg
-            .call(serde_json::json!({"@type":"getOption","name":"version"}))
-            .unwrap();
-        assert_eq!(v["value"], "1.8.61");
-        tg.call(serde_json::json!({"@type":"close"})).unwrap();
-    }
-}
+#[path = "telegram/tests.rs"]
+mod tests;

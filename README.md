@@ -77,14 +77,20 @@ cargo run -- --demo --preview-auth=error
   current track; **Add to queue** appends. Duplicate additions are independent.
   Drag the handle or use Move up/down to reorder; remove any future entry.
   Clear queue keeps the current track and disables repeat.
-- Selecting an upcoming track in the source playlist jumps to its nearest entry;
-  another selection replaces the queue. Skipped entries are not playback history.
+- Selecting another track in the source playlist always creates a new queue from
+  that loaded, filtered and sorted list, replacing previous additions and edits.
+  Without shuffle, Previous can reach the preceding playlist rows: selecting
+  track 2, then track 5, then Previous plays track 4.
+- Selecting a track in the queue keeps its edited order. Previous can reach the
+  skipped positions, including independent duplicate entries.
 - Shuffle randomizes the remaining entries once; manual edits apply literally.
   Turning shuffle off restores the base order with those edits.
 - Repeat cycles **Off → All → One → Off**. One repeats natural EOF only;
   Next always advances. All repeats the edited queue including additions, without
   resurrecting removals. Previous restarts after three seconds; earlier it returns
-  through actual history, with the departed track immediately next.
+  through the queue's previous positions, with the departed track immediately next.
+  A new shuffled queue starts with the selected track and has no previous position
+  until advancing. An unshuffled queue also permits preceding source playlist rows.
 - Tab reaches controls and rows; Enter activates a focused row. Space controls
   playback outside text fields. Seek supports click, drag preview and keyboard
   arrows (five seconds), Home and End. Volume arrows change one percent. Unknown
@@ -114,16 +120,21 @@ Keep it private: it contains account credentials and cached media.
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo test --no-default-features
+# Explicit native suite: requires libmpv2, TDLib and loopback sockets
+cargo test --features native-tests --lib -- --test-threads=1
 cargo build --release
 scripts/package.sh
 ```
 
-Automated checks cover the native TDLib bootstrap, read-only presence policy,
-audio parsing, SQLite persistence and loopback range streaming. Full QR/2FA
+The default suite covers domain rules, headless UI, parsing and temporary SQLite
+repositories without starting system services. The explicit `native-tests` suite
+covers TDLib bootstrap, mpv null output and loopback streaming. Full QR/2FA
 login and playback from Telegram still need verification with a real account.
 
-`--demo` uses fictional library metadata, an isolated temporary data directory
-and no Telegram connection. `--demo --smoke-test` opens the window briefly,
+`--demo` uses fictional library metadata and starts no SQLite, Telegram, mpv,
+tray or MPRIS services. Add `--desktop-integrations` to enable tray and MPRIS
+for desktop integration checks. `--demo --smoke-test` opens the window briefly,
 saves an application-only preview to `/tmp/tg-player-preview.png`, and exits.
 Reproduce visual fixtures with long Latin/Cyrillic metadata, missing artwork,
 unknown duration, offline badges and active controls:
@@ -153,12 +164,59 @@ For a UI-only build without TDLib, use `cargo run --no-default-features -- --dem
 The local bundle keeps TDLib in `lib/`; mpv and its C++ dependencies remain system
 dependencies.
 
-The application separates the resident/window lifecycle (`lifecycle.rs`),
-screens (`screens.rs`), sign-in state (`auth.rs`), Telegram requests (`telegram.rs`),
-media output/range streaming (`audio.rs`), playback sessions (`playback.rs`),
-visual fixtures (`demo.rs`) and persisted data (`model.rs`).
+The library entry is `src/lib.rs`; `src/main.rs` only launches it. Domain types
+and queue rules live in `src/domain`, application commands and workers in
+`src/application`, and SQLite, TDLib, mpv, offline files and HTTP in `src/adapters`.
+`src/bootstrap.rs` assembles the desktop lifecycle. See [architecture and migration
+notes](ARCHITECTURE.md) for implemented boundaries and remaining work.
+For an offline build using an already installed TDLib 1.8.61, set
+`TG_PLAYER_TDLIB_DIR` to the directory containing `lib/libtdjson.so.1.8.61`.
+
 Playback uses a loopback HTTP range bridge to feed TDLib's existing cache to
 mpv, with an unpredictable per-process URL. It does not expose a LAN server.
+
+## Control a running player
+
+The binary can inspect and control an already running instance through its
+private per-user instance socket. Restart an older running binary once to enable
+this interface. Commands never launch a replacement app or open account data.
+Use `--demo --ctl …` to target a running demo instead of the real player.
+
+```sh
+target/release/tg-player --ctl status
+target/release/tg-player --ctl playlists
+target/release/tg-player --ctl open <chat-id>
+target/release/tg-player --ctl playlist
+target/release/tg-player --ctl select 2
+target/release/tg-player --ctl select 5
+target/release/tg-player --ctl previous
+target/release/tg-player --ctl queue
+target/release/tg-player --ctl queue-play <entry-id>
+```
+
+`select` uses the current central playlist's search, filters and sort order, with
+row numbers starting at 1; selecting the current row toggles pause. `queue-play`
+uses the exact `entry_id` returned by `queue`. Other commands are `next`,
+`previous`, `pause`, `resume`, `seek <seconds>`, `shuffle on|off` and
+`repeat off|all|one`. Seek positions must be finite and nonnegative.
+
+Replies are JSON: `{"ok":true,"data":…}` or `{"ok":false,"error":"…"}`.
+Errors exit with a nonzero status, including an absent or outdated running app.
+Action replies describe the state after the command is applied; audio can still
+be `loading`, so poll `status` for completion or a playback error. Control also
+works while the window is hidden in the tray.
+
+Lists return `items`, `total`, `offset` and `next_offset`. Pass a non-null
+`next_offset` as the command's next argument, for example `--ctl queue 50`.
+Each page contains at most 50 entries and fits within the socket's 16 KiB reply
+limit. Display titles, artists and errors are limited to 512 Unicode characters;
+IDs remain exact. Replies contain playback/library metadata, never credentials
+or media cache paths.
+
+Check actual CLI round trips on an isolated demo instance with
+`python3 scripts/check-control.py` after building the debug binary. A graphical
+session is required; CI runs this with Xvfb. Existing media keys and MPRIS remain
+available independently of this interface.
 
 ## Localization
 
@@ -198,6 +256,6 @@ Track menus open with either right click or the ellipsis button. Click the middl
 mouse button to start Firefox-style autoscroll in track, chat and queue lists.
 Move away from the anchor to control direction and speed; click again or press
 Escape to stop. Holding the middle button, moving and releasing also works. Previous follows
-playback history, then preceding rows from the original playlist snapshot when
-playback began in the middle. Chat search combines cached matches with TDLib
+queue positions, including skipped entries, then preceding rows from the original
+unshuffled playlist snapshot when playback began in the middle. Chat search combines cached matches with TDLib
 account search after a short typing pause; it does not load message history.

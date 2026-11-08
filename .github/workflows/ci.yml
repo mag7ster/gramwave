@@ -3,6 +3,9 @@ on: [push, pull_request]
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        flags: ["", "--no-default-features"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -11,5 +14,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev libc++1 libc++abi1 libunwind-18
       - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets ${{ matrix.flags }} -- -D warnings
+      - run: cargo test --locked ${{ matrix.flags }}
+      - run: cargo build --locked --release ${{ matrix.flags }}
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libmpv2 libxkbcommon-dev libgl1-mesa-dev libc++1 libc++abi1 libunwind-18
+      - run: cargo test --locked --features native-tests --lib -- --test-threads=1
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y xvfb dbus-x11 libglib2.0-bin libxkbcommon-dev libgl1-mesa-dev libegl1 libgl1-mesa-dri
+      - run: cargo build --locked --no-default-features
+      - run: xvfb-run -a dbus-run-session -- python3 scripts/check-mpris.py
+      - run: xvfb-run -a dbus-run-session -- python3 scripts/check-control.py
+      - run: xvfb-run -a dbus-run-session -- target/debug/tg-player --demo --smoke-test
