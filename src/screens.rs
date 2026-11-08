@@ -3,6 +3,7 @@ use design::{button, Icon, GREEN};
 impl App {
     pub(crate) fn render(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
+        self.image_wanted.clear();
         design::style(&ctx, self.state.light);
         if !ctx.egui_wants_keyboard_input() {
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
@@ -86,53 +87,93 @@ impl App {
                     }
                 });
                 ui.add_space(12.);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.chat_query).hint_text(tr("Find a chat")),
-                );
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.chat_query)
+                            .id(egui::Id::new("chat-search"))
+                            .hint_text(tr("Find a chat"))
+                            .desired_width(ui.available_width() - 28.),
+                    );
+                    if response.clicked() || response.gained_focus() {
+                        self.chat_search_active = true;
+                    }
+                    if self.chat_search_active
+                        && (button(ui, Icon::Close, "Close search")
+                            || ui.input(|i| i.key_pressed(egui::Key::Escape)))
+                    {
+                        self.chat_search_active = false;
+                        self.chat_query.clear();
+                        response.surrender_focus();
+                    }
+                });
+                let indices = self
+                    .state
+                    .sidebar_chats(self.chat_search_active, &self.chat_query);
+                if indices.is_empty() {
+                    ui.weak(if self.chat_search_active {
+                        tr("No chats found")
+                    } else {
+                        tr("Pin chats here, or find one using search.")
+                    });
+                }
                 let mut open = None;
+                let mut toggle = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (i, p) in self.state.playlists.iter().enumerate() {
-                        if !p
-                            .title
-                            .to_lowercase()
-                            .contains(&self.chat_query.to_lowercase())
-                        {
-                            continue;
-                        }
-                        let selected = self.selected == i;
-                        let frame = egui::Frame::new()
-                            .fill(if selected {
+                    for i in indices {
+                        let p = &self.state.playlists[i];
+                        let id = p.id;
+                        let pinned = self.state.chat_pins.contains(&id);
+                        let response = egui::Frame::new()
+                            .fill(if self.opened_chat == Some(id) {
                                 egui::Color32::from_gray(38)
                             } else {
                                 egui::Color32::TRANSPARENT
                             })
                             .corner_radius(8)
-                            .inner_margin(8.);
-                        let response = frame
+                            .inner_margin(8.)
                             .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     art(ui, &p.title, p.image_path.as_deref(), 40.);
-                                    ui.vertical(|ui| {
-                                        ui.set_min_width(ui.available_width());
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&p.title).strong(),
-                                            )
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(&p.title).strong())
                                             .truncate(),
-                                        );
-                                    });
+                                    );
                                 });
                             })
                             .response
                             .interact(egui::Sense::click());
+                        if ui.is_rect_visible(response.rect) {
+                            self.image_wanted.push(p.image_file);
+                        }
                         if response.clicked() {
                             open = Some(i);
                         }
+                        response.context_menu(|ui| {
+                            if ui
+                                .button(if pinned {
+                                    tr("Unpin chat")
+                                } else {
+                                    tr("Pin chat")
+                                })
+                                .clicked()
+                            {
+                                toggle = Some(id);
+                                ui.close();
+                            }
+                        });
                         ui.add_space(3.);
                     }
                 });
+                if let Some(id) = toggle {
+                    self.toggle_chat_pin(id);
+                }
                 if let Some(i) = open {
                     self.open_chat(i);
+                    self.chat_search_active = false;
+                    self.chat_query.clear();
+                    ui.ctx()
+                        .memory_mut(|m| m.surrender_focus(egui::Id::new("chat-search")));
                 }
                 ui.add_space(16.);
                 if ui.button(tr("Quit TG Player")).clicked() {
@@ -189,6 +230,9 @@ impl App {
         }
     }
     fn transport(&mut self, ui: &mut egui::Ui) {
+        if let Some(t) = &self.current {
+            self.image_wanted.push(t.image_file);
+        }
         ui.spacing_mut().item_spacing.y = 4.;
         ui.add_space(12.);
         let width = ui.available_width();
@@ -322,6 +366,8 @@ impl App {
             ui.weak(&self.status);
             return;
         };
+        let chat_id = p.id;
+        self.image_wanted.push(p.image_file);
         let title = p.title.clone();
         let artwork = p.image_path.clone();
         let url = p.url.clone();
@@ -345,6 +391,7 @@ impl App {
                 });
             });
         ui.add_space(18.);
+        let mut toggle_pin = false;
         let mut play_all = false;
         let mut pin_all = false;
         ui.horizontal(|ui| {
@@ -356,6 +403,16 @@ impl App {
                         .min_size(egui::vec2(56., 56.)),
                 )
                 .clicked();
+            if ui
+                .button(if self.state.chat_pins.contains(&chat_id) {
+                    tr("Unpin chat")
+                } else {
+                    tr("Pin chat")
+                })
+                .clicked()
+            {
+                toggle_pin = true;
+            }
             if button(ui, Icon::Download, "Save playlist offline") {
                 pin_all = true;
             }
@@ -381,6 +438,9 @@ impl App {
                     });
             });
         });
+        if toggle_pin {
+            self.toggle_chat_pin(chat_id);
+        }
         let before_filters = self.state.playlists[self.selected].filters;
         ui.horizontal(|ui| {
             ui.add(Icon::Search.image(egui::Color32::GRAY, 18.));
@@ -436,6 +496,7 @@ impl App {
             egui::ScrollArea::vertical().show_rows(ui, 56., tracks.len(), |ui, range| {
                 for i in range {
                     let t = &tracks[i];
+                    self.image_wanted.push(t.image_file);
                     let active = self
                         .current
                         .as_ref()
@@ -567,15 +628,19 @@ fn cover(ui: &mut egui::Ui, title: &str, size: f32) {
 }
 
 fn art(ui: &mut egui::Ui, title: &str, path: Option<&str>, size: f32) {
-    if let Some(path) = path {
-        ui.add(
-            egui::Image::new(format!("file://{path}"))
-                .fit_to_exact_size(egui::vec2(size, size))
-                .corner_radius(6),
-        );
-    } else {
-        cover(ui, title, size);
+    if let Some(path) = path.filter(|p| std::path::Path::new(p).is_file()) {
+        let image = egui::Image::new(format!("file://{path}"))
+            .fit_to_exact_size(egui::vec2(size, size))
+            .corner_radius(6);
+        if matches!(
+            image.load_for_size(ui.ctx(), egui::vec2(size, size)),
+            Ok(egui::load::TexturePoll::Ready { .. })
+        ) {
+            ui.add(image);
+            return;
+        }
     }
+    cover(ui, title, size);
 }
 
 impl App {

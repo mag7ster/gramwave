@@ -75,11 +75,13 @@ mod tests {
         let (store, mut state) = Store::open(&path).unwrap();
         state.api_id = "12345".into();
         state.filters = [false; 3];
+        state.chat_pins = vec![42];
         store.save(state);
         store.flush();
         let (_, state) = Store::open(&path).unwrap();
         assert_eq!(state.api_id, "12345");
         assert_eq!(state.filters, [false; 3]);
+        assert_eq!(state.chat_pins, vec![42]);
         std::fs::remove_file(path).unwrap();
     }
 }

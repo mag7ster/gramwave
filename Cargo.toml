@@ -21,7 +21,7 @@ fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.
 fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 
 fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }

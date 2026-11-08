@@ -48,6 +48,12 @@ cargo run -- --demo --preview-auth=error
 
 ## Behavior
 
+- The sidebar shows locally pinned chats. Click search to browse all chats and
+  type to filter by name; Escape or the close button returns to pins. Right-click
+  a chat or use its header button to pin/unpin it. Pins do not download music
+  or change Telegram.
+- Artwork loads for visible rows and supports JPEG, PNG and WebP. Failed downloads
+  can retry, and placeholders remain visible while images load.
 - Startup loads chat names only, without searching message history or counting tracks.
 - Opening a chat loads one page per enabled audio type. Scroll to load more;
   switching chats cancels further work for the previous one. No track totals are shown.

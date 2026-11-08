@@ -40,6 +40,7 @@ impl Playlist {
 #[serde(default)]
 pub struct State {
     pub playlists: Vec<Playlist>,
+    pub chat_pins: Vec<i64>,
     pub queue: Vec<Track>,
     pub api_id: String,
     pub api_hash: String,
@@ -52,12 +53,38 @@ impl Default for State {
     fn default() -> Self {
         Self {
             playlists: Vec::new(),
+            chat_pins: Vec::new(),
             queue: Vec::new(),
             api_id: String::new(),
             api_hash: String::new(),
             light: false,
             pending_pins: Vec::new(),
             filters: default_filters(),
+        }
+    }
+}
+impl State {
+    pub fn sidebar_chats(&self, searching: bool, query: &str) -> Vec<usize> {
+        if searching {
+            let query = query.trim().to_lowercase();
+            self.playlists
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.title.to_lowercase().contains(&query))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            self.chat_pins
+                .iter()
+                .filter_map(|id| self.playlists.iter().position(|p| p.id == *id))
+                .collect()
+        }
+    }
+    pub fn toggle_chat_pin(&mut self, id: i64) {
+        if self.chat_pins.contains(&id) {
+            self.chat_pins.retain(|x| *x != id);
+        } else {
+            self.chat_pins.push(id);
         }
     }
 }
@@ -132,5 +159,50 @@ mod tests {
         let v = serde_json::json!({"id":123,"content":{"@type":"messageAudio","audio":{"title":"Song","performer":"Artist","audio":{"id":8}}}});
         let t = track(7, &v).unwrap();
         assert_eq!((t.chat, t.message, t.file), (7, 123, 8));
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+    fn library() -> State {
+        State {
+            playlists: vec![
+                Playlist {
+                    id: 1,
+                    title: "Ambient".into(),
+                    ..Default::default()
+                },
+                Playlist {
+                    id: 2,
+                    title: "Музыка".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn sidebar_switches_between_pins_and_search() {
+        let mut s = library();
+        assert!(s.sidebar_chats(false, "").is_empty());
+        assert_eq!(s.sidebar_chats(true, ""), vec![0, 1]);
+        s.toggle_chat_pin(2);
+        assert_eq!(s.sidebar_chats(false, ""), vec![1]);
+        assert_eq!(s.sidebar_chats(true, "МУЗ"), vec![1]);
+        assert_eq!(s.sidebar_chats(true, "amB"), vec![0]);
+        s.toggle_chat_pin(2);
+        assert!(s.sidebar_chats(false, "").is_empty());
+    }
+    #[test]
+    fn pinning_does_not_enable_offline_downloads() {
+        let mut s = library();
+        s.toggle_chat_pin(1);
+        assert!(!s.playlists[0].pinned);
+        let restored: State = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(restored.chat_pins, vec![1]);
+        let old: State = serde_json::from_str(r#"{"playlists":[{"id":1,"pinned":true}]}"#).unwrap();
+        assert!(old.chat_pins.is_empty());
+        assert!(old.playlists[0].pinned);
     }
 }

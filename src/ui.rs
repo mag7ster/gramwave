@@ -73,32 +73,45 @@ impl App {
     pub fn background(&mut self, ctx: &egui::Context, window_present: bool) {
         self.process(ctx);
         if let Some(tg) = &self.tg {
-            if let Some(p) = self
-                .state
-                .playlists
-                .get(self.selected)
-                .filter(|p| self.opened_chat == Some(p.id))
-            {
-                let ids = std::iter::once(p.image_file)
-                    .chain(p.tracks.iter().take(20).map(|t| t.image_file))
-                    .filter(|id| *id != 0)
-                    .collect::<Vec<_>>();
-                for id in ids {
-                    if self.image_requests.insert(id) {
-                        let tg = tg.clone();
-                        let tx = self.tx.clone();
-                        std::thread::spawn(move || {
-                            if let Ok(v)=tg.call(json!({
-"@type":"downloadFile","file_id":id,"priority":1,"offset":0,"limit":0,"synchronous":true}
-)){
-if v["local"]["is_downloading_completed"]==true{
-if let Some(path)=v["local"]["path"].as_str(){
-let _=tx.send(Event::Artwork(id,path.into()));
-}
-}
-}
-                        });
-                    }
+            for id in self.image_wanted.clone() {
+                if id == 0 || self.image_requests.len() >= 4 {
+                    continue;
+                }
+                if self
+                    .artwork_path(id)
+                    .is_some_and(|path| std::path::Path::new(path).is_file())
+                {
+                    continue;
+                }
+                if self
+                    .image_retry
+                    .get(&id)
+                    .is_some_and(|at| *at > std::time::Instant::now())
+                {
+                    continue;
+                }
+                if self.image_requests.insert(id) {
+                    let tg = tg.clone();
+                    let tx = self.tx.clone();
+                    std::thread::spawn(move || {
+                        let result = tg
+                            .call(json!({
+                                "@type": "downloadFile", "file_id": id, "priority": 1,
+                                "offset": 0, "limit": 0, "synchronous": true
+                            }))
+                            .and_then(|v| {
+                                if v["local"]["is_downloading_completed"] == true {
+                                    v["local"]["path"]
+                                        .as_str()
+                                        .filter(|p| !p.is_empty())
+                                        .map(str::to_owned)
+                                        .ok_or_else(|| "Image path missing".into())
+                                } else {
+                                    Err("Image download incomplete".into())
+                                }
+                            });
+                        let _ = tx.send(Event::Artwork(id, result));
+                    });
                 }
             }
         }

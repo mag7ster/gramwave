@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod artwork_tests;
 mod auth;
 mod design;
 mod discovery;
@@ -16,7 +18,7 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, sync::mpsc, time::Duration};
 enum Event {
     Progress(String),
-    Artwork(i64, String),
+    Artwork(i64, Result<String, String>),
     Playlist(u64, Playlist),
     Catalog(Result<Vec<Playlist>, String>),
     Indexed(u64, Result<(), String>),
@@ -42,6 +44,9 @@ struct App {
     indexing_chat: Option<i64>,
     index_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
     chat_query: String,
+    chat_search_active: bool,
+    image_wanted: Vec<i64>,
+    image_retry: std::collections::HashMap<i64, std::time::Instant>,
     search: String,
     status: String,
     notice: String,
@@ -160,6 +165,9 @@ impl App {
             indexing_chat: None,
             index_epoch: Default::default(),
             chat_query: String::new(),
+            chat_search_active: false,
+            image_wanted: Vec::new(),
+            image_retry: Default::default(),
             search: String::new(),
             notice: String::new(),
             notice_until: None,
@@ -477,6 +485,56 @@ impl App {
             });
         });
     }
+    fn apply_artwork(&mut self, id: i64, path: &str) {
+        for p in &mut self.state.playlists {
+            if p.image_file == id {
+                p.image_path = Some(path.into());
+            }
+            for t in &mut p.tracks {
+                if t.image_file == id {
+                    t.image_path = Some(path.into());
+                }
+            }
+        }
+        for t in self.state.queue.iter_mut().chain(self.current.iter_mut()) {
+            if t.image_file == id {
+                t.image_path = Some(path.into());
+            }
+        }
+    }
+    fn artwork_path(&self, id: i64) -> Option<&str> {
+        self.state
+            .playlists
+            .iter()
+            .find_map(|p| {
+                (p.image_file == id)
+                    .then_some(p.image_path.as_deref())
+                    .flatten()
+                    .or_else(|| {
+                        p.tracks.iter().find_map(|t| {
+                            (t.image_file == id)
+                                .then_some(t.image_path.as_deref())
+                                .flatten()
+                        })
+                    })
+            })
+            .or_else(|| {
+                self.state
+                    .queue
+                    .iter()
+                    .chain(self.current.iter())
+                    .find_map(|t| {
+                        (t.image_file == id)
+                            .then_some(t.image_path.as_deref())
+                            .flatten()
+                    })
+            })
+    }
+
+    fn toggle_chat_pin(&mut self, id: i64) {
+        self.state.toggle_chat_pin(id);
+        self.persist();
+    }
     fn process(&mut self, ctx: &egui::Context) {
         if let Some(error) = self.db.error() {
             self.status = error;
@@ -537,6 +595,13 @@ impl App {
                 }
                 "updateFile" => {
                     let f = &v["file"];
+                    if f["local"]["is_downloading_completed"] == true {
+                        if let (Some(id), Some(path)) =
+                            (f["id"].as_i64(), f["local"]["path"].as_str())
+                        {
+                            self.apply_artwork(id, path);
+                        }
+                    }
                     let id = f["id"].as_i64().unwrap_or(0);
                     let path = if f["local"]["is_downloading_completed"] == true {
                         f["local"]["path"].as_str().map(str::to_owned)
@@ -618,17 +683,21 @@ impl App {
         }
         while let Ok(e) = self.rx.try_recv() {
             match e {
-                Event::Artwork(id, path) => {
-                    for p in &mut self.state.playlists {
-                        if p.image_file == id {
-                            p.image_path = Some(path.clone());
+                Event::Artwork(id, result) => {
+                    self.image_requests.remove(&id);
+                    let path = match result {
+                        Ok(path) => {
+                            self.image_retry.remove(&id);
+                            ctx.forget_image(&format!("file://{path}"));
+                            path
                         }
-                        for t in &mut p.tracks {
-                            if t.image_file == id {
-                                t.image_path = Some(path.clone());
-                            }
+                        Err(_) => {
+                            self.image_retry
+                                .insert(id, std::time::Instant::now() + Duration::from_secs(5));
+                            continue;
                         }
-                    }
+                    };
+                    self.apply_artwork(id, &path);
                 }
                 Event::Progress(s) => self.status = s,
                 Event::AuthResult(token, result) => {
@@ -693,6 +762,9 @@ impl App {
                                     self.state.playlists.iter_mut().find(|x| x.id == p.id)
                                 {
                                     old.title = p.title;
+                                    if old.image_file != p.image_file {
+                                        old.image_path = None;
+                                    }
                                     old.image_file = p.image_file;
                                 } else {
                                     self.state.playlists.push(p);

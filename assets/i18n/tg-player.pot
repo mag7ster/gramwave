@@ -294,3 +294,18 @@ msgstr ""
 
 msgid "Load more music"
 msgstr ""
+
+msgid "Close search"
+msgstr ""
+
+msgid "No chats found"
+msgstr ""
+
+msgid "Pin chats here, or find one using search."
+msgstr ""
+
+msgid "Pin chat"
+msgstr ""
+
+msgid "Unpin chat"
+msgstr ""
