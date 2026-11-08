@@ -21,6 +21,7 @@ use model::{Playlist, State, Track};
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::mpsc, time::Duration};
 enum Event {
+    ChatSearch(u64, String, Result<Vec<Playlist>, String>),
     Progress(String),
     TrackReady((i64, i64), Result<Track, String>),
     PlaybackReady(u64, Result<Track, String>),
@@ -41,7 +42,18 @@ enum RetryAction {
     Offline(Track),
     Catalog,
 }
+#[derive(Default)]
+struct ChatSearch {
+    query: String,
+    generation: u64,
+    since: Option<std::time::Instant>,
+    sent: bool,
+    ids: Vec<i64>,
+    error: String,
+    loading: bool,
+}
 struct App {
+    chat_search: ChatSearch,
     #[cfg(test)]
     test_rows: std::collections::BTreeMap<i64, (egui::Rect, egui::Rect)>,
     #[cfg(test)]
@@ -140,11 +152,19 @@ impl App {
             state = demo::state();
         } else {
             state.repair_legacy_queue();
+            if state.queue_version < 2 {
+                if state.previous_queue.is_empty() {
+                    state.previous_queue = state.queue.clone();
+                }
+                state.session.import(std::mem::take(&mut state.queue));
+                state.queue_version = 2;
+            }
             db.save(state.clone());
         }
 
         let (tx, rx) = mpsc::channel();
         Self {
+            chat_search: ChatSearch::default(),
             #[cfg(test)]
             test_rows: Default::default(),
             #[cfg(test)]
@@ -335,6 +355,56 @@ impl App {
             });
         }
     }
+    fn merge_chat(&mut self, p: Playlist) {
+        if let Some(old) = self.state.playlists.iter_mut().find(|x| x.id == p.id) {
+            old.title = p.title;
+            if old.image_file != p.image_file {
+                old.image_path = None;
+            }
+            old.image_file = p.image_file;
+        } else {
+            self.state.playlists.push(p);
+        }
+    }
+    fn poll_chat_search(&mut self, ctx: &egui::Context) {
+        let query = if self.chat_search_active {
+            self.chat_query.trim().to_owned()
+        } else {
+            String::new()
+        };
+        if query != self.chat_search.query {
+            self.chat_search.query = query.clone();
+            self.chat_search.generation += 1;
+            self.chat_search.since = Some(std::time::Instant::now());
+            self.chat_search.sent = false;
+            self.chat_search.ids.clear();
+            self.chat_search.error.clear();
+            self.chat_search.loading = false;
+        }
+        if query.is_empty() || self.demo || self.chat_search.sent {
+            return;
+        }
+        if self
+            .chat_search
+            .since
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(250))
+        {
+            ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        }
+        let Some(tg) = self.tg.clone() else {
+            return;
+        };
+        self.chat_search.sent = true;
+        self.chat_search.loading = true;
+        let generation = self.chat_search.generation;
+        let tx = self.tx.clone();
+        let filters = self.state.filters;
+        std::thread::spawn(move || {
+            let result = discovery::search_chats(&tg, &query, filters);
+            let _ = tx.send(Event::ChatSearch(generation, query, result));
+        });
+    }
     fn sync(&mut self) {
         if self.busy {
             return;
@@ -486,14 +556,7 @@ impl App {
             p.cmd(&["set", "volume", &self.state.volume.to_string()]);
             self.state.session.current = Some(t);
             self.status.clear();
-            if let (Some(tg), Some(next)) = (
-                &self.tg,
-                self.state
-                    .queue
-                    .first()
-                    .or(self.state.session.remaining.first())
-                    .or(self.state.session.next_cycle.first()),
-            ) {
+            if let (Some(tg), Some(next)) = (&self.tg, self.state.session.remaining.first()) {
                 if next.file > 0 {
                     tg.request(json!({"@type":"downloadFile","file_id":next.file,"priority":1,"offset":0,"limit":1048576,"synchronous":false}));
                 }
@@ -520,12 +583,46 @@ impl App {
             self.persist();
         }
     }
+    fn choose_session(&mut self, tracks: &[Track], index: usize) {
+        let ahead = tracks
+            .get(index)
+            .filter(|t| self.state.session.source == Some(t.chat))
+            .and_then(|t| {
+                self.state
+                    .session
+                    .remaining
+                    .iter()
+                    .position(|q| playback::same(q, t))
+            });
+        let selected = if let Some(i) = ahead {
+            self.state.session.jump_to(&mut self.state.queue, i)
+        } else {
+            self.state.session.start(tracks, index, self.state.shuffle)
+        };
+        if let Some(t) = selected {
+            self.play(t);
+            self.persist();
+        }
+    }
     fn set_paused(&mut self, paused: bool) {
         if self.state.session.current.is_none() {
             if !paused {
                 self.next();
             }
             return;
+        }
+        if !paused
+            && self.paused
+            && !self.loading
+            && self
+                .player
+                .as_ref()
+                .is_none_or(|p| p.number("duration") <= 0.)
+        {
+            if let Some(t) = self.state.session.current.clone() {
+                self.play(t);
+                return;
+            }
         }
         self.paused = paused;
         if let Some(p) = &self.player {
@@ -655,6 +752,7 @@ impl App {
             .chain(self.state.session.next_cycle.iter_mut())
             .chain(self.state.session.snapshot.iter_mut())
             .chain(self.state.session.history.iter_mut())
+            .chain(self.state.session.preceding.iter_mut())
             .chain(self.state.pending_pins.iter_mut())
             .chain(self.state.session.current.iter_mut())
         {
@@ -685,6 +783,7 @@ impl App {
             .chain(self.state.session.next_cycle.iter_mut())
             .chain(self.state.session.snapshot.iter_mut())
             .chain(self.state.session.history.iter_mut())
+            .chain(self.state.session.preceding.iter_mut())
             .chain(self.state.session.current.iter_mut())
         {
             if t.image_file == id {
@@ -805,6 +904,12 @@ impl App {
                                 t.cached = path.clone();
                             }
                         }
+                    }
+                }
+                "updateNewChat" => {
+                    if let Some(p) = discovery::chat_metadata(&v["chat"], self.state.filters) {
+                        self.merge_chat(p);
+                        self.persist();
                     }
                 }
                 "updateChatTitle" => {
@@ -980,6 +1085,7 @@ impl App {
                         .chain(self.state.session.next_cycle.iter_mut())
                         .chain(self.state.session.current.iter_mut())
                         .chain(self.state.session.history.iter_mut())
+                        .chain(self.state.session.preceding.iter_mut())
                     {
                         if t.chat == c && t.message == m {
                             t.pinned = Some(path.clone());
@@ -1002,6 +1108,25 @@ impl App {
                                 self.error_retry = Some(RetryAction::Chat(self.selected));
                             }
                         }
+                    }
+                }
+                Event::ChatSearch(generation, query, result) => {
+                    if generation != self.chat_search.generation
+                        || !self.chat_search_active
+                        || query != self.chat_query.trim()
+                    {
+                        continue;
+                    }
+                    self.chat_search.loading = false;
+                    match result {
+                        Ok(chats) => {
+                            self.chat_search.ids = chats.iter().map(|p| p.id).collect();
+                            for p in chats {
+                                self.merge_chat(p);
+                            }
+                            self.persist();
+                        }
+                        Err(e) => self.chat_search.error = e,
                     }
                 }
                 Event::Catalog(result) => {

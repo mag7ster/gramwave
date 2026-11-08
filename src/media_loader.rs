@@ -13,6 +13,7 @@ pub fn resolve(tg: &Telegram, old: &Track) -> Result<Track, String> {
     let mut resolved = track(old.chat, &message)
         .filter(|t| t.message == old.message && t.file > 0)
         .ok_or_else(|| crate::tr("This message no longer contains playable audio"))?;
+    resolved.entry_id = old.entry_id;
     resolved.pinned = old.pinned.clone();
     Ok(resolved)
 }

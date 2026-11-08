@@ -19,8 +19,19 @@ impl Store {
         let state = match db.query_row("SELECT value FROM state WHERE id=1", [], |r| {
             r.get::<_, String>(0)
         }) {
-            Ok(s) => serde_json::from_str(&s)
-                .map_err(|e| format!("Library index cannot be decoded: {e}"))?,
+            Ok(s) => {
+                let state: State = serde_json::from_str(&s)
+                    .map_err(|e| format!("Library index cannot be decoded: {e}"))?;
+                if state.queue_version < 2 {
+                    db.execute_batch("CREATE TABLE IF NOT EXISTS queue_backup(id INTEGER PRIMARY KEY,value TEXT NOT NULL);").map_err(|e| e.to_string())?;
+                    db.execute(
+                        "INSERT OR IGNORE INTO queue_backup(id,value) VALUES(1,?1)",
+                        [&s],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                state
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => State::default(),
             Err(e) => return Err(e.to_string()),
         };

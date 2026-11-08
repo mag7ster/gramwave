@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Track {
+    pub entry_id: u64,
     pub chat: i64,
     pub message: i64,
     #[serde(skip)]
@@ -228,6 +229,7 @@ pub fn track(chat: i64, v: &serde_json::Value) -> Option<Track> {
         .map(str::to_owned)
         .unwrap_or_else(|| crate::i18n::tr("Voice message"));
     Some(Track {
+        entry_id: 0,
         chat,
         message: v["id"].as_i64()?,
         file: f["id"].as_i64()?,

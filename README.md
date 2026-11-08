@@ -73,25 +73,26 @@ cargo run -- --demo --preview-auth=error
   Changing chats, search, sorting or loading more pages leaves this session intact.
   Without shuffle, playback continues with the following row. With shuffle, the
   chosen track plays first and the other snapshot tracks play once per cycle.
-- Shuffle rebuilds only the remaining automatic order. The queue displays that
-  exact order, including the prepared next cycle at a Repeat All boundary.
-  **Play next** prepends to the manual queue; **Add to queue** appends to it.
-  Manual entries play before automatic tracks and never shuffle or repeat as
-  manual additions. Starting another row preserves these explicit additions.
+- The queue is one editable list. **Play next** inserts immediately after the
+  current track; **Add to queue** appends. Duplicate additions are independent.
+  Drag the handle or use Move up/down to reorder; remove any future entry.
+  Clear queue keeps the current track and disables repeat.
+- Selecting an upcoming track in the source playlist jumps to its nearest entry;
+  another selection replaces the queue. Skipped entries are not playback history.
+- Shuffle randomizes the remaining entries once; manual edits apply literally.
+  Turning shuffle off restores the base order with those edits.
 - Repeat cycles **Off → All → One → Off**. One repeats natural EOF only;
-  Next always advances. All starts another snapshot cycle. Previous restarts
-  after three seconds; earlier it returns through history and restores the
-  current track to the immediate continuation.
+  Next always advances. All repeats the edited queue including additions, without
+  resurrecting removals. Previous restarts after three seconds; earlier it returns
+  through actual history, with the departed track immediately next.
 - Tab reaches controls and rows; Enter activates a focused row. Space controls
   playback outside text fields. Seek supports click, drag preview and keyboard
   arrows (five seconds), Home and End. Volume arrows change one percent. Unknown
   duration disables seek. Mute restores the last nonzero volume.
-- Modes, volume and the upcoming queue survive restart, without starting playback.
-  Old saved queues are imported as manual entries. A duplicated legacy playlist
-  tail already present in the automatic queue is repaired once on startup; its
-  original entries remain in the saved `previous_queue` backup. Explicit manual
-  additions are preserved. Selecting a later queue entry skips to it and continues
-  with the entries that follow. Queue order is independent of Telegram. Nothing edits source messages.
+- Modes, volume, current entry and exact queue order survive restart on pause.
+  Play starts the saved track from the beginning. Legacy queues are imported once
+  in their visible order after legacy repair; the original state is backed up in
+  SQLite. Queue changes never edit Telegram messages.
 - The download button saves a separate offline copy; saving a playlist also
   enables saving new matching tracks. Offline copies survive cache cleanup.
 - Public chat links and available message links open in Telegram. Some private
@@ -192,3 +193,11 @@ filenames and password hints are content and must never be translated.
 Alternative compact and cover-card layouts; additional translations;
 Windows/macOS packaging; richer embedded cover extraction. The first release
 supports one Telegram account and cloud chats, not secret chats.
+
+Track menus open with either right click or the ellipsis button. Click the middle
+mouse button to start Firefox-style autoscroll in track, chat and queue lists.
+Move away from the anchor to control direction and speed; click again or press
+Escape to stop. Holding the middle button, moving and releasing also works. Previous follows
+playback history, then preceding rows from the original playlist snapshot when
+playback began in the middle. Chat search combines cached matches with TDLib
+account search after a short typing pause; it does not load message history.

@@ -6,6 +6,7 @@ impl App {
         self.image_wanted.clear();
         self.track_wanted.clear();
         design::style(&ctx, self.state.light);
+        self.poll_chat_search(&ctx);
         if !self.settings_open
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
@@ -133,9 +134,25 @@ impl App {
                             response.surrender_focus();
                         }
                     });
-                    let indices = self
+                    let mut indices = self
                         .state
                         .sidebar_chats(self.chat_search_active, &self.chat_query);
+                    if self.chat_search_active {
+                        for (i, p) in self.state.playlists.iter().enumerate() {
+                            if self.chat_search.ids.contains(&p.id) && !indices.contains(&i) {
+                                indices.push(i);
+                            }
+                        }
+                        if self.chat_search.loading {
+                            ui.weak(tr("Searching chats…"));
+                        }
+                        if !self.chat_search.error.is_empty() {
+                            ui.label(&self.chat_search.error);
+                            if ui.button(tr("Retry search")).clicked() {
+                                self.chat_search.sent = false;
+                            }
+                        }
+                    }
                     if indices.is_empty() {
                         ui.weak(if self.chat_search_active {
                             tr("No chats found")
@@ -145,67 +162,76 @@ impl App {
                     }
                     let mut open = None;
                     let mut toggle = None;
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for i in indices {
-                            let p = &self.state.playlists[i];
-                            let id = p.id;
-                            let pinned = self.state.chat_pins.contains(&id);
-                            let frame = egui::Frame::new()
-                                .fill(if self.opened_chat == Some(id) {
-                                    design::palette(self.state.light).selected
-                                } else {
-                                    egui::Color32::TRANSPARENT
-                                })
-                                .corner_radius(8)
-                                .inner_margin(8.)
-                                .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        art(ui, &p.title, p.image_path.as_deref(), 40.);
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&p.title).strong(),
-                                            )
-                                            .truncate(),
+                    let chats_scroll =
+                        egui::ScrollArea::vertical()
+                            .id_salt("chat-list")
+                            .show(ui, |ui| {
+                                for i in indices {
+                                    let p = &self.state.playlists[i];
+                                    let id = p.id;
+                                    let pinned = self.state.chat_pins.contains(&id);
+                                    let frame = egui::Frame::new()
+                                        .fill(if self.opened_chat == Some(id) {
+                                            design::palette(self.state.light).selected
+                                        } else {
+                                            egui::Color32::TRANSPARENT
+                                        })
+                                        .corner_radius(8)
+                                        .inner_margin(8.)
+                                        .show(ui, |ui| {
+                                            ui.set_min_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                art(ui, &p.title, p.image_path.as_deref(), 40.);
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(&p.title).strong(),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            });
+                                        })
+                                        .response;
+                                    let response = ui.interact(
+                                        frame.rect,
+                                        ui.id().with(("chat", id)),
+                                        egui::Sense::click(),
+                                    );
+                                    if response.has_focus() {
+                                        ui.painter().rect_stroke(
+                                            response.rect,
+                                            8.,
+                                            egui::Stroke::new(1., design::colors(ui).accent),
+                                            egui::StrokeKind::Inside,
                                         );
+                                    }
+                                    if ui.is_rect_visible(response.rect) {
+                                        self.image_wanted.push(p.image_file);
+                                    }
+                                    if response.clicked() {
+                                        open = Some(i);
+                                    }
+                                    response.context_menu(|ui| {
+                                        if ui
+                                            .button(if pinned {
+                                                tr("Unpin chat")
+                                            } else {
+                                                tr("Pin chat")
+                                            })
+                                            .clicked()
+                                        {
+                                            toggle = Some(id);
+                                            ui.close();
+                                        }
                                     });
-                                })
-                                .response;
-                            let response = ui.interact(
-                                frame.rect,
-                                ui.id().with(("chat", id)),
-                                egui::Sense::click(),
-                            );
-                            if response.has_focus() {
-                                ui.painter().rect_stroke(
-                                    response.rect,
-                                    8.,
-                                    egui::Stroke::new(1., design::colors(ui).accent),
-                                    egui::StrokeKind::Inside,
-                                );
-                            }
-                            if ui.is_rect_visible(response.rect) {
-                                self.image_wanted.push(p.image_file);
-                            }
-                            if response.clicked() {
-                                open = Some(i);
-                            }
-                            response.context_menu(|ui| {
-                                if ui
-                                    .button(if pinned {
-                                        tr("Unpin chat")
-                                    } else {
-                                        tr("Pin chat")
-                                    })
-                                    .clicked()
-                                {
-                                    toggle = Some(id);
-                                    ui.close();
+                                    ui.add_space(3.);
                                 }
                             });
-                            ui.add_space(3.);
-                        }
-                    });
+                    design::middle_scroll(
+                        ui,
+                        chats_scroll.id,
+                        chats_scroll.inner_rect,
+                        chats_scroll.content_size.y,
+                    );
                     if let Some(id) = toggle {
                         self.toggle_chat_pin(id);
                     }
@@ -866,7 +892,7 @@ impl App {
                                         egui::Color32::TRANSPARENT;
                                     ui.visuals_mut().override_text_color = None;
                                 }
-                                let menu = ui.menu_button("…", |ui| {
+                                let mut contents = |ui: &mut egui::Ui| {
                                     ui.visuals_mut().override_text_color = Some(p.text);
                                     ui.visuals_mut().widgets.inactive.fg_stroke.color = p.text;
                                     for (kind, label) in [
@@ -898,7 +924,9 @@ impl App {
                                         ui.label(tr("Download failed · Save offline to retry"));
                                         ui.label(error);
                                     }
-                                });
+                                };
+                                let menu = ui.menu_button("…", &mut contents);
+                                response.context_menu(&mut contents);
                                 #[cfg(test)]
                                 self.test_rows.insert(t.message, (rect, menu.response.rect));
                                 menu_clicked = menu.response.contains_pointer()
@@ -921,6 +949,7 @@ impl App {
                     }
                 }
             });
+        design::middle_scroll(ui, scroll.id, scroll.inner_rect, scroll.content_size.y);
         let more = self.state.playlists[self.selected].has_more();
         if more && self.indexing_chat.is_none() && !self.demo {
             let at_bottom = scroll.state.offset.y > 0.
@@ -932,7 +961,7 @@ impl App {
         }
         if let Some((kind, i)) = action {
             match kind {
-                0 => self.start_session(&tracks, i),
+                0 => self.choose_session(&tracks, i),
                 6 => {
                     if self
                         .state
@@ -943,12 +972,12 @@ impl App {
                     {
                         self.set_paused(!self.paused);
                     } else {
-                        self.start_session(&tracks, i);
+                        self.choose_session(&tracks, i);
                     }
                 }
                 5 => ui.ctx().copy_text(tracks[i].title.clone()),
-                1 => self.state.queue.insert(0, tracks[i].clone()),
-                2 => self.state.queue.push(tracks[i].clone()),
+                1 => self.state.session.insert(tracks[i].clone(), true),
+                2 => self.state.session.insert(tracks[i].clone(), false),
                 3 => self.pin(tracks[i].clone()),
                 _ => self.link(&tracks[i]),
             }
@@ -1038,70 +1067,95 @@ impl App {
             tr("Playlist order")
         });
         ui.small(tr("Playback uses the tracks loaded when you started."));
-        if self.state.queue.is_empty()
-            && self.state.session.remaining.is_empty()
-            && self.state.session.next_cycle.is_empty()
-        {
+        if ui.button(tr("Clear queue")).clicked() {
+            self.state.session.clear();
+            self.state.repeat = RepeatMode::Off;
+            self.persist();
+        }
+        if let Some(t) = &self.state.session.current {
+            ui.label(format!("{}: {}", tr("Now playing"), t.title));
+        }
+        if self.state.session.remaining.is_empty() {
             ui.label(tr("Your queue is empty"));
         }
         let mut play = None;
         let mut remove = None;
         let mut up = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (i, t) in self
-                .state
-                .queue
-                .iter()
-                .chain(self.state.session.remaining.iter())
-                .chain(self.state.session.next_cycle.iter())
-                .enumerate()
-            {
-                if i == 0 && !self.state.queue.is_empty() {
-                    ui.strong(tr("Added by you"));
-                }
-                if i == self.state.queue.len() && !self.state.session.remaining.is_empty() {
-                    ui.strong(tr("From this session"));
-                }
-                if i == self.state.queue.len() + self.state.session.remaining.len()
-                    && !self.state.session.next_cycle.is_empty()
-                {
-                    ui.strong(tr("Next cycle"));
-                }
-                ui.horizontal(|ui| {
-                    ui.add_sized(
-                        [20., 36.],
-                        egui::Label::new(egui::RichText::new((i + 1).to_string()).weak().small()),
+        let mut down = None;
+        let mut moved = None;
+        let queue_scroll = egui::ScrollArea::vertical()
+            .id_salt("queue-list")
+            .show(ui, |ui| {
+                for (i, t) in self.state.session.remaining.iter().enumerate() {
+                    let context = ui.interact(
+                        egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(ui.available_width(), 44.),
+                        ),
+                        ui.id().with(("queue-context", t.entry_id)),
+                        egui::Sense::click(),
                     );
-                    if button(ui, Icon::Play, "Play") {
-                        play = Some(i);
-                    }
-                    ui.allocate_ui(
-                        egui::vec2((ui.available_width() - 50.).max(60.), 44.),
-                        |ui| {
-                            ui.vertical(|ui| {
-                                ui.add(egui::Label::new(&t.title).truncate())
-                                    .on_hover_text(&t.title);
-                                ui.add(
-                                    egui::Label::new(egui::RichText::new(&t.artist).weak())
-                                        .truncate(),
-                                );
-                            });
-                        },
-                    );
-                    ui.menu_button("…", |ui| {
-                        if i > 0 && i < self.state.queue.len() && ui.button(tr("Move up")).clicked()
-                        {
-                            up = Some(i);
-                            ui.close();
+                    let row = ui.horizontal(|ui| {
+                        let handle = ui.add(egui::Label::new("⠿").sense(egui::Sense::drag()));
+                        if handle.drag_started() {
+                            handle.dnd_set_drag_payload(i);
                         }
-                        if ui.button(tr("Remove")).clicked() {
-                            remove = Some(i);
-                            ui.close();
+                        ui.add_sized(
+                            [20., 36.],
+                            egui::Label::new(
+                                egui::RichText::new((i + 1).to_string()).weak().small(),
+                            ),
+                        );
+                        if button(ui, Icon::Play, "Play") {
+                            play = Some(i);
                         }
+                        ui.allocate_ui(
+                            egui::vec2((ui.available_width() - 50.).max(60.), 44.),
+                            |ui| {
+                                ui.vertical(|ui| {
+                                    ui.add(egui::Label::new(&t.title).truncate())
+                                        .on_hover_text(&t.title);
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(&t.artist).weak())
+                                            .truncate(),
+                                    );
+                                });
+                            },
+                        );
+                        let mut contents = |ui: &mut egui::Ui| {
+                            if i > 0 && ui.button(tr("Move up")).clicked() {
+                                up = Some(i);
+                                ui.close();
+                            }
+                            if i + 1 < self.state.session.remaining.len()
+                                && ui.button(tr("Move down")).clicked()
+                            {
+                                down = Some(i);
+                                ui.close();
+                            }
+                            if ui.button(tr("Remove")).clicked() {
+                                remove = Some(i);
+                                ui.close();
+                            }
+                        };
+                        ui.menu_button("…", &mut contents);
+                        context.context_menu(&mut contents);
                     });
-                });
-            }
-        });
+                    if let Some(from) = row.response.dnd_release_payload::<usize>() {
+                        moved = Some((*from, i));
+                    }
+                }
+            });
+        design::middle_scroll(
+            ui,
+            queue_scroll.id,
+            queue_scroll.inner_rect,
+            queue_scroll.content_size.y,
+        );
+        if let Some((from, to)) = moved {
+            self.state.session.move_before(from, to);
+            self.persist();
+        }
         if let Some(i) = play {
             if let Some(t) = self.state.session.jump_to(&mut self.state.queue, i) {
                 self.play(t);
@@ -1109,26 +1163,16 @@ impl App {
             }
         }
         if let Some(i) = remove {
-            if i < self.state.queue.len() {
-                self.state.queue.remove(i);
-            } else {
-                let index = i - self.state.queue.len();
-                if index < self.state.session.remaining.len() {
-                    self.state.session.remaining.remove(index)
-                } else {
-                    self.state
-                        .session
-                        .next_cycle
-                        .remove(index - self.state.session.remaining.len())
-                };
-            }
+            self.state.session.remove(i);
             self.persist();
         }
         if let Some(i) = up {
-            if i > 0 {
-                self.state.queue.swap(i, i - 1);
-                self.persist();
-            }
+            self.state.session.move_before(i, i - 1);
+            self.persist();
+        }
+        if let Some(i) = down {
+            self.state.session.move_before(i, i + 2);
+            self.persist();
         }
     }
 }
@@ -1170,8 +1214,12 @@ mod interaction_tests {
     }
     impl Harness {
         fn new() -> Self {
-            let root =
-                std::env::temp_dir().join(format!("tg-player-ui-test-{}", std::process::id()));
+            static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "tg-player-ui-test-{}-{}",
+                std::process::id(),
+                SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
             let mut app = App::new_at(root, true);
             app.player = None;
             app.opened_chat = Some(0);
@@ -1228,6 +1276,26 @@ mod interaction_tests {
                 modifiers: egui::Modifiers::NONE,
             }]);
         }
+    }
+    #[test]
+    fn right_click_opens_track_menu_without_starting_playback() {
+        let mut h = Harness::new();
+        let row = h.app.test_rows[&0].0;
+        let p = row.center();
+        for pressed in [true, false] {
+            h.frame(vec![
+                egui::Event::PointerMoved(p),
+                egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+        assert!(h.app.state.session.current.is_none());
+        assert!(egui::Popup::is_any_open(&h.ctx));
+        h.key(egui::Key::Escape);
     }
     #[test]
     fn row_mouse_keyboard_menu_and_seek_contract() {

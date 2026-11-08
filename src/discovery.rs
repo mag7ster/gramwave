@@ -131,6 +131,57 @@ pub fn refresh(
     }
     Ok(())
 }
+pub fn chat_metadata(c: &Value, filters: [bool; 3]) -> Option<Playlist> {
+    if c["type"]["@type"] == "chatTypeSecret" {
+        return None;
+    }
+    Some(Playlist {
+        id: c["id"].as_i64()?,
+        title: c["title"].as_str()?.into(),
+        filters,
+        image_file: c["photo"]["small"]["id"].as_i64().unwrap_or(0),
+        ..Default::default()
+    })
+}
+pub fn search_chats(
+    tg: &Telegram,
+    query: &str,
+    filters: [bool; 3],
+) -> Result<Vec<Playlist>, String> {
+    let mut ids = std::collections::HashSet::new();
+    let mut chats = Vec::new();
+    let mut error = None;
+    for method in ["searchChats", "searchChatsOnServer"] {
+        match tg.call(json!({"@type":method,"query":query,"limit":100})) {
+            Ok(v) => {
+                for id in v["chat_ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_i64)
+                {
+                    if ids.insert(id) {
+                        match tg.call(json!({"@type":"getChat","chat_id":id})) {
+                            Ok(c) => {
+                                if let Some(p) = chat_metadata(&c, filters) {
+                                    chats.push(p);
+                                }
+                            }
+                            Err(e) => error = Some(e),
+                        }
+                    }
+                }
+            }
+            Err(e) => error = Some(e),
+        }
+    }
+    if chats.is_empty() {
+        if let Some(e) = error {
+            return Err(e);
+        }
+    }
+    Ok(chats)
+}
 pub fn catalog(tg: &Telegram, filters: [bool; 3]) -> Result<Vec<Playlist>, String> {
     let mut ids = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -162,21 +213,11 @@ pub fn catalog(tg: &Telegram, filters: [bool; 3]) -> Result<Vec<Playlist>, Strin
         .collect();
     let mut chats = Vec::new();
     for reply in replies {
-        let c = response(
-            reply
-                .recv_timeout(Duration::from_secs(60))
-                .map_err(|e| e.to_string())?,
-        )?;
-        if c["type"]["@type"] == "chatTypeSecret" {
-            continue;
+        if let Ok(Ok(c)) = reply.recv_timeout(Duration::from_secs(60)).map(response) {
+            if let Some(p) = chat_metadata(&c, filters) {
+                chats.push(p);
+            }
         }
-        chats.push(Playlist {
-            id: c["id"].as_i64().unwrap_or(0),
-            title: c["title"].as_str().unwrap_or("").into(),
-            filters,
-            image_file: c["photo"]["small"]["id"].as_i64().unwrap_or(0),
-            ..Default::default()
-        });
     }
     Ok(chats)
 }
@@ -496,5 +537,28 @@ mod refresh_tests {
         changes.apply(&mut displayed, &HashSet::from([100, 200]));
         assert_eq!(displayed.tracks.len(), 1);
         assert_eq!(displayed.tracks[0].title, "Live edit");
+    }
+}
+
+#[cfg(test)]
+mod chat_search_tests {
+    use super::*;
+    #[test]
+    fn server_finds_uncached_cyrillic_channel_and_deduplicates() {
+        let tg = Telegram::mock_rpc(|v| match v["@type"].as_str().unwrap() {
+            "searchChats" => {
+                assert_eq!(v["query"], "РАДИО");
+                json!({"chat_ids":[1]})
+            }
+            "searchChatsOnServer" => json!({"chat_ids":[1,2,3]}),
+            "getChat" if v["chat_id"] == 3 => json!({"@type":"error","message":"unavailable"}),
+            "getChat" => {
+                json!({"id":v["chat_id"],"title":"Радио канал","type":{"@type":"chatTypeSupergroup"}})
+            }
+            _ => panic!("unexpected request {v}"),
+        });
+        let chats = search_chats(&tg, "РАДИО", [true; 3]).unwrap();
+        assert_eq!(chats.iter().map(|p| p.id).collect::<Vec<_>>(), [1, 2]);
+        assert!(chats.iter().all(|p| p.tracks.is_empty()));
     }
 }

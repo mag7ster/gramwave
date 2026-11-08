@@ -30,9 +30,8 @@ pub fn apply(app: &mut App, scenario: &str) {
     match scenario {
         "playing" | "paused" | "loading" | "error" => {
             app.state.session.start(&tracks, 0, true);
-            // Reproducible order, with visibly shuffled automatic continuation.
-            app.state.session.remaining = tracks.iter().skip(1).rev().cloned().collect();
-            app.state.queue = vec![tracks[4].clone(), tracks[7].clone()];
+            app.state.session.insert(tracks[4].clone(), true);
+            app.state.session.insert(tracks[7].clone(), false);
             app.state.shuffle = true;
             app.state.repeat = RepeatMode::One;
             app.queue_open = true;

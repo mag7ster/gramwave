@@ -245,7 +245,10 @@ pub fn slider(
         egui::Stroke::new(4., p.accent),
     );
     ui.painter().circle_filled(egui::pos2(x, y), 6., p.accent);
-    if response.has_focus() {
+    if response.has_focus() && time {
+        ui.painter()
+            .circle_stroke(egui::pos2(x, y), 9., egui::Stroke::new(1., p.accent));
+    } else if response.has_focus() {
         ui.painter().rect_stroke(
             rect,
             4.,
@@ -268,9 +271,152 @@ pub fn slider(
     })
 }
 
+#[derive(Clone)]
+struct AutoScroll {
+    owner: egui::Id,
+    anchor: egui::Pos2,
+    dragged: bool,
+    last_frame: u64,
+}
+
+/// Firefox-style autoscroll: distance from the anchor controls velocity.
+pub fn middle_scroll(ui: &egui::Ui, output_id: egui::Id, rect: egui::Rect, content_height: f32) {
+    let key = egui::Id::new("middle-autoscroll");
+    let frame = ui.ctx().cumulative_frame_nr();
+    let blocked = key.with("blocked-frame");
+    if ui.ctx().data(|d| d.get_temp::<u64>(blocked)) == Some(frame) {
+        return;
+    }
+    let mut active = ui.ctx().data(|d| d.get_temp::<AutoScroll>(key));
+    let (pressed, released, cancel, focused, pos, dt) = ui.input(|i| {
+        (
+            i.pointer.button_pressed(egui::PointerButton::Middle),
+            i.pointer.button_released(egui::PointerButton::Middle),
+            i.key_pressed(egui::Key::Escape)
+                || i.pointer.button_pressed(egui::PointerButton::Primary)
+                || i.pointer.button_pressed(egui::PointerButton::Secondary)
+                || i.raw
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::MouseWheel { .. })),
+            i.focused,
+            i.pointer.hover_pos(),
+            i.stable_dt.min(0.05),
+        )
+    });
+    if !focused
+        || cancel
+        || active
+            .as_ref()
+            .is_some_and(|s| s.owner == output_id && pressed)
+    {
+        ui.ctx().data_mut(|d| {
+            d.remove::<AutoScroll>(key);
+            d.insert_temp(blocked, frame);
+        });
+        return;
+    }
+    if active.is_none() && pressed && pos.is_some_and(|p| rect.contains(p)) {
+        active = Some(AutoScroll {
+            owner: output_id,
+            anchor: pos.unwrap(),
+            dragged: false,
+            last_frame: frame,
+        });
+    }
+    let Some(mut active) = active.filter(|s| s.owner == output_id) else {
+        return;
+    };
+    active.last_frame = frame;
+    let displacement = pos.map_or(0., |p| p.y - active.anchor.y);
+    let distance = (displacement.abs() - 8.).max(0.);
+    active.dragged |= distance > 0.;
+    // A stationary click latches the mode; holding and moving also works.
+    if released && active.dragged {
+        ui.ctx().data_mut(|d| {
+            d.remove::<AutoScroll>(key);
+            d.insert_temp(blocked, frame);
+        });
+        return;
+    }
+    if let Some(mut state) = egui::scroll_area::State::load(ui.ctx(), output_id) {
+        let speed = displacement.signum() * (distance * 8. + distance * distance * 0.12).min(5000.);
+        state.offset.y =
+            (state.offset.y + speed * dt).clamp(0., (content_height - rect.height()).max(0.));
+        state.store(ui.ctx(), output_id);
+    }
+    let painter = ui
+        .ctx()
+        .layer_painter(egui::LayerId::new(egui::Order::Tooltip, key));
+    let p = colors(ui);
+    painter.circle_filled(active.anchor, 13., p.panel);
+    painter.circle_stroke(active.anchor, 13., egui::Stroke::new(1., p.accent));
+    painter.text(
+        active.anchor,
+        egui::Align2::CENTER_CENTER,
+        "↕",
+        egui::FontId::proportional(18.),
+        p.accent,
+    );
+    ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
+    ui.ctx().data_mut(|d| d.insert_temp(key, active));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn middle_click_latches_and_distance_controls_continuous_scroll() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("test-scroll");
+        let mut state = egui::scroll_area::State::default();
+        state.offset.y = 100.;
+        state.store(&ctx, id);
+        let anchor = egui::pos2(40., 100.);
+        let frame = |pos: egui::Pos2, button: Option<bool>| {
+            let mut events = vec![egui::Event::PointerMoved(pos)];
+            if let Some(pressed) = button {
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Middle,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| {
+                    middle_scroll(
+                        ui,
+                        id,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(200., 200.)),
+                        1000.,
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            egui::scroll_area::State::load(&ctx, id).unwrap().offset.y
+        };
+        assert_eq!(frame(anchor, Some(true)), 100.);
+        assert_eq!(frame(anchor, Some(false)), 100.);
+        let down = egui::pos2(40., 140.);
+        let first = frame(down, None);
+        assert!(first > 100.);
+        let second = frame(down, None);
+        assert!(second > first);
+        let faster = frame(egui::pos2(40., 180.), None);
+        assert!(faster - second > second - first);
+        let up = frame(egui::pos2(40., 60.), None);
+        assert!(up < faster);
+        assert_eq!(frame(anchor, Some(true)), up);
+        assert_eq!(frame(down, Some(false)), up);
+    }
     fn luminance(c: egui::Color32) -> f32 {
         let channel = |v: u8| {
             let v = v as f32 / 255.;
