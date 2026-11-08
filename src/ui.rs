@@ -73,7 +73,12 @@ impl App {
     pub fn background(&mut self, ctx: &egui::Context, window_present: bool) {
         self.process(ctx);
         if let Some(tg) = &self.tg {
-            if let Some(p) = self.state.playlists.get(self.selected) {
+            if let Some(p) = self
+                .state
+                .playlists
+                .get(self.selected)
+                .filter(|p| self.opened_chat == Some(p.id))
+            {
                 let ids = std::iter::once(p.image_file)
                     .chain(p.tracks.iter().take(20).map(|t| t.image_file))
                     .filter(|id| *id != 0)

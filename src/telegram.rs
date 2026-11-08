@@ -138,6 +138,22 @@ impl Telegram {
 }
 
 #[cfg(test)]
+impl Telegram {
+    pub fn mock_rpc(mut handler: impl FnMut(Value) -> Value + Send + 'static) -> Self {
+        let (send, rx) = mpsc::channel::<(Value, mpsc::Sender<Value>)>();
+        std::thread::spawn(move || {
+            while let Ok((v, tx)) = rx.recv() {
+                let _ = tx.send(handler(v));
+            }
+        });
+        Self {
+            send,
+            serial: Arc::new(AtomicU64::new(1)),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]

@@ -86,9 +86,17 @@ impl App {
                     }
                 });
                 ui.add_space(12.);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.chat_query).hint_text(tr("Find a chat")),
+                );
+                let mut open = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (i, p) in self.state.playlists.iter().enumerate() {
-                        if !p.tracks.iter().any(|t| p.filters[t.kind]) {
+                        if !p
+                            .title
+                            .to_lowercase()
+                            .contains(&self.chat_query.to_lowercase())
+                        {
                             continue;
                         }
                         let selected = self.selected == i;
@@ -112,18 +120,20 @@ impl App {
                                             )
                                             .truncate(),
                                         );
-                                        ui.weak(i18n::track_count(p.tracks.len()));
                                     });
                                 });
                             })
                             .response
                             .interact(egui::Sense::click());
                         if response.clicked() {
-                            self.selected = i;
+                            open = Some(i);
                         }
                         ui.add_space(3.);
                     }
                 });
+                if let Some(i) = open {
+                    self.open_chat(i);
+                }
                 ui.add_space(16.);
                 if ui.button(tr("Quit TG Player")).clicked() {
                     self.quitting = true;
@@ -293,6 +303,19 @@ impl App {
         });
     }
     fn playlist_screen(&mut self, ui: &mut egui::Ui) {
+        if !self.demo && self.opened_chat.is_none() {
+            ui.add_space(60.);
+            ui.heading(tr("Choose a chat"));
+            ui.weak(tr("Music loads only when you open a chat."));
+            return;
+        }
+        if self.indexing_chat.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(tr("Loading music from this chat…"));
+            });
+        }
+
         let Some(p) = self.state.playlists.get(self.selected) else {
             ui.add_space(80.);
             ui.heading(tr("Your next favourite is waiting."));
@@ -302,7 +325,7 @@ impl App {
         let title = p.title.clone();
         let artwork = p.image_path.clone();
         let url = p.url.clone();
-        let count = p.tracks.len();
+
         egui::Frame::new()
             .fill(egui::Color32::from_rgb(33, 67, 49))
             .corner_radius(12)
@@ -318,7 +341,6 @@ impl App {
                         ui.add(
                             egui::Label::new(egui::RichText::new(&title).size(36.).strong()).wrap(),
                         );
-                        ui.weak(i18n::track_count(count));
                     });
                 });
             });
@@ -359,6 +381,7 @@ impl App {
                     });
             });
         });
+        let before_filters = self.state.playlists[self.selected].filters;
         ui.horizontal(|ui| {
             ui.add(Icon::Search.image(egui::Color32::GRAY, 18.));
             ui.add(
@@ -375,6 +398,9 @@ impl App {
             }
         });
         ui.add_space(12.);
+        if before_filters != self.state.playlists[self.selected].filters {
+            self.open_chat(self.selected);
+        }
         let p = &self.state.playlists[self.selected];
         let q = self.search.to_lowercase();
         let mut tracks: Vec<_> = p
@@ -406,90 +432,98 @@ impl App {
             }
         }
         let mut action = None;
-        egui::ScrollArea::vertical().show_rows(ui, 56., tracks.len(), |ui, range| {
-            for i in range {
-                let t = &tracks[i];
-                let active = self
-                    .current
-                    .as_ref()
-                    .is_some_and(|c| c.chat == t.chat && c.message == t.message);
-                let hovered = ui.rect_contains_pointer(egui::Rect::from_min_size(
-                    ui.next_widget_position(),
-                    egui::vec2(ui.available_width(), 56.),
-                ));
-                egui::Frame::new()
-                    .fill(if active {
-                        egui::Color32::from_rgb(27, 45, 33)
-                    } else if hovered {
-                        if self.state.light {
-                            egui::Color32::from_gray(230)
-                        } else {
-                            egui::Color32::from_gray(28)
-                        }
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
-                    .corner_radius(6)
-                    .inner_margin(6.)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add_sized(
-                                [24., 36.],
-                                egui::Label::new(
-                                    egui::RichText::new(format!("{}", i + 1)).color(if active {
-                                        GREEN
-                                    } else {
-                                        egui::Color32::GRAY
-                                    }),
-                                ),
-                            );
-                            art(ui, &t.title, t.image_path.as_deref(), 36.);
-                            let response = ui
-                                .allocate_ui(
-                                    egui::vec2((ui.available_width() - 100.).max(150.), 40.),
-                                    |ui| {
-                                        ui.set_min_width(ui.available_width());
-                                        ui.vertical(|ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(&t.title).color(
-                                                        if active {
-                                                            GREEN
-                                                        } else {
-                                                            egui::Color32::WHITE
-                                                        },
-                                                    ),
-                                                )
-                                                .truncate(),
-                                            );
-                                            ui.weak(&t.artist);
-                                        });
-                                    },
-                                )
-                                .response
-                                .interact(egui::Sense::click());
-                            if response.double_clicked() {
-                                action = Some((0, i));
+        let scroll =
+            egui::ScrollArea::vertical().show_rows(ui, 56., tracks.len(), |ui, range| {
+                for i in range {
+                    let t = &tracks[i];
+                    let active = self
+                        .current
+                        .as_ref()
+                        .is_some_and(|c| c.chat == t.chat && c.message == t.message);
+                    let hovered = ui.rect_contains_pointer(egui::Rect::from_min_size(
+                        ui.next_widget_position(),
+                        egui::vec2(ui.available_width(), 56.),
+                    ));
+                    egui::Frame::new()
+                        .fill(if active {
+                            egui::Color32::from_rgb(27, 45, 33)
+                        } else if hovered {
+                            if self.state.light {
+                                egui::Color32::from_gray(230)
+                            } else {
+                                egui::Color32::from_gray(28)
                             }
-                            ui.small(clock(t.duration as f64));
-                            ui.menu_button("…", |ui| {
-                                for (kind, label) in [
-                                    (0, "Play"),
-                                    (1, "Play next"),
-                                    (2, "Add to queue"),
-                                    (3, "Save offline"),
-                                    (4, "Copy message link"),
-                                ] {
-                                    if ui.button(tr(label)).clicked() {
-                                        action = Some((kind, i));
-                                        ui.close();
-                                    }
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .corner_radius(6)
+                        .inner_margin(6.)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    [24., 36.],
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("{}", i + 1)).color(
+                                            if active { GREEN } else { egui::Color32::GRAY },
+                                        ),
+                                    ),
+                                );
+                                art(ui, &t.title, t.image_path.as_deref(), 36.);
+                                let response = ui
+                                    .allocate_ui(
+                                        egui::vec2((ui.available_width() - 100.).max(150.), 40.),
+                                        |ui| {
+                                            ui.set_min_width(ui.available_width());
+                                            ui.vertical(|ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(&t.title).color(
+                                                            if active {
+                                                                GREEN
+                                                            } else {
+                                                                egui::Color32::WHITE
+                                                            },
+                                                        ),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                                ui.weak(&t.artist);
+                                            });
+                                        },
+                                    )
+                                    .response
+                                    .interact(egui::Sense::click());
+                                if response.double_clicked() {
+                                    action = Some((0, i));
                                 }
+                                ui.small(clock(t.duration as f64));
+                                ui.menu_button("…", |ui| {
+                                    for (kind, label) in [
+                                        (0, "Play"),
+                                        (1, "Play next"),
+                                        (2, "Add to queue"),
+                                        (3, "Save offline"),
+                                        (4, "Copy message link"),
+                                    ] {
+                                        if ui.button(tr(label)).clicked() {
+                                            action = Some((kind, i));
+                                            ui.close();
+                                        }
+                                    }
+                                });
                             });
                         });
-                    });
+                }
+            });
+        let more = self.state.playlists[self.selected].has_more();
+        if more && self.indexing_chat.is_none() && !self.demo {
+            let at_bottom = scroll.state.offset.y > 0.
+                && scroll.state.offset.y + scroll.inner_rect.height()
+                    >= scroll.content_size.y - 120.;
+            if ui.button(tr("Load more music")).clicked() || at_bottom {
+                self.open_chat(self.selected);
             }
-        });
+        }
         if let Some((kind, i)) = action {
             match kind {
                 0 => {

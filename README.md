@@ -48,6 +48,9 @@ cargo run -- --demo --preview-auth=error
 
 ## Behavior
 
+- Startup loads chat names only, without searching message history or counting tracks.
+- Opening a chat loads one page per enabled audio type. Scroll to load more;
+  switching chats cancels further work for the previous one. No track totals are shown.
 - Music, audio documents and voice messages have separate playlist filters.
 - Double-click a track to play it. `+` adds it to the queue; `⤒` plays it next.
 - Queue order is independent of Telegram. Nothing edits source messages.

@@ -12,16 +12,6 @@ impl fastframe_i18n::Locale for Locale {
 pub fn tr(source: &'static str) -> String {
     fastframe_i18n::gettext(Locale::English, source).into_owned()
 }
-pub fn track_count(count: usize) -> String {
-    fastframe_i18n::ngettext(
-        Locale::English,
-        "{count} track",
-        "{count} tracks",
-        count.min(u32::MAX as usize) as u32,
-    )
-    .replace("{count}", &count.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     #[test]

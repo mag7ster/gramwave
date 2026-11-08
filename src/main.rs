@@ -1,5 +1,6 @@
 mod auth;
 mod design;
+mod discovery;
 mod i18n;
 mod lifecycle;
 mod screens;
@@ -15,10 +16,10 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, sync::mpsc, time::Duration};
 enum Event {
     Progress(String),
-    SyncDone(Result<(), String>),
-    Rename(i64, String),
     Artwork(i64, String),
-    Playlist(Playlist),
+    Playlist(u64, Playlist),
+    Catalog(Result<Vec<Playlist>, String>),
+    Indexed(u64, Result<(), String>),
     Error(String),
     AuthResult(u64, Result<(), String>),
     Pinned(i64, i64, String),
@@ -37,6 +38,10 @@ struct App {
     stream_base: String,
     server: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     selected: usize,
+    opened_chat: Option<i64>,
+    indexing_chat: Option<i64>,
+    index_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    chat_query: String,
     search: String,
     status: String,
     notice: String,
@@ -151,6 +156,10 @@ impl App {
             stream_base: String::new(),
             server: None,
             selected: 0,
+            opened_chat: None,
+            indexing_chat: None,
+            index_epoch: Default::default(),
+            chat_query: String::new(),
             search: String::new(),
             notice: String::new(),
             notice_until: None,
@@ -318,120 +327,53 @@ impl App {
         }
         let Some(tg) = self.tg.clone() else { return };
         self.busy = true;
-        self.status = tr("Discovering music in your chats…");
+        self.status = tr("Loading chat list…");
         let tx = self.tx.clone();
-        let existing = self.state.playlists.clone();
-        let default_filters = self.state.filters;
+        let filters = self.state.filters;
         std::thread::spawn(move || {
-            let result = (|| -> Result<(), String> {
-                for archive in [false, true] {
-                    let list = json!({"@type":if archive{"chatListArchive"}else{"chatListMain"}});
-                    loop {
-                        let r = tg.call(json!({"@type":"loadChats","chat_list":list,"limit":100}));
-                        if r.is_err() {
-                            break;
-                        }
-                    }
-                    let chats =
-                        tg.call(json!({"@type":"getChats","chat_list":list,"limit":10000}))?;
-                    for id in chats["chat_ids"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_i64)
-                    {
-                        let chat = tg.call(json!({"@type":"getChat","chat_id":id}))?;
-                        if chat["type"]["@type"] == "chatTypeSecret" {
-                            continue;
-                        }
-                        let mut p =
-                            existing
-                                .iter()
-                                .find(|p| p.id == id)
-                                .cloned()
-                                .unwrap_or(Playlist {
-                                    id,
-                                    title: chat["title"].as_str().unwrap_or("Chat").into(),
-                                    filters: default_filters,
-                                    ..Default::default()
-                                });
-                        p.image_file = chat["photo"]["small"]["id"].as_i64().unwrap_or(0);
-                        let ty = &chat["type"];
-                        let peer = match ty["@type"].as_str().unwrap_or("") {
-                            "chatTypeSupergroup" => tg
-                                .call(json!({
-                                "@type":"getSupergroup","supergroup_id":ty["supergroup_id"]}
-                                ))
-                                .ok(),
-                            "chatTypePrivate" => tg
-                                .call(json!({
-                                "@type":"getUser","user_id":ty["user_id"]}
-                                ))
-                                .ok(),
-                            _ => None,
-                        };
-
-                        if let Some(peer) = peer {
-                            if let Some(username) =
-                                peer["usernames"]["active_usernames"][0].as_str()
-                            {
-                                p.url = format!("https://t.me/{username}");
-                            }
-                        }
-                        for (kind, filter) in [
-                            "searchMessagesFilterAudio",
-                            "searchMessagesFilterDocument",
-                            "searchMessagesFilterVoiceNote",
-                        ]
-                        .iter()
-                        .enumerate()
-                        {
-                            let had_complete = p.done[kind];
-                            let known: std::collections::HashSet<i64> =
-                                p.tracks.iter().map(|t| t.message).collect();
-                            let mut cursor = if had_complete { 0 } else { p.cursors[kind] };
-                            loop {
-                                let batch=tg.call(json!({
-"@type":"searchChatMessages","chat_id":id,"topic_id":null,"query":"","sender_id":null,"from_message_id":cursor,"offset":0,"limit":100,"filter":{
-"@type":filter}
-}
-))?;
-
-                                let messages =
-                                    batch["messages"].as_array().cloned().unwrap_or_default();
-                                let next =
-                                    messages.last().and_then(|v| v["id"].as_i64()).unwrap_or(0);
-                                let reached_known = had_complete
-                                    && messages.iter().any(|m| {
-                                        m["id"].as_i64().is_some_and(|id| known.contains(&id))
-                                    });
-                                for m in &messages {
-                                    if let Some(t) = model::track(id, m) {
-                                        if !p.tracks.iter().any(|x| x.message == t.message) {
-                                            p.tracks.push(t)
-                                        }
-                                    }
-                                }
-                                if next == 0 || next == cursor || reached_known {
-                                    break;
-                                }
-                                cursor = next;
-                                p.cursors[kind] = cursor;
-                                if !p.tracks.is_empty() {
-                                    let _ = tx.send(Event::Playlist(p.clone()));
-                                }
-                            }
-                            p.done[kind] = true;
-                        }
-                        p.tracks.sort_by_key(|t| std::cmp::Reverse(t.message));
-                        if !p.tracks.is_empty() {
-                            let _ = tx.send(Event::Playlist(p));
+            let _ = tx.send(Event::Catalog(discovery::catalog(&tg, filters)));
+        });
+    }
+    fn open_chat(&mut self, index: usize) {
+        self.selected = index;
+        let Some(mut p) = self.state.playlists.get(index).cloned() else {
+            return;
+        };
+        self.opened_chat = Some(p.id);
+        let generation = self
+            .index_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.indexing_chat = None;
+        if self.demo || !p.has_more() {
+            return;
+        }
+        let Some(tg) = self.tg.clone() else { return };
+        self.indexing_chat = Some(p.id);
+        let epoch = self.index_epoch.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            if p.url.is_empty() {
+                if let Ok(chat) = tg.call(json!({"@type":"getChat","chat_id":p.id})) {
+                    let ty = &chat["type"];
+                    let peer=match ty["@type"].as_str().unwrap_or(""){"chatTypeSupergroup"=>tg.call(json!({"@type":"getSupergroup","supergroup_id":ty["supergroup_id"]})).ok(),"chatTypePrivate"=>tg.call(json!({"@type":"getUser","user_id":ty["user_id"]})).ok(),_=>None};
+                    if let Some(peer) = peer {
+                        if let Some(username) = peer["usernames"]["active_usernames"][0].as_str() {
+                            p.url = format!("https://t.me/{username}");
                         }
                     }
                 }
-                Ok(())
-            })();
-            let _ = tx.send(Event::SyncDone(result));
+            }
+            let result = discovery::index(
+                p,
+                &epoch,
+                generation,
+                |v| tg.call(v),
+                |p| {
+                    let _ = tx.send(Event::Playlist(generation, p));
+                },
+            );
+            let _ = tx.send(Event::Indexed(generation, result));
         });
     }
     fn play(&mut self, t: Track) {
@@ -623,7 +565,11 @@ impl App {
                     let chat = v["chat_id"].as_i64().unwrap_or(0);
                     let id = v["message_id"].as_i64().unwrap_or(0);
                     let m = json!({"id":id,"content":v["new_content"]});
-                    if let Some(p) = self.state.playlists.iter_mut().find(|p| p.id == chat) {
+                    if let Some(p) = self.state.playlists.iter_mut().find(|p| {
+                        p.id == chat
+                            && ((p.done.iter().any(|d| *d) || p.cursors.iter().any(|c| *c != 0))
+                                || self.opened_chat == Some(chat))
+                    }) {
                         let pinned = p
                             .tracks
                             .iter()
@@ -639,37 +585,17 @@ impl App {
                 }
                 "updateNewMessage" => {
                     let m = &v["message"];
-                    if let Some(t) = model::track(m["chat_id"].as_i64().unwrap_or(0), m) {
-                        if !self.state.playlists.iter().any(|p| p.id == t.chat) {
-                            self.state.playlists.push(Playlist {
-                                id: t.chat,
-                                title: format!("Chat {}", t.chat),
-                                filters: self.state.filters,
-                                ..Default::default()
-                            });
-                            if let Some(tg) = self.tg.clone() {
-                                let tx = self.tx.clone();
-                                let id = t.chat;
-                                std::thread::spawn(move || {
-                                    if let Ok(v) = tg.call(json!({"@type":"getChat","chat_id":id}))
-                                    {
-                                        let _ = tx.send(Event::Rename(
-                                            id,
-                                            v["title"].as_str().unwrap_or("").into(),
-                                        ));
-                                    }
-                                });
-                            }
-                        }
-                        let mut pin = false;
-                        if let Some(p) = self.state.playlists.iter_mut().find(|p| p.id == t.chat) {
+                    let chat = m["chat_id"].as_i64().unwrap_or(0);
+                    if let Some(t) = model::track(chat, m) {
+                        if let Some(p) = self.state.playlists.iter_mut().find(|p| {
+                            p.id == chat
+                                && ((p.done.iter().any(|d| *d)
+                                    || p.cursors.iter().any(|c| *c != 0))
+                                    || self.opened_chat == Some(chat))
+                        }) {
                             if !p.tracks.iter().any(|x| x.message == t.message) {
-                                p.tracks.insert(0, t.clone());
-                                pin = p.pinned && p.filters[t.kind];
+                                p.tracks.insert(0, t);
                             }
-                        }
-                        if pin {
-                            self.pin(t)
                         }
                     }
                 }
@@ -704,16 +630,7 @@ impl App {
                         }
                     }
                 }
-                Event::Rename(id, title) => {
-                    if let Some(p) = self.state.playlists.iter_mut().find(|p| p.id == id) {
-                        p.title = title;
-                    }
-                }
                 Event::Progress(s) => self.status = s,
-                Event::SyncDone(result) => {
-                    self.busy = false;
-                    self.status = result.err().unwrap_or_else(|| tr("Library is up to date"));
-                }
                 Event::AuthResult(token, result) => {
                     if token == self.auth_token {
                         self.auth_pending = false;
@@ -760,7 +677,36 @@ impl App {
                     self.status = tr("Saved for offline listening");
                     self.persist()
                 }
-                Event::Playlist(mut p) => {
+                Event::Indexed(g, result) => {
+                    if g == self.index_epoch.load(std::sync::atomic::Ordering::Relaxed) {
+                        self.indexing_chat = None;
+                        self.status = result.err().unwrap_or_else(|| tr("Music loaded"));
+                    }
+                }
+                Event::Catalog(result) => {
+                    self.busy = false;
+                    match result {
+                        Err(e) => self.status = e,
+                        Ok(chats) => {
+                            for p in chats {
+                                if let Some(old) =
+                                    self.state.playlists.iter_mut().find(|x| x.id == p.id)
+                                {
+                                    old.title = p.title;
+                                    old.image_file = p.image_file;
+                                } else {
+                                    self.state.playlists.push(p);
+                                }
+                            }
+                            self.status = tr("Open a chat to load its music");
+                            self.persist();
+                        }
+                    }
+                }
+                Event::Playlist(g, mut p) => {
+                    if g != self.index_epoch.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
                     if let Some(old) = self.state.playlists.iter_mut().find(|x| x.id == p.id) {
                         p.image_path = p.image_path.or(old.image_path.clone());
                         p.filters = old.filters;

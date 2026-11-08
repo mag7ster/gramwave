@@ -270,3 +270,27 @@ msgstr ""
 
 msgid "ONE-TIME SETUP"
 msgstr ""
+
+msgid "Loading chat list…"
+msgstr ""
+
+msgid "Open a chat to load its music"
+msgstr ""
+
+msgid "Music loaded"
+msgstr ""
+
+msgid "Find a chat"
+msgstr ""
+
+msgid "Choose a chat"
+msgstr ""
+
+msgid "Music loads only when you open a chat."
+msgstr ""
+
+msgid "Loading music from this chat…"
+msgstr ""
+
+msgid "Load more music"
+msgstr ""

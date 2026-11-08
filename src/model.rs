@@ -28,6 +28,14 @@ pub struct Playlist {
     pub cursors: [i64; 3],
     pub done: [bool; 3],
 }
+impl Playlist {
+    pub fn has_more(&self) -> bool {
+        self.filters
+            .iter()
+            .zip(self.done)
+            .any(|(enabled, done)| *enabled && !done)
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
