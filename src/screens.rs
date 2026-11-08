@@ -425,7 +425,7 @@ impl App {
                     }
                 }
                 if ui.button(tr("Refresh library")).clicked() {
-                    self.sync();
+                    self.open_chat(self.selected);
                     ui.close();
                 }
             });
@@ -493,8 +493,9 @@ impl App {
             }
         }
         let mut action = None;
-        let scroll =
-            egui::ScrollArea::vertical().show_rows(ui, 56., tracks.len(), |ui, range| {
+        let scroll = egui::ScrollArea::vertical()
+            .id_salt(("playlist-tracks", chat_id))
+            .show_rows(ui, 56., tracks.len(), |ui, range| {
                 for i in range {
                     let t = &tracks[i];
                     self.image_wanted.push(t.image_file);
@@ -524,6 +525,7 @@ impl App {
                         .corner_radius(6)
                         .inner_margin(6.)
                         .show(ui, |ui| {
+                            ui.set_min_height(44.);
                             ui.horizontal(|ui| {
                                 ui.add_sized(
                                     [24., 36.],
@@ -534,30 +536,7 @@ impl App {
                                     ),
                                 );
                                 art(ui, &t.title, t.image_path.as_deref(), 36.);
-                                let response = ui
-                                    .allocate_ui(
-                                        egui::vec2((ui.available_width() - 100.).max(150.), 40.),
-                                        |ui| {
-                                            ui.set_min_width(ui.available_width());
-                                            ui.vertical(|ui| {
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        egui::RichText::new(&t.title).color(
-                                                            if active {
-                                                                GREEN
-                                                            } else {
-                                                                egui::Color32::WHITE
-                                                            },
-                                                        ),
-                                                    )
-                                                    .truncate(),
-                                                );
-                                                ui.weak(&t.artist);
-                                            });
-                                        },
-                                    )
-                                    .response
-                                    .interact(egui::Sense::click());
+                                let response = track_labels(ui, &t.title, &t.artist, active);
                                 if response.double_clicked() {
                                     action = Some((0, i));
                                 }
@@ -586,7 +565,7 @@ impl App {
                 && scroll.state.offset.y + scroll.inner_rect.height()
                     >= scroll.content_size.y - 120.;
             if ui.button(tr("Load more music")).clicked() || at_bottom {
-                self.open_chat(self.selected);
+                self.load_chat(self.selected, false);
             }
         }
         if let Some((kind, i)) = action {
@@ -603,6 +582,29 @@ impl App {
         }
     }
 }
+fn track_labels(ui: &mut egui::Ui, title: &str, artist: &str, active: bool) -> egui::Response {
+    ui.allocate_ui(
+        egui::vec2((ui.available_width() - 100.).max(150.), 40.),
+        |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 4.;
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(title).color(if active {
+                        GREEN
+                    } else {
+                        ui.visuals().text_color()
+                    }))
+                    .truncate(),
+                );
+                ui.add(egui::Label::new(egui::RichText::new(artist).weak()).truncate());
+            });
+        },
+    )
+    .response
+    .interact(egui::Sense::click())
+}
+
 fn clock(seconds: f64) -> String {
     let n = seconds.max(0.) as u64;
     format!("{}:{:02}", n / 60, n % 60)
@@ -693,5 +695,32 @@ impl App {
                 self.state.queue.swap(i, i - 1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn long_metadata_fits_virtual_list_row_height() {
+        let ctx = egui::Context::default();
+        design::style(&ctx, false);
+        let long = "A very long title or artist name ".repeat(40);
+        let mut height = 0.;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.set_width(600.);
+            let row = egui::Frame::new().inner_margin(6.).show(ui, |ui| {
+                ui.set_min_height(44.);
+                ui.horizontal(|ui| {
+                    track_labels(ui, &long, &long, false);
+                });
+            });
+            height = row.response.rect.height();
+        });
+        output.textures_delta.clear();
+        assert!(
+            (height - 56.).abs() < 0.1,
+            "Rendered row {height} differs from virtual row height 56"
+        );
     }
 }

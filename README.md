@@ -55,12 +55,16 @@ cargo run -- --demo --preview-auth=error
 - Artwork loads for visible rows and supports JPEG, PNG and WebP. Failed downloads
   can retry, and placeholders remain visible while images load.
 - Startup loads chat names only, without searching message history or counting tracks.
-- Opening a chat loads one page per enabled audio type. Scroll to load more;
-  switching chats cancels further work for the previous one. No track totals are shown.
+- Opening a chat immediately shows saved tracks and refreshes that chat in the
+  background: new tracks are merged, changed metadata is updated, and indexed
+  messages are checked for removal. A failed check keeps the saved list intact.
+  Scroll to load older music; switching chats cancels the previous job. No track
+  totals are shown. TDLib cache eviction does not remove playlist entries.
 - Saved tracks retain message identities, not TDLib runtime file IDs. After a
   restart, file metadata is resolved only for visible tracks or a requested track,
   including offline downloads. This prevents audio and artwork IDs from being mixed.
 - Music, audio documents and voice messages have separate playlist filters.
+- Playback advances on mpv end-of-file events; manual stop does not advance it.
 - Double-click a track to play it. `+` adds it to the queue; `⤒` plays it next.
 - Queue order is independent of Telegram. Nothing edits source messages.
 - The download button saves a separate offline copy; saving a playlist also

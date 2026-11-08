@@ -23,6 +23,7 @@ enum Event {
     PlaybackReady(u64, Result<Track, String>),
     Artwork(i64, Result<String, String>),
     Playlist(u64, Playlist),
+    Refreshed(u64, discovery::Changes),
     Catalog(Result<Vec<Playlist>, String>),
     Indexed(u64, Result<(), String>),
     Error(String),
@@ -46,6 +47,7 @@ struct App {
     opened_chat: Option<i64>,
     indexing_chat: Option<i64>,
     index_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    source_changed: std::collections::HashSet<(i64, i64)>,
     chat_query: String,
     chat_search_active: bool,
     image_wanted: Vec<i64>,
@@ -91,7 +93,6 @@ struct App {
     last_link: String,
     shuffle: bool,
     repeat: bool,
-    started: bool,
 }
 fn root() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
@@ -171,6 +172,7 @@ impl App {
             opened_chat: None,
             indexing_chat: None,
             index_epoch: Default::default(),
+            source_changed: Default::default(),
             chat_query: String::new(),
             chat_search_active: false,
             image_wanted: Vec::new(),
@@ -247,7 +249,6 @@ impl App {
             last_link: String::new(),
             shuffle: false,
             repeat: false,
-            started: false,
         }
     }
     fn persist(&self) {
@@ -355,17 +356,28 @@ impl App {
         });
     }
     fn open_chat(&mut self, index: usize) {
+        self.load_chat(index, true);
+    }
+    fn load_chat(&mut self, index: usize, refresh: bool) {
         self.selected = index;
         let Some(mut p) = self.state.playlists.get(index).cloned() else {
             return;
         };
+        if self.opened_chat != Some(p.id) {
+            self.search.clear();
+        }
+        if refresh {
+            p.recover_empty_index();
+            self.state.playlists[index] = p.clone();
+        }
         self.opened_chat = Some(p.id);
         let generation = self
             .index_epoch
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         self.indexing_chat = None;
-        if self.demo || !p.has_more() {
+        self.source_changed.clear();
+        if self.demo || (!refresh && !p.has_more()) {
             return;
         }
         let Some(tg) = self.tg.clone() else { return };
@@ -384,15 +396,37 @@ impl App {
                     }
                 }
             }
-            let result = discovery::index(
-                p,
-                &epoch,
-                generation,
-                |v| tg.call(v),
-                |p| {
-                    let _ = tx.send(Event::Playlist(generation, p));
-                },
-            );
+            let result = if refresh {
+                if !p.url.is_empty() {
+                    let _ = tx.send(Event::Refreshed(
+                        generation,
+                        discovery::Changes {
+                            chat: p.id,
+                            url: Some(p.url.clone()),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                discovery::refresh(
+                    p,
+                    &epoch,
+                    generation,
+                    |v| tg.call(v),
+                    |changes| {
+                        let _ = tx.send(Event::Refreshed(generation, changes));
+                    },
+                )
+            } else {
+                discovery::index(
+                    p,
+                    &epoch,
+                    generation,
+                    |v| tg.call(v),
+                    |p| {
+                        let _ = tx.send(Event::Playlist(generation, p));
+                    },
+                )
+            };
             let _ = tx.send(Event::Indexed(generation, result));
         });
     }
@@ -447,7 +481,6 @@ impl App {
             self.current = Some(t);
             self.status.clear();
             self.paused = false;
-            self.started = false;
             if let (Some(tg), Some(next)) = (&self.tg, self.state.queue.first()) {
                 if next.file > 0 {
                     tg.request(json!({"@type":"downloadFile","file_id":next.file,"priority":1,"offset":0,"limit":1048576,"synchronous":false}));
@@ -689,6 +722,7 @@ impl App {
                 "updateMessageContent" => {
                     let chat = v["chat_id"].as_i64().unwrap_or(0);
                     let id = v["message_id"].as_i64().unwrap_or(0);
+                    self.source_changed.insert((chat, id));
                     let m = json!({"id":id,"content":v["new_content"]});
                     if let Some(p) = self.state.playlists.iter_mut().find(|p| {
                         p.id == chat
@@ -712,6 +746,7 @@ impl App {
                     let m = &v["message"];
                     let chat = m["chat_id"].as_i64().unwrap_or(0);
                     if let Some(t) = model::track(chat, m) {
+                        self.source_changed.insert((chat, t.message));
                         if let Some(p) = self.state.playlists.iter_mut().find(|p| {
                             p.id == chat
                                 && ((p.done.iter().any(|d| *d)
@@ -725,18 +760,18 @@ impl App {
                     }
                 }
                 "updateDeleteMessages" => {
-                    if let Some(p) = self
-                        .state
-                        .playlists
-                        .iter_mut()
-                        .find(|p| Some(p.id) == v["chat_id"].as_i64())
-                    {
-                        p.tracks.retain(|t| {
-                            !v["message_ids"]
-                                .as_array()
-                                .is_some_and(|a| a.contains(&json!(t.message)))
-                        });
+                    if v["from_cache"] != true {
+                        let chat = v["chat_id"].as_i64().unwrap_or(0);
+                        for id in v["message_ids"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_i64)
+                        {
+                            self.source_changed.insert((chat, id));
+                        }
                     }
+                    self.state.apply_message_deletions(&v);
                 }
                 _ => {}
             }
@@ -860,44 +895,47 @@ impl App {
                         }
                     }
                 }
-                Event::Playlist(g, mut p) => {
+                Event::Refreshed(g, changes) => {
                     if g != self.index_epoch.load(std::sync::atomic::Ordering::Relaxed) {
                         continue;
                     }
-                    if let Some(old) = self.state.playlists.iter_mut().find(|x| x.id == p.id) {
-                        if p.image_file == 0 {
-                            p.image_file = old.image_file;
-                        }
-                        if p.image_file == old.image_file {
-                            p.image_path = p.image_path.or(old.image_path.clone());
-                        }
-                        p.filters = old.filters;
-                        p.pinned = old.pinned;
-                        for t in &mut p.tracks {
-                            if let Some(previous) =
-                                old.tracks.iter().find(|x| x.message == t.message)
-                            {
-                                if t.file == 0 {
-                                    t.file = previous.file;
-                                    t.cached = previous.cached.clone();
-                                    t.image_file = previous.image_file;
-                                }
-                                if t.image_file == previous.image_file {
-                                    t.image_path =
-                                        t.image_path.clone().or(previous.image_path.clone());
-                                }
-                            }
-                            t.pinned = old
-                                .tracks
-                                .iter()
-                                .find(|x| x.message == t.message)
-                                .and_then(|x| x.pinned.clone())
-                        }
-                        *old = p
-                    } else {
-                        self.state.playlists.push(p)
+                    let protected = self
+                        .source_changed
+                        .iter()
+                        .filter(|(chat, _)| *chat == changes.chat)
+                        .map(|(_, id)| *id)
+                        .collect();
+                    if let Some(p) = self
+                        .state
+                        .playlists
+                        .iter_mut()
+                        .find(|p| p.id == changes.chat)
+                    {
+                        changes.apply(p, &protected);
+                        self.persist();
                     }
-                    self.persist()
+                }
+                Event::Playlist(g, p) => {
+                    if g != self.index_epoch.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
+                    let protected = self
+                        .source_changed
+                        .iter()
+                        .filter(|(chat, _)| *chat == p.id)
+                        .map(|(_, id)| *id)
+                        .collect();
+                    if let Some(old) = self.state.playlists.iter_mut().find(|x| x.id == p.id) {
+                        old.merge_tracks(p.tracks, &protected);
+                        old.cursors = p.cursors;
+                        old.done = p.done;
+                        if !p.url.is_empty() {
+                            old.url = p.url;
+                        }
+                    } else {
+                        self.state.playlists.push(p);
+                    }
+                    self.persist();
                 }
             }
         }

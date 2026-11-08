@@ -149,9 +149,6 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
-        if let Some(p) = &self.player {
-            p.drain();
-        }
         self.frames += 1;
         if std::env::args().any(|a| a == "--smoke-test") {
             if self.preview_started.elapsed() > Duration::from_secs(2) && !self.preview_captured {
@@ -294,21 +291,21 @@ impl App {
         });
 
         ctx.request_repaint_after(Duration::from_millis(200));
-        let eof = self.player.as_ref().is_some_and(|p| p.flag("eof-reached"));
-        if !eof
-            && self
-                .player
-                .as_ref()
-                .is_some_and(|p| p.number("duration") > 0.)
-        {
-            self.started = true;
-        }
-        if eof && self.started && !self.paused {
-            self.started = false;
-            if self.repeat || !self.state.queue.is_empty() {
-                self.next();
-            } else {
-                self.current = None;
+        let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
+        for event in events {
+            match event {
+                audio::PlaybackEvent::Finished if self.current.is_some() => {
+                    if self.repeat || !self.state.queue.is_empty() {
+                        self.next();
+                    } else {
+                        self.current = None;
+                    }
+                }
+                audio::PlaybackEvent::Failed(error) => {
+                    self.status = format!("{}: {error}", tr("Unable to play track"));
+                    self.paused = true;
+                }
+                _ => {}
             }
         }
     }

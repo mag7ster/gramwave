@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Track {
     pub chat: i64,
@@ -35,6 +35,38 @@ pub struct Playlist {
     pub done: [bool; 3],
 }
 impl Playlist {
+    pub fn merge_tracks(&mut self, tracks: Vec<Track>, protected: &std::collections::HashSet<i64>) {
+        for mut t in tracks {
+            if protected.contains(&t.message) {
+                continue;
+            }
+            if let Some(old) = self.tracks.iter_mut().find(|old| old.message == t.message) {
+                t.pinned = old.pinned.clone();
+                if t.file == 0 {
+                    t.file = old.file;
+                    t.cached = old.cached.clone();
+                    t.image_file = old.image_file;
+                }
+                if t.image_file == old.image_file {
+                    t.image_path = t.image_path.or(old.image_path.clone());
+                }
+                if *old != t {
+                    *old = t;
+                }
+            } else {
+                self.tracks.push(t);
+            }
+        }
+        self.tracks.sort_by_key(|t| std::cmp::Reverse(t.message));
+    }
+    pub fn recover_empty_index(&mut self) {
+        // Older versions could drop cached message metadata while keeping the
+        // pagination cursors. Start over only when opening that empty library.
+        if self.tracks.is_empty() && self.cursors.iter().any(|c| *c != 0) {
+            self.cursors = [0; 3];
+            self.done = [false; 3];
+        }
+    }
     pub fn has_more(&self) -> bool {
         self.filters
             .iter()
@@ -70,6 +102,24 @@ impl Default for State {
     }
 }
 impl State {
+    pub fn apply_message_deletions(&mut self, update: &serde_json::Value) {
+        // TDLib also sends updateDeleteMessages when evicting its own cache.
+        // The source messages still exist and our playlist metadata stays valid.
+        if update["from_cache"] == true {
+            return;
+        }
+        if let Some(p) = self
+            .playlists
+            .iter_mut()
+            .find(|p| Some(p.id) == update["chat_id"].as_i64())
+        {
+            p.tracks.retain(|t| {
+                !update["message_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.contains(&serde_json::json!(t.message)))
+            });
+        }
+    }
     pub fn sidebar_chats(&self, searching: bool, query: &str) -> Vec<usize> {
         if searching {
             let query = query.trim().to_lowercase();
@@ -166,6 +216,54 @@ pub fn default_filters() -> [bool; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cache_eviction_keeps_second_pinned_playlist() {
+        let playlist = |id| Playlist {
+            id,
+            tracks: vec![Track {
+                chat: id,
+                message: 10,
+                ..Default::default()
+            }],
+            filters: default_filters(),
+            cursors: [10, 0, 0],
+            done: [true; 3],
+            ..Default::default()
+        };
+        let mut state = State {
+            playlists: vec![playlist(1), playlist(2)],
+            chat_pins: vec![1, 2],
+            ..Default::default()
+        };
+        state.apply_message_deletions(&serde_json::json!({
+            "@type":"updateDeleteMessages", "chat_id":2, "message_ids":[10],
+            "is_permanent":false, "from_cache":true
+        }));
+        assert_eq!(state.playlists[1].tracks.len(), 1);
+        assert_eq!(state.playlists[1].cursors, [10, 0, 0]);
+        assert_eq!(state.sidebar_chats(false, ""), vec![0, 1]);
+        // Actual source deletion affects only the corresponding chat, even
+        // when both playlists contain the same message ID.
+        state.apply_message_deletions(&serde_json::json!({
+            "@type":"updateDeleteMessages", "chat_id":2, "message_ids":[10],
+            "is_permanent":true, "from_cache":false
+        }));
+        assert!(state.playlists[1].tracks.is_empty());
+        assert_eq!(state.playlists[0].tracks.len(), 1);
+    }
+
+    #[test]
+    fn opening_nonempty_index_preserves_pagination() {
+        let mut p = Playlist {
+            tracks: vec![Track::default()],
+            cursors: [10, 20, 0],
+            done: [true, true, false],
+            ..Default::default()
+        };
+        p.recover_empty_index();
+        assert_eq!(p.cursors, [10, 20, 0]);
+        assert_eq!(p.done, [true, true, false]);
+    }
     #[test]
     fn document_filter() {
         assert!(audio_document("Song.FLAC", "application/octet-stream"));

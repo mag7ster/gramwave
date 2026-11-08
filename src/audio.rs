@@ -2,7 +2,7 @@ use crate::telegram::Telegram;
 use libloading::Library;
 use serde_json::json;
 use std::{
-    ffi::{c_char, c_void, CString},
+    ffi::{c_char, c_void, CStr, CString},
     io::{Read, Seek, Write},
     net::{TcpListener, TcpStream},
     sync::{
@@ -12,16 +12,39 @@ use std::{
     time::Duration,
 };
 type Command = unsafe extern "C" fn(*mut c_void, u64, *const *const c_char) -> i32;
+#[repr(C)]
+struct MpvEvent {
+    id: i32,
+    error: i32,
+    userdata: u64,
+    data: *mut c_void,
+}
+// The ABI-stable prefix of mpv_event_end_file.
+#[repr(C)]
+struct MpvEndFile {
+    reason: i32,
+    error: i32,
+}
+#[derive(Debug, PartialEq)]
+pub enum PlaybackEvent {
+    Finished,
+    Stopped,
+    Failed(String),
+}
 pub struct Player {
     _lib: Library,
     handle: *mut c_void,
     command: Command,
     destroy: unsafe extern "C" fn(*mut c_void),
-    wait: unsafe extern "C" fn(*mut c_void, f64) -> *const i32,
+    wait: unsafe extern "C" fn(*mut c_void, f64) -> *const MpvEvent,
+    error_string: unsafe extern "C" fn(i32) -> *const c_char,
     get: unsafe extern "C" fn(*mut c_void, *const c_char, i32, *mut c_void) -> i32,
 }
 impl Player {
     pub fn new() -> Result<Self, String> {
+        Self::with_audio_output(None)
+    }
+    fn with_audio_output(output: Option<&str>) -> Result<Self, String> {
         unsafe {
             let lib = Library::new("libmpv.so.2").map_err(|e| e.to_string())?;
             let create: unsafe extern "C" fn() -> *mut c_void =
@@ -46,6 +69,13 @@ impl Player {
                     CString::new(v).unwrap().as_ptr(),
                 );
             }
+            if let Some(output) = output {
+                set(
+                    handle,
+                    c"ao".as_ptr(),
+                    CString::new(output).unwrap().as_ptr(),
+                );
+            }
             if init(handle) < 0 {
                 return Err("mpv_initialize failed".into());
             }
@@ -53,6 +83,7 @@ impl Player {
                 handle,
                 command: *lib.get(b"mpv_command_async\0").unwrap(),
                 wait: *lib.get(b"mpv_wait_event\0").unwrap(),
+                error_string: *lib.get(b"mpv_error_string\0").unwrap(),
                 destroy: *lib.get(b"mpv_terminate_destroy\0").unwrap(),
                 get: *lib.get(b"mpv_get_property\0").unwrap(),
                 _lib: lib,
@@ -60,6 +91,11 @@ impl Player {
         }
     }
     pub fn cmd(&self, args: &[&str]) {
+        // Completed events for the previous file cannot advance a newly chosen
+        // track. Manual replacement generates END_FILE with reason STOP.
+        if args.first() == Some(&"loadfile") {
+            let _ = self.drain();
+        }
         let strings: Vec<_> = args.iter().filter_map(|s| CString::new(*s).ok()).collect();
         let mut ptrs: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
         ptrs.push(std::ptr::null());
@@ -67,13 +103,33 @@ impl Player {
             (self.command)(self.handle, 0, ptrs.as_ptr());
         }
     }
-    pub fn drain(&self) {
+    pub fn drain(&self) -> Vec<PlaybackEvent> {
+        let mut events = Vec::new();
         for _ in 0..64 {
             let event = unsafe { (self.wait)(self.handle, 0.) };
-            if event.is_null() || unsafe { *event } == 0 {
+            if event.is_null() || unsafe { (*event).id } == 0 {
                 break;
             }
+            let event = unsafe { &*event };
+            // MPV_EVENT_END_FILE = 7; EOF = 0, STOP = 2, ERROR = 4.
+            if event.id == 7 && !event.data.is_null() {
+                let end = unsafe { &*event.data.cast::<MpvEndFile>() };
+                match end.reason {
+                    0 => events.push(PlaybackEvent::Finished),
+                    2 => events.push(PlaybackEvent::Stopped),
+                    4 => events.push(PlaybackEvent::Failed(self.error(end.error))),
+                    _ => {}
+                }
+            } else if event.id == 5 && event.error < 0 {
+                events.push(PlaybackEvent::Failed(self.error(event.error)));
+            }
         }
+        events
+    }
+    fn error(&self, code: i32) -> String {
+        unsafe { CStr::from_ptr((self.error_string)(code)) }
+            .to_string_lossy()
+            .into_owned()
     }
     pub fn number(&self, name: &str) -> f64 {
         let mut n = 0f64;
@@ -86,18 +142,6 @@ impl Player {
             );
         };
         n
-    }
-    pub fn flag(&self, name: &str) -> bool {
-        let mut n = 0i32;
-        unsafe {
-            (self.get)(
-                self.handle,
-                CString::new(name).unwrap().as_ptr(),
-                3,
-                &mut n as *mut _ as *mut c_void,
-            );
-        };
-        n != 0
     }
 }
 impl Drop for Player {
@@ -314,5 +358,86 @@ mod streaming_tests {
         assert!(response.starts_with("HTTP/1.1 404"));
         alive.store(false, Ordering::Relaxed);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+    #[test]
+    fn native_eof_advances_two_tracks_and_manual_stop_is_distinct() {
+        let player =
+            Player::with_audio_output(Some("null")).expect("libmpv with null audio output");
+        let path = std::env::temp_dir().join(format!("tg-player-eof-{}.wav", std::process::id()));
+        let samples = 800u32; // 0.1 second at 8 kHz, mono PCM16.
+        let mut wav = Vec::new();
+        wav.extend(b"RIFF");
+        wav.extend((36 + samples * 2).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(8000u32.to_le_bytes());
+        wav.extend(16000u32.to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend((samples * 2).to_le_bytes());
+        wav.resize(44 + samples as usize * 2, 0);
+        std::fs::write(&path, wav).unwrap();
+        let filename = path.to_str().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut completed = 0;
+        player.cmd(&["loadfile", filename, "replace"]);
+        while completed < 2 && std::time::Instant::now() < deadline {
+            for event in player.drain() {
+                match event {
+                    PlaybackEvent::Finished => {
+                        completed += 1;
+                        if completed == 1 {
+                            player.cmd(&["loadfile", filename, "replace"]);
+                        }
+                    }
+                    PlaybackEvent::Failed(e) => panic!("mpv: {e}"),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(completed, 2, "EOF was lost after mpv returned to idle");
+        let mut long = std::fs::read(&path).unwrap();
+        let bytes = 8000u32 * 4 * 2;
+        long[4..8].copy_from_slice(&(36 + bytes).to_le_bytes());
+        long[40..44].copy_from_slice(&bytes.to_le_bytes());
+        long.resize(44 + bytes as usize, 0);
+        std::fs::write(&path, long).unwrap();
+        player.cmd(&["loadfile", filename, "replace"]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while player.number("duration") < 2. && std::time::Instant::now() < deadline {
+            for event in player.drain() {
+                assert!(!matches!(
+                    event,
+                    PlaybackEvent::Finished | PlaybackEvent::Failed(_)
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(player.number("duration") > 2.);
+        player.cmd(&["stop"]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut stopped = false;
+        while !stopped && std::time::Instant::now() < deadline {
+            for event in player.drain() {
+                assert_ne!(
+                    event,
+                    PlaybackEvent::Finished,
+                    "Manual stop must not advance the queue"
+                );
+                stopped |= event == PlaybackEvent::Stopped;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(stopped);
+        std::fs::remove_file(path).unwrap();
     }
 }
