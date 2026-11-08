@@ -1,0 +1,248 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "API ID"
+msgstr ""
+
+msgid "API hash"
+msgstr ""
+
+msgid "Add to queue"
+msgstr ""
+
+msgid "Apply defaults to all playlists"
+msgstr ""
+
+msgid "Artist"
+msgstr ""
+
+msgid "Audio files"
+msgstr ""
+
+msgid "Automatic cache: 2 GiB. Offline copies are kept separately."
+msgstr ""
+
+msgid "Cancel offline downloads"
+msgstr ""
+
+msgid "Chats without matching audio are hidden automatically."
+msgstr ""
+
+msgid "Choose a track"
+msgstr ""
+
+msgid "Clear automatic cache"
+msgstr ""
+
+msgid "Connect"
+msgstr ""
+
+msgid "Connect Telegram"
+msgstr ""
+
+msgid "Connect Telegram to discover your music"
+msgstr ""
+
+msgid "Connecting to Telegram…"
+msgstr ""
+
+msgid "Connecting…"
+msgstr ""
+
+msgid "Copy chat link"
+msgstr ""
+
+msgid "Copy message link"
+msgstr ""
+
+msgid "Default audio filters"
+msgstr ""
+
+msgid "Demo mode · not connected to Telegram"
+msgstr ""
+
+msgid "Demo tracks are fictional"
+msgstr ""
+
+msgid "Discovering music in your chats…"
+msgstr ""
+
+msgid "Download cancelled"
+msgstr ""
+
+msgid "Download timed out. Try saving again."
+msgstr ""
+
+msgid "Enter the verification code sent by Telegram."
+msgstr ""
+
+msgid "Get an API ID and API hash"
+msgstr ""
+
+msgid "Library"
+msgstr ""
+
+msgid "Library is up to date"
+msgstr ""
+
+msgid "Link copied"
+msgstr ""
+
+msgid "Music"
+msgstr ""
+
+msgid "Newest first"
+msgstr ""
+
+msgid "Next"
+msgstr ""
+
+msgid "Next ⏭"
+msgstr ""
+
+msgid "Offline library"
+msgstr ""
+
+msgid "Online presence is always disabled by this player."
+msgstr ""
+
+msgid "Open in Telegram"
+msgstr ""
+
+msgid "Open source chat"
+msgstr ""
+
+msgid "PLAYLISTS FROM TELEGRAM"
+msgstr ""
+
+msgid "Phone number with country code"
+msgstr ""
+
+msgid "Play / pause"
+msgstr ""
+
+msgid "Play next"
+msgstr ""
+
+msgid "Playback requires libmpv.so.2"
+msgstr ""
+
+msgid "Previous track"
+msgstr ""
+
+msgid "Queue"
+msgstr ""
+
+msgid "Quit"
+msgstr ""
+
+msgid "Read only · no online presence"
+msgstr ""
+
+msgid "Ready to play"
+msgstr ""
+
+msgid "Refresh"
+msgstr ""
+
+msgid "Remove offline copy"
+msgstr ""
+
+msgid "Repeat"
+msgstr ""
+
+msgid "Resend code"
+msgstr ""
+
+msgid "Save for offline listening"
+msgstr ""
+
+msgid "Saved for offline listening"
+msgstr ""
+
+msgid "Search titles, artists and filenames…"
+msgstr ""
+
+msgid "Session closed. Restart to connect again."
+msgstr ""
+
+msgid "Settings"
+msgstr ""
+
+msgid "Show QR code"
+msgstr ""
+
+msgid "Show player"
+msgstr ""
+
+msgid "Shuffle"
+msgstr ""
+
+msgid "Sign in"
+msgstr ""
+
+msgid "Sign in with phone"
+msgstr ""
+
+msgid "Submit code"
+msgstr ""
+
+msgid "Submit email address"
+msgstr ""
+
+msgid "Submit password"
+msgstr ""
+
+msgid "TELEGRAM PLAYLIST"
+msgstr ""
+
+msgid "Telegram does not provide a link for this message"
+msgstr ""
+
+msgid "Telegram requires an email address to continue."
+msgstr ""
+
+msgid "Title"
+msgstr ""
+
+msgid "Two-step verification password"
+msgstr ""
+
+msgid "Up next"
+msgstr ""
+
+msgid "Voice message"
+msgstr ""
+
+msgid "Voice messages"
+msgstr ""
+
+msgid "Volume"
+msgstr ""
+
+msgid "Your music will appear here"
+msgstr ""
+
+msgid "Your music. Your chats."
+msgstr ""
+
+msgid "Your saved library remains available offline."
+msgstr ""
+
+msgid "seconds"
+msgstr ""
+
+msgid "{tracks} · read only"
+msgstr ""
+
+msgid "↓ Save playlist"
+msgstr ""
+
+msgid "▶ Play all"
+msgstr ""
+
+msgid "{count} track"
+msgid_plural "{count} tracks"
+msgstr[0] ""
+msgstr[1] ""

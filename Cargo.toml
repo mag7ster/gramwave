@@ -1,0 +1,29 @@
+[package]
+name = "tg-player"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A read-only Telegram music player"
+
+[features]
+default = ["telegram"]
+telegram = ["dep:tdlib-rs"]
+
+[dependencies]
+tdlib-rs = { version = "=1.4.0", optional = true, features = ["download-tdlib"] }
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.28", features = ["bundled"] }
+libloading = "0.8"
+qrcode = { version = "0.14", default-features = false }
+fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+
+image = { version = "0.25", default-features = false, features = ["png"] }
+fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+
+[build-dependencies]
+tdlib-rs = { version = "=1.4.0", optional = true, features = ["download-tdlib"] }
+fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4", features = ["build"] }

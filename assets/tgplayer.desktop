@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TG Player
+Comment=Listen to music from your Telegram chats
+Exec=tg-player
+Icon=tgplayer
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=tg-player

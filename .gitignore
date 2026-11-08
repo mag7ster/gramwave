@@ -1,0 +1,7 @@
+/target/
+.env
+*.session*
+/tdata/
+*.sqlite*
+*.log
+/dist/
