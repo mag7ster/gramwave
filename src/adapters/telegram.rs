@@ -640,7 +640,7 @@ impl TelegramGateway for Telegram {
                 AuthRequest::Resend => json!({"@type":"resendAuthenticationCode","reason":null}),
                 AuthRequest::Close => json!({"@type":"close"}),
                 AuthRequest::Parameters(p) => {
-                    json!({"@type":"setTdlibParameters","database_directory":p.database,"files_directory":p.files,"use_message_database":true,"use_file_database":true,"use_chat_info_database":true,"use_secret_chats":false,"api_id":p.api_id,"api_hash":p.api_hash,"system_language_code":"en","device_model":"TG Player","system_version":"Linux","application_version":"0.1.0"})
+                    json!({"@type":"setTdlibParameters","database_directory":p.database,"files_directory":p.files,"use_message_database":true,"use_file_database":true,"use_chat_info_database":true,"use_secret_chats":false,"api_id":p.api_id,"api_hash":p.api_hash,"system_language_code":"en","device_model":"Gramwave","system_version":"Linux","application_version":"0.1.0"})
                 }
             };
             self.call_async(value, cancel).await.map(|_| ())

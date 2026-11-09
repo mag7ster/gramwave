@@ -109,11 +109,11 @@ pub(crate) fn bridge(
                 deadline: Instant::now() + TIMEOUT,
                 reply,
             })
-            .map_err(|_| "TG Player control is busy or unavailable".to_owned())?;
+            .map_err(|_| "Gramwave control is busy or unavailable".to_owned())?;
         wake();
         receiver
             .recv_timeout(TIMEOUT)
-            .map_err(|_| "TG Player did not process the command within 3 seconds".to_owned())
+            .map_err(|_| "Gramwave did not process the command within 3 seconds".to_owned())
     })();
     let reply = result.unwrap_or_else(Reply::failure);
     let encoded = serde_json::to_string(&reply).expect("serializable control reply");
@@ -132,11 +132,14 @@ fn send(slot: &Slot, args: &[String]) -> Reply {
             serde_json::to_string(&request).map_err(|e| e.to_string())?
         );
         let response = slot.send(&request).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => "TG Player is not running; start the app first".to_owned(),
-            std::io::ErrorKind::PermissionDenied => "Control unavailable: check socket permissions and restart TG Player with the updated binary".to_owned(),
-            _ => format!("Cannot contact TG Player: {e}"),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => "Gramwave is not running; start the app first".to_owned(),
+            std::io::ErrorKind::PermissionDenied => "Control unavailable: check socket permissions and restart Gramwave with the updated binary".to_owned(),
+            _ => format!("Cannot contact Gramwave: {e}"),
         })?;
-        serde_json::from_str(&response).map_err(|_| "The running TG Player does not support this CLI; restart it with the updated binary".to_owned())
+        serde_json::from_str(&response).map_err(|_| {
+            "The running Gramwave does not support this CLI; restart it with the updated binary"
+                .to_owned()
+        })
     })();
     result.unwrap_or_else(Reply::failure)
 }

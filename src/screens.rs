@@ -30,7 +30,7 @@ impl App {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(50.);
                     ui.vertical_centered(|ui| {
-                        ui.heading(egui::RichText::new("TG Player").size(32.));
+                        ui.heading(egui::RichText::new("Gramwave").size(32.));
                         ui.weak(tr("Your Telegram. Your soundtrack."));
                     });
                     ui.add_space(28.);
@@ -83,7 +83,7 @@ impl App {
                         self.settings_open = true;
                     }
                     ui.menu_button("…", |ui| {
-                        if ui.button(tr("Quit TG Player")).clicked() {
+                        if ui.button(tr("Quit Gramwave")).clicked() {
                             self.quitting = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
@@ -104,7 +104,7 @@ impl App {
                 )
                 .show(root, |ui| {
                     ui.add_space(8.);
-                    ui.heading(egui::RichText::new("TG Player").size(23.).strong());
+                    ui.heading(egui::RichText::new("Gramwave").size(23.).strong());
                     ui.add_space(16.);
                     ui.horizontal(|ui| {
                         ui.strong(tr("Your library"));
@@ -113,7 +113,7 @@ impl App {
                                 self.settings_open = true;
                                 ui.close();
                             }
-                            if ui.button(tr("Quit TG Player")).clicked() {
+                            if ui.button(tr("Quit Gramwave")).clicked() {
                                 self.quitting = true;
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }

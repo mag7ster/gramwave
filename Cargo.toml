@@ -3,7 +3,7 @@ name = "tg-player"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "A read-only Telegram music player"
+description = "Gramwave, a read-only Telegram music player for Linux"
 
 [workspace]
 members = ["crates/domain", "crates/application"]

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-TG Player is a read-only Telegram music player for Linux, built with Rust 2021 and egui. `src/main.rs` launches `src/lib.rs`; `src/bootstrap.rs` assembles the desktop lifecycle.
+Gramwave is a read-only Telegram music player for Linux, built with Rust 2021 and egui. `src/main.rs` launches `src/lib.rs`; `src/bootstrap.rs` assembles the desktop lifecycle.
 
 - `crates/domain/`: models and queue rules; keep free of GUI, database, filesystem, and network dependencies.
 - `crates/application/`: commands, ports, reducers, persistence contracts, and task scheduler.
@@ -36,7 +36,7 @@ Run native checks with `cargo test --workspace --locked --features native-tests 
 
 ## Commit & Pull Request Guidelines
 
-History uses imperative, capitalized subjects such as “Fix…” or “Add…”, without mandatory prefixes. Keep commits focused. PRs should explain behavior, link relevant issues, report validation and manual-test gaps, and include screenshots for visual changes. Match CI checks for both default and disabled default features.
+History uses imperative, capitalized subjects such as “Fix…” or “Add…”, without mandatory prefixes. Keep commits focused. PRs should explain behavior, link relevant issues, report validation and manual-test gaps, and include screenshots for visual changes. Run checks for both default and disabled default features.
 
 ## Security & Configuration
 

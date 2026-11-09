@@ -81,7 +81,7 @@ pub fn run() -> eframe::Result {
         .idle(fastframe_tray::idle)
         .run(|lease| {
             eframe::run_native(
-                "TG Player",
+                "Gramwave",
                 eframe::NativeOptions {
                     viewport: egui::ViewportBuilder::default()
                         .with_inner_size(crate::launch::options().window_size())

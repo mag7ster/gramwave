@@ -1,4 +1,4 @@
-# TG Player architecture
+# Gramwave architecture
 
 The Cargo workspace has three packages. `tg-player-domain` depends only on serde
 and rand. `tg-player-application` depends on domain and supplies commands, ports,
@@ -149,7 +149,7 @@ cargo test --workspace --locked --features native-tests --lib -- --test-threads=
 
 Native checks require libmpv, TDLib and permission to bind loopback sockets.
 Desktop checks run scripts/check-control.py and scripts/check-mpris.py in a graphical
-D-Bus session. Demo screenshots in both themes are CI artifacts. Default demo
+D-Bus session. Capture demo screenshots in both light and dark themes. Default demo
 starts no SQLite, Telegram, mpv, tray or MPRIS services; desktop integrations require
 --desktop-integrations. Authenticated playback, audible output and tray/window
 restoration require manual verification before release.

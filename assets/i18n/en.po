@@ -391,7 +391,7 @@ msgid "Quit"
 msgstr ""
 
 #: src/screens.rs:80 src/screens.rs:110
-msgid "Quit TG Player"
+msgid "Quit Gramwave"
 msgstr ""
 
 #: src/screens.rs:639 src/screens.rs:731

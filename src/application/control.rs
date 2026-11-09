@@ -115,7 +115,7 @@ impl App {
     }
     fn apply_control(&mut self, request: Request) -> Result<Value, String> {
         if self.quitting {
-            return Err("TG Player is shutting down".into());
+            return Err("Gramwave is shutting down".into());
         }
         let command = match request {
             Request::Status => return Ok(self.control_status()),

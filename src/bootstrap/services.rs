@@ -60,7 +60,7 @@ impl Services {
         let desktop = !demo || desktop_integrations;
         let media = desktop.then(|| {
             fastframe_now_playing::NowPlaying::start(
-                fastframe_now_playing::App::new("tgplayer", "TG Player"),
+                fastframe_now_playing::App::new("tgplayer", "Gramwave"),
                 || {},
             )
         });
@@ -68,7 +68,7 @@ impl Services {
             fastframe_tray::Tray::spawn(
                 fastframe_tray::Config {
                     id: "tgplayer",
-                    title: "TG Player".into(),
+                    title: "Gramwave".into(),
                     icon: crate::application::controller::tray_icon,
                     template_icon: None,
                     themed_icon: false,
