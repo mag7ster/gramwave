@@ -10,7 +10,7 @@ Gramwave is a read-only Telegram music player for Linux, built with Rust 2021 an
 - `src/adapters/`: TDLib, SQLite, mpv, streaming, offline storage, and desktop integrations.
 - `src/screens.rs`, `src/ui.rs`, `src/design.rs`: interface and styling.
 - `tests/`: integration tests; unit tests usually live beside modules in `tests.rs`.
-- `assets/`: SVG icons, desktop entry, and gettext catalogs. `scripts/` contains packaging and smoke checks.
+- `assets/`: SVG icons, desktop entry, and gettext catalogs. `scripts/` contains translation updates and smoke checks.
 
 Read `ARCHITECTURE.md` before changing layer boundaries or persistence.
 
@@ -22,7 +22,6 @@ Read `ARCHITECTURE.md` before changing layer boundaries or persistence.
 - `cargo clippy --workspace --locked --all-targets -- -D warnings`: lint; repeat with `--no-default-features` before `--`.
 - `cargo test --workspace --locked`: run the default suite; repeat with `--no-default-features`.
 - `cargo build --workspace --locked --release`: build an optimized binary.
-- `scripts/package.sh`: create the local bundle in `dist/tg-player`.
 
 ## Coding Style & Naming Conventions
 

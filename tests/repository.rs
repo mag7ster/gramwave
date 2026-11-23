@@ -64,7 +64,16 @@ fn queue_jump_backwards_and_forwards_survive_sqlite_restart() {
     store.save(state).unwrap();
     store.flush().unwrap();
     store.shutdown().unwrap();
+    {
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute(
+            "UPDATE documents SET value=json_remove(value,'$.position_ms') WHERE key='session_v3'",
+            [],
+        )
+        .unwrap();
+    }
     let (mut store, mut state) = Store::open(&path).unwrap();
+    assert_eq!(state.session.position_ms(), 0);
     assert_eq!(state.session.current().as_ref().unwrap().message, 5);
     assert_eq!(state.session.previous().unwrap().message, 4);
     assert_eq!(state.session.previous().unwrap().message, 3);

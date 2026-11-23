@@ -5,6 +5,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 mod abi;
 use abi::{mpv_event as MpvEvent, mpv_event_end_file as MpvEndFile};
 type Command = unsafe extern "C" fn(*mut c_void, *const *const c_char) -> i32;
+type Wakeup = unsafe extern "C" fn(*mut c_void);
 pub use crate::application::ports::PlaybackEvent;
 struct NativePlayer {
     _lib: Library,
@@ -12,9 +13,11 @@ struct NativePlayer {
     command: Command,
     active_entry: std::cell::Cell<Option<i64>>,
     started_entry: std::cell::Cell<Option<i64>>,
+    ready_entry: std::cell::Cell<Option<i64>>,
     command_errors: std::cell::RefCell<Vec<String>>,
     destroy: unsafe extern "C" fn(*mut c_void),
     wait: unsafe extern "C" fn(*mut c_void, f64) -> *const MpvEvent,
+    set_wakeup: unsafe extern "C" fn(*mut c_void, Option<Wakeup>, *mut c_void),
     error_string: unsafe extern "C" fn(i32) -> *const c_char,
     get: unsafe extern "C" fn(*mut c_void, *const c_char, i32, *mut c_void) -> i32,
 }
@@ -33,9 +36,13 @@ impl NativePlayer {
                 handle: std::ptr::null_mut(),
                 active_entry: Default::default(),
                 started_entry: Default::default(),
+                ready_entry: Default::default(),
                 command_errors: Default::default(),
                 command: *lib.get(b"mpv_command\0").map_err(|e| e.to_string())?,
                 wait: *lib.get(b"mpv_wait_event\0").map_err(|e| e.to_string())?,
+                set_wakeup: *lib
+                    .get(b"mpv_set_wakeup_callback\0")
+                    .map_err(|e| e.to_string())?,
                 error_string: *lib.get(b"mpv_error_string\0").map_err(|e| e.to_string())?,
                 destroy: *lib
                     .get(b"mpv_terminate_destroy\0")
@@ -80,8 +87,16 @@ impl NativePlayer {
             Ok(player)
         }
     }
-    pub fn cmd(&self, args: &[&str]) {
-        if let Err(error) = self.try_cmd(args) {
+    fn cmd(&self, args: &[&str], start_ms: Option<u64>) {
+        let result = start_ms.map_or(Ok(()), |ms| {
+            let start = if ms == 0 {
+                "none".into()
+            } else {
+                (ms as f64 / 1000.).to_string()
+            };
+            self.try_cmd(&["set", "options/start", &start])
+        });
+        if let Err(error) = result.and_then(|()| self.try_cmd(args)) {
             self.command_errors.borrow_mut().push(error);
         }
     }
@@ -90,6 +105,7 @@ impl NativePlayer {
         // track. Manual replacement generates END_FILE with reason STOP.
         if args.first() == Some(&"loadfile") {
             let _ = self.drain();
+            self.ready_entry.set(None);
         }
         if args.first() == Some(&"stop") {
             self.active_entry.set(None);
@@ -126,7 +142,7 @@ impl NativePlayer {
             .drain(..)
             .map(|e| PlaybackEvent::Failed(tg_player_application::AppError::Player(e)))
             .collect();
-        for _ in 0..64 {
+        loop {
             let event = unsafe { (self.wait)(self.handle, 0.) };
             if event.is_null() || unsafe { (*event).event_id } == 0 {
                 break;
@@ -137,6 +153,9 @@ impl NativePlayer {
                 let end = unsafe { &*event.data.cast::<MpvEndFile>() };
                 if Some(end.playlist_entry_id) != self.active_entry.get() && end.reason != 2 {
                     continue;
+                }
+                if Some(end.playlist_entry_id) == self.active_entry.get() {
+                    self.active_entry.set(None);
                 }
                 match end.reason {
                     0 => events.push(PlaybackEvent::Finished),
@@ -152,6 +171,10 @@ impl NativePlayer {
                 }));
             } else if event.event_id == 8 && self.started_entry.get() == self.active_entry.get() {
                 events.push(PlaybackEvent::Loaded);
+            } else if event.event_id == abi::mpv_event_id_MPV_EVENT_PLAYBACK_RESTART
+                && self.started_entry.get() == self.active_entry.get()
+            {
+                self.ready_entry.set(self.active_entry.get());
             } else if event.event_id == 5 && event.error < 0 {
                 events.push(PlaybackEvent::Failed(
                     tg_player_application::AppError::Player(self.error(event.error)),
@@ -178,16 +201,19 @@ impl NativePlayer {
         value != 0
     }
     pub fn number(&self, name: &str) -> f64 {
+        self.number_if_available(name).unwrap_or_default()
+    }
+    fn number_if_available(&self, name: &str) -> Option<f64> {
         let mut n = 0f64;
-        unsafe {
+        let code = unsafe {
             (self.get)(
                 self.handle,
                 CString::new(name).unwrap().as_ptr(),
                 5,
                 &mut n as *mut _ as *mut c_void,
-            );
+            )
         };
-        n
+        (code >= 0 && n.is_finite()).then_some(n)
     }
 }
 impl Drop for NativePlayer {
@@ -203,68 +229,123 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     },
+    thread::{self, Thread},
     time::Duration,
 };
+unsafe extern "C" fn wake_owner(data: *mut c_void) {
+    // The owner retains the Thread through destruction of the mpv handle.
+    unsafe { &*data.cast::<Thread>() }.unpark();
+}
+
 fn publish_snapshot(
     shared: &Mutex<crate::application::ports::PlayerSnapshot>,
     read: impl FnOnce() -> crate::application::ports::PlayerSnapshot,
-) {
+) -> crate::application::ports::PlayerSnapshot {
     let snapshot = read();
     *shared.lock().unwrap() = snapshot;
+    snapshot
 }
+struct Request {
+    generation: u64,
+    args: Vec<String>,
+    start_ms: Option<u64>,
+}
+
 pub struct Player {
-    sender: Option<mpsc::Sender<(u64, Vec<String>)>>,
+    sender: Option<mpsc::Sender<Request>>,
     generation: AtomicU64,
     events: mpsc::Receiver<(u64, PlaybackEvent)>,
     snapshot: Arc<Mutex<crate::application::ports::PlayerSnapshot>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Player {
-    pub fn new() -> Result<Self, String> {
-        Self::with_audio_output(None)
+    pub fn new(wake: fastframe_shell::Waker) -> Result<Self, String> {
+        Self::with_audio_output(None, wake)
     }
-    fn with_audio_output(output: Option<&str>) -> Result<Self, String> {
+    fn with_audio_output(
+        output: Option<&str>,
+        wake: fastframe_shell::Waker,
+    ) -> Result<Self, String> {
         let output = output.map(str::to_owned);
-        let (sender, commands) = mpsc::channel::<(u64, Vec<String>)>();
+        let (sender, commands) = mpsc::channel::<Request>();
         let (tx, events) = mpsc::channel();
         let (ready, started) = mpsc::sync_channel(1);
         let snapshot = Arc::new(Mutex::new(Default::default()));
         let values = snapshot.clone();
-        let worker = std::thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("tg-mpv".into())
             .spawn(move || {
+                let mut owner = Box::new(thread::current());
                 let native = match NativePlayer::with_audio_output(output.as_deref()) {
-                    Ok(p) => {
-                        let _ = ready.send(Ok(()));
-                        p
-                    }
+                    Ok(p) => p,
                     Err(e) => {
                         let _ = ready.send(Err(e));
                         return;
                     }
                 };
+                unsafe {
+                    (native.set_wakeup)(
+                        native.handle,
+                        Some(wake_owner),
+                        (&mut *owner as *mut Thread).cast(),
+                    )
+                };
+                let _ = ready.send(Ok(()));
                 let mut generation = 0;
+                let mut snapshot = crate::application::ports::PlayerSnapshot::default();
                 loop {
-                    match commands.recv_timeout(Duration::from_millis(10)) {
-                        Ok((id, args)) => {
-                            generation = id;
-                            let strings: Vec<_> = args.iter().map(String::as_str).collect();
-                            native.cmd(&strings);
+                    let commanded = match commands.try_recv() {
+                        Ok(request) => {
+                            generation = request.generation;
+                            let strings: Vec<_> = request.args.iter().map(String::as_str).collect();
+                            native.cmd(&strings, request.start_ms);
+                            true
                         }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    }
-                    for event in native.drain() {
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                        Err(mpsc::TryRecvError::Empty) => false,
+                    };
+                    let events = native.drain();
+                    let previous = snapshot;
+                    snapshot = publish_snapshot(&values, || {
+                        let seeking = native.flag("seeking");
+                        let position = native.number_if_available("time-pos");
+                        let ready = native
+                            .active_entry
+                            .get()
+                            .is_some_and(|entry| native.ready_entry.get() == Some(entry));
+                        crate::application::ports::PlayerSnapshot {
+                            paused: native.flag("pause"),
+                            seeking,
+                            position: position.unwrap_or_default(),
+                            checkpoint_position: position.filter(|_| ready && !seeking),
+                            audio_position: native.number_if_available("audio-pts"),
+                            duration: native.number("duration"),
+                            volume: native.number("volume"),
+                        }
+                    });
+                    let notify = commanded
+                        || !events.is_empty()
+                        || previous.paused != snapshot.paused
+                        || previous.seeking != snapshot.seeking
+                        || previous.duration != snapshot.duration
+                        || (snapshot.paused && previous.position != snapshot.position);
+                    for event in events {
                         let _ = tx.send((generation, event));
                     }
-                    publish_snapshot(&values, || crate::application::ports::PlayerSnapshot {
-                        paused: native.flag("pause"),
-                        seeking: native.flag("seeking"),
-                        position: native.number("time-pos"),
-                        duration: native.number("duration"),
-                        volume: native.number("volume"),
-                    });
+                    if notify {
+                        wake.wake();
+                    }
+                    if !commanded {
+                        if snapshot.seeking
+                            || (native.active_entry.get().is_some() && !snapshot.paused)
+                        {
+                            thread::park_timeout(Duration::from_millis(10));
+                        } else {
+                            thread::park();
+                        }
+                    }
                 }
+                unsafe { (native.set_wakeup)(native.handle, None, std::ptr::null_mut()) };
             })
             .map_err(|e| e.to_string())?;
         started
@@ -279,6 +360,9 @@ impl Player {
         })
     }
     pub fn try_cmd(&self, args: &[&str]) -> Result<(), String> {
+        self.submit(args, None)
+    }
+    fn submit(&self, args: &[&str], start_ms: Option<u64>) -> Result<(), String> {
         if args.iter().any(|s| s.contains('\0')) {
             return Err("mpv command contains NUL".into());
         }
@@ -290,8 +374,16 @@ impl Player {
         self.sender
             .as_ref()
             .ok_or("mpv is closed")?
-            .send((generation, args.iter().map(|s| (*s).into()).collect()))
-            .map_err(|e| e.to_string())
+            .send(Request {
+                generation,
+                args: args.iter().map(|s| (*s).into()).collect(),
+                start_ms,
+            })
+            .map_err(|e| e.to_string())?;
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
+        Ok(())
     }
     pub fn drain(&self) -> Vec<PlaybackEvent> {
         let generation = self.generation.load(Ordering::Acquire);
@@ -317,6 +409,7 @@ impl Player {
         self.sender.take();
         let deadline = std::time::Instant::now() + timeout;
         if let Some(worker) = self.worker.as_ref() {
+            worker.thread().unpark();
             while !worker.is_finished() {
                 if std::time::Instant::now() >= deadline {
                     self.worker.take();
@@ -336,6 +429,9 @@ impl Player {
 impl Drop for Player {
     fn drop(&mut self) {
         self.sender.take();
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
     }
 }
 use crate::application::ports::PlayerBackend;
@@ -346,7 +442,9 @@ impl PlayerBackend for Player {
     ) -> Result<(), tg_player_application::AppError> {
         use crate::application::ports::PlayerCommand;
         match command {
-            PlayerCommand::Load(path) => self.try_cmd(&["loadfile", &path, "replace"]),
+            PlayerCommand::Load { path, start_ms } => {
+                self.submit(&["loadfile", &path, "replace"], Some(start_ms))
+            }
             PlayerCommand::Pause(paused) => {
                 self.try_cmd(&["set", "pause", if paused { "yes" } else { "no" }])
             }

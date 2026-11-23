@@ -91,11 +91,14 @@ fn page(items: impl ExactSizeIterator<Item = Value>, offset: usize) -> Result<Va
 
 impl App {
     fn control_status(&self) -> Value {
-        let position = self
+        let snapshot = self
             .player
             .as_ref()
-            .map(|p| p.snapshot().position)
-            .unwrap_or(0.);
+            .map(|p| p.snapshot())
+            .unwrap_or_default();
+        let position = self
+            .restored_position(snapshot)
+            .unwrap_or(snapshot.position);
         json!({
             "current": self.state.view().session.current().map(|t|track_view(&t.into())),
             "position": if position.is_finite() { position.max(0.) } else { 0. },

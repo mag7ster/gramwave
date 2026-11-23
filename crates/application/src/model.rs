@@ -93,6 +93,7 @@ impl Playlist {
 pub struct State {
     pub playlists: Vec<Playlist>,
     pub chat_pins: Vec<i64>,
+    pub last_opened_chat: Option<i64>,
     pub session: tg_player_domain::playback::Session,
     pub repeat: tg_player_domain::playback::RepeatMode,
     pub shuffle: bool,
@@ -109,6 +110,7 @@ impl Default for State {
         Self {
             playlists: Vec::new(),
             chat_pins: Vec::new(),
+            last_opened_chat: None,
             session: Default::default(),
             repeat: Default::default(),
             shuffle: false,

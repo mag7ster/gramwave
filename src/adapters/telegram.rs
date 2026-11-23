@@ -11,7 +11,7 @@ use tg_player_application::{
     telegram::{AuthRequest, GatewayFuture, MediaPage, TelegramGateway, TelegramUpdate},
     AppError,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 struct Pending {
@@ -44,13 +44,15 @@ pub struct Telegram {
     serial: Arc<AtomicU64>,
     stopping: Arc<AtomicBool>,
     worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    downloads: Arc<Mutex<HashMap<i64, DownloadEntry>>>,
+    downloads: Downloads,
     resolved: Resolutions,
     pub connection: u64,
 }
 impl Telegram {
     #[cfg(feature = "telegram")]
-    pub fn start() -> Result<(Self, mpsc::Receiver<TelegramUpdate>), String> {
+    pub fn start(
+        wake: fastframe_shell::Waker,
+    ) -> Result<(Self, mpsc::Receiver<TelegramUpdate>), String> {
         use std::ffi::{CStr, CString};
         unsafe extern "C" {
             fn td_send(client_id: i32, request: *const std::ffi::c_char);
@@ -65,6 +67,8 @@ impl Telegram {
         let registry = pending.clone();
         let resolved: Resolutions = Default::default();
         let resolved_updates = resolved.clone();
+        let downloads = Downloads::default();
+        let download_updates = downloads.clone();
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = stopping.clone();
         let worker = std::thread::spawn(move || {
@@ -115,6 +119,7 @@ impl Telegram {
                         {
                             continue;
                         }
+                        record_download_state(&download_updates, &v);
                         if let Some(key) = v["@extra"].as_u64() {
                             if let Some(pending) = registry.lock().unwrap().remove(&key) {
                                 let _ = pending.reply.send(v);
@@ -143,7 +148,9 @@ impl Telegram {
                                     }
                                     _ => {}
                                 }
-                                let _ = updates.send(update);
+                                if updates.send(update).is_ok() {
+                                    wake.wake();
+                                }
                             }
                             if closed {
                                 break;
@@ -167,7 +174,7 @@ impl Telegram {
                 serial: Arc::new(AtomicU64::new(1)),
                 stopping,
                 worker: Arc::new(Mutex::new(Some(worker))),
-                downloads: Default::default(),
+                downloads,
                 resolved,
                 connection,
             },
@@ -175,7 +182,9 @@ impl Telegram {
         ))
     }
     #[cfg(not(feature = "telegram"))]
-    pub fn start() -> Result<(Self, mpsc::Receiver<TelegramUpdate>), String> {
+    pub fn start(
+        _: fastframe_shell::Waker,
+    ) -> Result<(Self, mpsc::Receiver<TelegramUpdate>), String> {
         Err("Build with the default telegram feature to connect".into())
     }
     fn request(&self, v: Value) {
@@ -320,7 +329,7 @@ impl Telegram {
         full: bool,
         cancel: &CancellationToken,
     ) -> Result<DownloadLease, AppError> {
-        let gate = {
+        let (gate, state) = {
             let mut downloads = self.downloads.lock().unwrap();
             let entry = downloads.entry(file).or_default();
             entry.users += 1;
@@ -329,13 +338,14 @@ impl Telegram {
             } else {
                 *entry.streams.entry(offset).or_default() += 1;
             }
-            entry.gate.clone()
+            (entry.gate.clone(), entry.state.subscribe())
         };
         let lease = DownloadLease {
             tg: self.clone(),
             file,
             full,
             offset,
+            state,
         };
         let _gate = tokio::select! {_=cancel.cancelled()=>return Err(AppError::Cancelled),lock=gate.lock()=>lock};
         let request = {
@@ -384,6 +394,51 @@ impl Telegram {
         self.request(json!({"@type":"setOption","name":"online","value":{"@type":"optionValueBoolean","value":false}}));
     }
 }
+type Downloads = Arc<Mutex<HashMap<i64, DownloadEntry>>>;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct DownloadState {
+    pub path: Option<String>,
+    pub complete: bool,
+    pub offset: u64,
+    pub available_until: u64,
+}
+
+#[cfg(any(feature = "telegram", test))]
+fn record_download_state(downloads: &Downloads, value: &Value) {
+    let file = match value["@type"].as_str() {
+        Some("file") => value,
+        Some("updateFile") => &value["file"],
+        _ => return,
+    };
+    let Some(id) = file["id"].as_i64() else {
+        return;
+    };
+    let downloads = downloads.lock().unwrap();
+    let Some(entry) = downloads.get(&id) else {
+        return;
+    };
+    let local = &file["local"];
+    let offset = local["download_offset"].as_u64().unwrap_or_default();
+    let state = DownloadState {
+        path: local["path"]
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned),
+        complete: local["is_downloading_completed"] == true,
+        offset,
+        available_until: offset
+            .saturating_add(local["downloaded_prefix_size"].as_u64().unwrap_or_default()),
+    };
+    entry.state.send_if_modified(|current| {
+        if *current == state {
+            return false;
+        }
+        *current = state;
+        true
+    });
+}
+
 #[derive(Default)]
 struct DownloadEntry {
     streams: std::collections::BTreeMap<u64, usize>,
@@ -392,12 +447,14 @@ struct DownloadEntry {
     started: bool,
     offset: u64,
     gate: Arc<tokio::sync::Mutex<()>>,
+    state: watch::Sender<DownloadState>,
 }
 pub(crate) struct DownloadLease {
     offset: u64,
     tg: Telegram,
     file: i64,
     full: bool,
+    pub(super) state: watch::Receiver<DownloadState>,
 }
 impl Drop for DownloadLease {
     fn drop(&mut self) {
@@ -415,7 +472,11 @@ impl Drop for DownloadLease {
                 }
                 if entry.users == 0 {
                     downloads.remove(&self.file);
-                    Some(None)
+                    // Queue cancellation before another lease can start this file.
+                    self.tg.request(json!({
+                        "@type":"cancelDownloadFile","file_id":self.file,"only_if_pending":false
+                    }));
+                    return;
                 } else {
                     let desired = if entry.streams.contains_key(&entry.offset) {
                         entry.offset
@@ -424,10 +485,7 @@ impl Drop for DownloadLease {
                     };
                     if entry.started && desired != entry.offset {
                         entry.offset = desired;
-                        Some(Some((
-                            desired,
-                            if entry.streams.is_empty() { 8 } else { 32 },
-                        )))
+                        Some((desired, if entry.streams.is_empty() { 8 } else { 32 }))
                     } else {
                         None
                     }
@@ -436,10 +494,11 @@ impl Drop for DownloadLease {
                 None
             }
         };
-        match action {
-            Some(None)=>self.tg.request(json!({"@type":"cancelDownloadFile","file_id":self.file,"only_if_pending":false})),
-            Some(Some((offset,priority)))=>self.tg.request(json!({"@type":"downloadFile","file_id":self.file,"priority":priority,"offset":offset,"limit":0,"synchronous":false})),
-            None=>{}
+        if let Some((offset, priority)) = action {
+            self.tg.request(json!({
+                "@type":"downloadFile","file_id":self.file,"priority":priority,
+                "offset":offset,"limit":0,"synchronous":false
+            }));
         }
     }
 }
@@ -490,10 +549,13 @@ impl Telegram {
         let (send, rx) = mpsc::channel::<Value>();
         let pending = Registry::default();
         let registry = pending.clone();
+        let downloads = Downloads::default();
+        let download_updates = downloads.clone();
         std::thread::spawn(move || {
             while let Ok(v) = rx.recv() {
                 let id = v["@extra"].as_u64();
                 let response = handler(v);
+                record_download_state(&download_updates, &response);
                 if let Some(pending) = id.and_then(|id| registry.lock().unwrap().remove(&id)) {
                     let _ = pending.reply.send(response);
                 }
@@ -506,9 +568,13 @@ impl Telegram {
             stopping: Default::default(),
             worker: Default::default(),
             connection: 1,
-            downloads: Default::default(),
+            downloads,
             resolved: Default::default(),
         }
+    }
+
+    pub(super) fn mock_file_update(&self, file: Value) {
+        record_download_state(&self.downloads, &json!({"@type":"updateFile","file":file}));
     }
     #[cfg(feature = "native-tests")]
     pub fn mock_file(path: std::path::PathBuf) -> Self {
@@ -518,7 +584,9 @@ impl Telegram {
                 "getFileDownloadedPrefixSize" => {
                     json!({"size":size.saturating_sub(v["offset"].as_u64().unwrap_or(0))})
                 }
-                _ => json!({"size":size,"local":{"path":path,"is_downloading_completed":true}}),
+                _ => {
+                    json!({"@type":"file","id":v["file_id"],"size":size,"local":{"path":path,"is_downloading_completed":true}})
+                }
             }
         })
     }

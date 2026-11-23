@@ -138,7 +138,12 @@ impl AppCore {
             AppCommand::Quit => effects.push(Effect::Quit),
             AppCommand::Retry => effects.push(Effect::RetryRequested),
             AppCommand::SelectPlaylistRow(index) => effects.push(Effect::SelectPlaylistRow(index)),
-            AppCommand::OpenPlaylist(chat) => {
+            AppCommand::OpenPlaylist(chat) if self.state.playlists.iter().any(|p| p.id == chat) => {
+                if self.state.last_opened_chat != Some(chat) {
+                    let mut settings = crate::persistence::Settings::from(&self.state);
+                    settings.last_opened_chat = Some(chat);
+                    self.handle(CoreCommand::Settings(settings));
+                }
                 effects.push(Effect::OpenedPlaylist(chat));
                 effects.extend(self.library_command(crate::library::LibraryCommand::Open {
                     chat,
@@ -213,8 +218,11 @@ impl AppCore {
                     if !paused
                         && self.playback.state.paused()
                         && !self.playback.state.loading()
-                        && (self.playback.state == crate::playback::PlaybackState::Failed
-                            || self.playback.snapshot.duration <= 0.)
+                        && (matches!(
+                            self.playback.state,
+                            crate::playback::PlaybackState::Stopped
+                                | crate::playback::PlaybackState::Failed
+                        ) || self.playback.snapshot.duration <= 0.)
                     {
                         play = self.state.session.current().map(Into::into);
                     } else {
@@ -260,7 +268,7 @@ impl AppCore {
             AppCommand::ToggleChatPin(id) => {
                 self.handle(CoreCommand::ToggleChatPin(id));
             }
-            AppCommand::Volume(_) | AppCommand::Seek(_) => {}
+            AppCommand::Volume(_) | AppCommand::Seek(_) | AppCommand::OpenPlaylist(_) => {}
         }
         if let Some(track) = play {
             self.prepare_playback(track, &mut effects);
@@ -426,12 +434,21 @@ impl AppCore {
                         self.handle(CoreCommand::Current(crate::library::metadata_track(
                             prepared.track,
                         )));
+                        self.playback.target = self.state.session.current().map(Into::into);
                         if let Some(next) = self.state.session.remaining().first() {
                             effects.push(Effect::Prefetch(next.into()));
                         }
                         if let Some(path) = prepared.path {
+                            let mut start_ms = self.state.session.position_ms();
+                            if self.state.session.current().is_some_and(|track| {
+                                track.duration > 0
+                                    && start_ms
+                                        >= track.duration.saturating_add(1).saturating_mul(1000)
+                            }) {
+                                start_ms = 0;
+                            }
                             effects.extend([
-                                Effect::Player(PlayerCommand::Load(path)),
+                                Effect::Player(PlayerCommand::Load { path, start_ms }),
                                 Effect::Player(PlayerCommand::Pause(self.playback.state.paused())),
                                 Effect::Player(PlayerCommand::Volume(self.state.volume)),
                                 Effect::Notice(crate::notice::Notice::Clear),

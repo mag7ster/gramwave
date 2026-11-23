@@ -37,6 +37,62 @@ fn preparation(effects: &[Effect]) -> (Operation, Track, u64) {
 }
 
 #[test]
+fn resume_waits_for_play_preserves_position_on_failure_and_resets_for_next_occurrence() {
+    let track = Track {
+        duration: 120,
+        ..song()
+    };
+    let mut state = State::default();
+    state.session.start(&[track.clone(), track], 0, false);
+    state.session.set_position_ms(37_625);
+    let current = state.session.current().unwrap().entry_id;
+    let upcoming = state.session.remaining()[0].entry_id;
+    let mut core = AppCore::new(state);
+    assert!(core.playback().state().paused());
+
+    let (op, _, revision) = preparation(&core.command(AppCommand::Pause(false)));
+    core.event(AppEvent::PlaybackPrepared {
+        request: op.key(),
+        revision,
+        result: Err(AppError::Timeout("prepare playback")),
+    });
+    assert_eq!(core.view().session.position_ms(), 37_625);
+
+    let finish = |core: &mut AppCore, command| {
+        let (op, track, revision) = preparation(&core.command(command));
+        core.event(AppEvent::PlaybackPrepared {
+            request: op.key(),
+            revision,
+            result: Ok(PreparedPlayback {
+                track: track.into(),
+                path: Some("media".into()),
+            }),
+        })
+    };
+    let effects = finish(&mut core, AppCommand::Pause(false));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Player(PlayerCommand::Load {
+            start_ms: 37_625,
+            ..
+        })
+    )));
+    assert_eq!(core.view().session.current().unwrap().entry_id, current);
+
+    let effects = finish(&mut core, AppCommand::Next);
+    core.save_playback_position(PlayerSnapshot {
+        checkpoint_position: Some(38.),
+        ..Default::default()
+    });
+    assert_eq!(core.view().session.current().unwrap().entry_id, upcoming);
+    assert_eq!(core.view().session.position_ms(), 0);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Player(PlayerCommand::Load { start_ms: 0, .. })
+    )));
+}
+
+#[test]
 fn retrying_failed_playback_prepares_again_despite_previous_duration() {
     let mut core = AppCore::new(State::default());
     let (failed, target, revision) =
@@ -206,7 +262,7 @@ fn failed_preparation_from_before_live_edit_retries_and_rejects_other_job_ids() 
         }),
     });
     assert!(effects.iter().any(|effect| matches!(effect,
-        Effect::Player(PlayerCommand::Load(path)) if path == "current-media"
+        Effect::Player(PlayerCommand::Load { path, start_ms: 0 }) if path == "current-media"
     )));
 }
 

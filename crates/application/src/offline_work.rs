@@ -30,6 +30,32 @@ impl OfflineCore {
     pub fn retrying(&self, id: TrackId) -> bool {
         self.work.retry.contains_key(&id)
     }
+    pub fn retry_deadline(&self, now: Instant, online: bool) -> Option<Instant> {
+        let removals = (self.work.removals.len() < 4)
+            .then_some(&self.work.removal_retry)
+            .into_iter()
+            .flatten()
+            .filter_map(|(path, at)| {
+                (self.data.removing.contains_key(path) && !self.work.removals.contains_key(path))
+                    .then_some(*at)
+            });
+        let downloads = (online && self.work.active.len() < 2)
+            .then_some(&self.work.retry)
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, at)| {
+                (self.data.pending.contains_key(id) && !self.work.active.contains_key(id))
+                    .then_some(*at)
+            });
+        let scan = self.work.scan_retry.filter(|at| {
+            *at > now && online && self.work.scan.is_none() && self.next_scan().is_some()
+        });
+        removals
+            .chain(downloads)
+            .chain(scan)
+            .filter(|at| *at > now)
+            .min()
+    }
     pub(crate) fn cancel_scan(&mut self) {
         if let Some((op, _, _)) = self.work.scan.take() {
             op.cancel.cancel();

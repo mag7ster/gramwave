@@ -1,6 +1,8 @@
 use crate::{application, streaming, telegram, tr, Track};
 use eframe::egui;
-use std::{path::PathBuf, sync::mpsc, time::Duration};
+#[cfg(test)]
+use std::time::Duration;
+use std::{path::PathBuf, sync::mpsc};
 use tg_player_application::telegram::TelegramUpdate;
 use tg_player_application::AppCore;
 pub(crate) enum Event {
@@ -31,9 +33,10 @@ struct PlaylistCache {
     tracks: std::sync::Arc<Vec<Track>>,
 }
 pub(crate) struct DesktopApp {
+    pub(crate) wake: fastframe_shell::Waker,
     playlist_cache: std::cell::RefCell<Option<PlaylistCache>>,
     pub(crate) options: crate::launch::LaunchOptions,
-    pub(crate) progress: std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
+    pub(crate) progress: std::sync::Arc<crate::adapters::offline::Progress>,
     pub(crate) tasks: application::tasks::Scheduler,
     #[cfg(test)]
     pub(crate) test_rows: std::collections::BTreeMap<i64, (egui::Rect, egui::Rect)>,
@@ -41,6 +44,11 @@ pub(crate) struct DesktopApp {
     pub(crate) test_row_ids: std::collections::BTreeMap<i64, egui::Id>,
     #[cfg(test)]
     pub(crate) test_play_buttons: std::collections::BTreeMap<i64, egui::Rect>,
+    #[cfg(test)]
+    pub(crate) test_queue_rows: std::collections::BTreeMap<
+        tg_player_domain::QueueEntryId,
+        (egui::Rect, egui::Rect, egui::Id),
+    >,
     #[cfg(test)]
     pub(crate) test_seek: Option<(egui::Rect, egui::Id)>,
     #[cfg(test)]
@@ -63,8 +71,7 @@ pub(crate) struct DesktopApp {
     pub(crate) track_wanted: Vec<Track>,
     pub(crate) search: String,
     pub(crate) status: String,
-    pub(crate) notice: String,
-    pub(crate) notice_until: Option<std::time::Instant>,
+    pub(crate) inline_notice: Option<crate::ui::InlineNotice>,
     pub(crate) api_id_input: String,
     pub(crate) api_hash_input: String,
     pub(crate) phone: String,
@@ -78,8 +85,11 @@ pub(crate) struct DesktopApp {
     pub(crate) demo: bool,
     pub(crate) media: Option<fastframe_now_playing::NowPlaying>,
     pub(crate) sort: usize,
-    pub(crate) tray: Option<fastframe_tray::Tray>,
+    pub(crate) tray: Option<crate::adapters::tray::Tray>,
     pub(crate) hidden: bool,
+    pub(crate) wayland: bool,
+    pub(crate) reopen_token: Option<String>,
+    pub(crate) tray_focus: Option<crate::ui::TrayFocus>,
     pub(crate) show_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) last_auth_step: String,
     pub(crate) auth_error: String,
@@ -95,14 +105,15 @@ pub(crate) struct DesktopApp {
     pub(crate) last_link: String,
 }
 impl DesktopApp {
-    pub(crate) fn new() -> Result<Self, String> {
+    pub(crate) fn new(wake: fastframe_shell::Waker) -> Result<Self, String> {
         let options = crate::launch::options().clone();
-        let services = crate::bootstrap::Services::for_launch(&options)?;
+        let services = crate::bootstrap::Services::for_launch(&options, wake)?;
         Ok(Self::from_services(services, options))
     }
     #[cfg(test)]
     pub(crate) fn new_at(root: PathBuf, demo: bool) -> Self {
-        let services = crate::bootstrap::Services::open(root, demo, false).unwrap();
+        let services =
+            crate::bootstrap::Services::open(root, demo, false, Default::default()).unwrap();
         Self::from_services(services, Default::default())
     }
     fn from_services(
@@ -110,6 +121,7 @@ impl DesktopApp {
         options: crate::launch::LaunchOptions,
     ) -> Self {
         let crate::bootstrap::Services {
+            wake,
             root,
             core: state,
             repository: db,
@@ -120,11 +132,24 @@ impl DesktopApp {
             tray,
             demo,
         } = services;
+        let opened_chat = state
+            .view()
+            .last_opened_chat
+            .into_iter()
+            .chain(state.view().session.source)
+            .find(|id| {
+                state
+                    .view()
+                    .playlists
+                    .iter()
+                    .any(|playlist| playlist.id == *id)
+            });
         let (tx, rx) = mpsc::channel();
         Self {
+            progress: std::sync::Arc::new(crate::adapters::offline::Progress::new(wake.clone())),
+            wake,
             playlist_cache: Default::default(),
             options: options.clone(),
-            progress: Default::default(),
             tasks,
             #[cfg(test)]
             test_rows: Default::default(),
@@ -132,6 +157,8 @@ impl DesktopApp {
             test_row_ids: Default::default(),
             #[cfg(test)]
             test_play_buttons: Default::default(),
+            #[cfg(test)]
+            test_queue_rows: Default::default(),
             #[cfg(test)]
             test_seek: None,
             #[cfg(test)]
@@ -152,14 +179,13 @@ impl DesktopApp {
             shutdown_error: Default::default(),
             stream_base: String::new(),
             server: None,
-            opened_chat: None,
+            opened_chat,
             chat_query: String::new(),
             chat_search_active: false,
             image_wanted: Vec::new(),
             track_wanted: Vec::new(),
             search: String::new(),
-            notice: String::new(),
-            notice_until: None,
+            inline_notice: None,
             status: if demo {
                 tr("Demo mode · not connected to Telegram")
             } else {
@@ -182,6 +208,9 @@ impl DesktopApp {
             sort: 0,
             tray,
             hidden: false,
+            wayland: false,
+            reopen_token: None,
+            tray_focus: None,
             show_requested: Default::default(),
             last_auth_step: String::new(),
             auth_error: if options.preview_auth.as_deref() == Some("error") {
@@ -224,7 +253,7 @@ impl DesktopApp {
         if let Some(server) = self.server.take() {
             server.stop();
         }
-        match crate::bootstrap::connect(self.tasks.handle()) {
+        match crate::bootstrap::connect(self.tasks.handle(), self.wake.clone()) {
             Ok(connection) => {
                 match connection.streaming {
                     Ok((base, server)) => {
@@ -254,7 +283,52 @@ impl DesktopApp {
             now: std::time::Instant::now(),
             force: false,
         });
-        ctx.request_repaint_after(Duration::from_millis(250));
+        if let Some(at) = self.state.library().search_deadline() {
+            ctx.request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
+        }
+    }
+    pub(crate) fn request_visible_media(&mut self, ctx: &egui::Context) {
+        use tg_player_application::library::LibraryCommand;
+        let now = std::time::Instant::now();
+        let mut tracks = std::mem::take(&mut self.track_wanted);
+        let mut images = std::mem::take(&mut self.image_wanted);
+        let mut retry = None;
+        for track in tracks.drain(..) {
+            let id = track.id();
+            self.library_command(LibraryCommand::RequestMedia {
+                track: track.into(),
+                now,
+            });
+            retry = retry
+                .into_iter()
+                .chain(
+                    self.state
+                        .library()
+                        .media_retry_at(id)
+                        .filter(|at| *at > now),
+                )
+                .min();
+        }
+        for id in images.drain(..) {
+            let force = self
+                .artwork_path(id)
+                .is_some_and(|path| !std::path::Path::new(path).is_file());
+            self.library_command(LibraryCommand::RequestArtwork { id, now, force });
+            retry = retry
+                .into_iter()
+                .chain(
+                    self.state
+                        .library()
+                        .artwork_retry_at(id)
+                        .filter(|at| *at > now),
+                )
+                .min();
+        }
+        self.track_wanted = tracks;
+        self.image_wanted = images;
+        if let Some(at) = retry {
+            ctx.request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
+        }
     }
     pub(crate) fn retry_chat_search(&mut self) {
         self.library_command(tg_player_application::library::LibraryCommand::Search {
@@ -273,14 +347,16 @@ impl DesktopApp {
         let Some(chat) = self.state.view().playlists.get(index).map(|p| p.id) else {
             return;
         };
-        if self.opened_chat != Some(chat) {
-            self.search.clear();
+        if refresh {
+            self.core_command(tg_player_application::commands::AppCommand::OpenPlaylist(
+                chat,
+            ));
+        } else {
+            self.library_command(tg_player_application::library::LibraryCommand::Open {
+                chat,
+                refresh: false,
+            });
         }
-        self.opened_chat = Some(chat);
-        self.library_command(tg_player_application::library::LibraryCommand::Open {
-            chat,
-            refresh,
-        });
     }
     pub(crate) fn play(&mut self, track: impl Into<Track>) {
         let track: Track = track.into();
@@ -312,10 +388,14 @@ impl DesktopApp {
             index,
         ));
     }
-    pub(crate) fn choose_session(&mut self, tracks: &[Track], index: usize) {
-        self.start_session(tracks, index);
-    }
     pub(crate) fn playlist_tracks(&self, selected: usize) -> std::sync::Arc<Vec<Track>> {
+        self.playlist_tracks_matching(selected, &self.search)
+    }
+    fn playlist_tracks_matching(
+        &self,
+        selected: usize,
+        search: &str,
+    ) -> std::sync::Arc<Vec<Track>> {
         let p = &self.state.view().playlists[selected];
         let key = PlaylistCacheKey {
             id: p.id,
@@ -323,7 +403,7 @@ impl DesktopApp {
             media: self.state.library().media_version(),
             offline: self.state.offline().version(),
             filters: p.filters,
-            search: self.search.clone(),
+            search: search.to_owned(),
             sort: self.sort,
         };
         if let Some(cache) = self
@@ -335,29 +415,49 @@ impl DesktopApp {
             return cache.tracks.clone();
         }
 
-        let query = self.search.to_lowercase();
+        let query = search.to_lowercase();
         let mut tracks: Vec<_> = p
             .tracks
             .iter()
-            .filter(|t| {
-                p.filters[usize::from(t.kind)]
-                    && format!("{} {}", t.title, t.artist)
-                        .to_lowercase()
-                        .contains(&query)
-            })
-            .cloned()
+            .filter(|t| p.filters[usize::from(t.kind)])
             .collect();
         match self.sort {
             1 => tracks.sort_by(|a, b| a.title.cmp(&b.title)),
             2 => tracks.sort_by(|a, b| a.artist.cmp(&b.artist)),
             _ => {}
         }
-        let tracks = std::sync::Arc::new(tracks.into_iter().map(|t| self.media_track(t)).collect());
+        let tracks = std::sync::Arc::new(
+            tracks
+                .into_iter()
+                .enumerate()
+                .filter(|(_, t)| {
+                    query.is_empty()
+                        || format!("{} {}", t.title, t.artist)
+                            .to_lowercase()
+                            .contains(&query)
+                })
+                .map(|(index, t)| {
+                    let mut track = self.media_track(t.clone());
+                    track.playlist_number = index + 1;
+                    track
+                })
+                .collect(),
+        );
         *self.playlist_cache.borrow_mut() = Some(PlaylistCache {
             key,
             tracks: std::sync::Arc::clone(&tracks),
         });
         tracks
+    }
+    pub(crate) fn play_playlist_from(&mut self, selected: usize, library_id: Option<u64>) {
+        let tracks = self.playlist_tracks_matching(selected, "");
+        let index = match library_id {
+            Some(id) => tracks.iter().position(|track| track.library_id == id),
+            None => (!tracks.is_empty()).then_some(0),
+        };
+        if let Some(index) = index {
+            self.start_session(&tracks, index);
+        }
     }
     pub(crate) fn select_playlist_row(&mut self, index: usize) {
         let Some(selected) = self
@@ -380,7 +480,7 @@ impl DesktopApp {
         {
             self.set_paused(!self.state.playback().state().paused());
         } else {
-            self.choose_session(&tracks, index);
+            self.play_playlist_from(selected, Some(track.library_id));
         }
     }
     pub(crate) fn set_paused(&mut self, value: bool) {
@@ -431,7 +531,7 @@ impl DesktopApp {
     }
     pub(crate) fn process(&mut self, ctx: &egui::Context) -> usize {
         let mut processed = 0;
-        if let Some((generation, status)) = self.progress.lock().unwrap().take() {
+        if let Some((generation, status)) = self.progress.take() {
             if generation == self.state.offline().generation() {
                 self.status = status;
             }
@@ -444,6 +544,9 @@ impl DesktopApp {
         if let Some(rx) = &self.updates {
             updates.extend(rx.try_iter().take(128));
         }
+        if updates.len() == 128 {
+            self.wake.wake();
+        }
         for update in updates {
             processed += 1;
             match update {
@@ -455,11 +558,13 @@ impl DesktopApp {
                 ),
             }
         }
+        let mut received = 0;
         for _ in 0..128 {
             let Ok(e) = self.rx.try_recv() else {
                 break;
             };
             processed += 1;
+            received += 1;
             match e {
                 Event::Noop => {}
                 Event::ForgetArtwork(path) => ctx.forget_image(&format!("file://{path}")),
@@ -471,27 +576,29 @@ impl DesktopApp {
                 Event::Link(s) => {
                     self.last_link = s.clone();
                     ctx.copy_text(s);
-                    self.status = tr("Link copied")
+                    self.status = tr("Link copied");
+                    self.set_inline_notice(self.status.clone(), false);
                 }
             }
+        }
+        if received == 128 {
+            self.wake.wake();
         }
         processed
     }
 }
 
 pub(crate) fn tray_icon(size: usize) -> Vec<u8> {
-    let mut pixels = vec![0; size * size * 4];
-    for y in 0..size {
-        for x in 0..size {
-            let i = (y * size + x) * 4;
-            let dx = x as f32 - size as f32 / 2.;
-            let dy = y as f32 - size as f32 / 2.;
-            if dx * dx + dy * dy < (size as f32 * 0.44).powi(2) {
-                pixels[i..i + 4].copy_from_slice(&[99, 215, 196, 255]);
-            }
-        }
-    }
-    pixels
+    egui_extras::image::load_svg_bytes_with_size(
+        crate::design::APP_ICON,
+        egui::load::SizeHint::Width(size as u32),
+        &Default::default(),
+    )
+    .expect("bundled Gramwave icon must be a valid SVG")
+    .pixels
+    .into_iter()
+    .flat_map(|pixel| pixel.to_srgba_unmultiplied())
+    .collect()
 }
 
 #[cfg(test)]

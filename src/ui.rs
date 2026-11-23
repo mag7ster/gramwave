@@ -1,16 +1,73 @@
+use crate::adapters::tray::{Event as TrayEvent, Tray};
 use crate::application::commands::AppCommand;
 use crate::{design, tr, App, Event, RepeatMode};
 use eframe::egui;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+pub(crate) struct TrayFocus {
+    deadline: Instant,
+    hide_if_denied: bool,
+}
+
+pub(crate) struct InlineNotice {
+    text: String,
+    until: Instant,
+    offline: bool,
+}
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.background(ctx, true);
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.dispatch_window_events();
+        }
+        if let Some(delay) = self.background(ctx, true) {
+            ctx.request_repaint_after(delay);
+        }
     }
     fn ui(&mut self, root: &mut egui::Ui, _: &mut eframe::Frame) {
         self.render(root);
     }
 }
+
 impl App {
+    pub(crate) fn restored_position(
+        &self,
+        snapshot: crate::application::ports::PlayerSnapshot,
+    ) -> Option<f64> {
+        use tg_player_application::playback::PlaybackState;
+        let position_ms = self.state.view().session.position_ms();
+        let loaded = matches!(
+            self.state.playback().state(),
+            PlaybackState::Playing | PlaybackState::Paused
+        ) && snapshot.duration > 0.;
+        (position_ms > 0 && !loaded).then_some(position_ms as f64 / 1000.)
+    }
+
+    fn process_player_events(&mut self) {
+        let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
+        for event in events {
+            self.core_event(tg_player_application::workflow::AppEvent::Player(event));
+        }
+    }
+
+    pub(crate) fn set_inline_notice(&mut self, text: String, offline: bool) {
+        self.inline_notice = Some(InlineNotice {
+            text,
+            until: Instant::now() + Duration::from_secs(5),
+            offline,
+        });
+    }
+
+    pub(crate) fn inline_notice(&self, ctx: &egui::Context, offline_only: bool) -> Option<&str> {
+        let notice = self.inline_notice.as_ref()?;
+        let delay = notice.until.checked_duration_since(Instant::now())?;
+        if offline_only && !notice.offline {
+            return None;
+        }
+        ctx.request_repaint_after(delay);
+        Some(&notice.text)
+    }
+
     pub(crate) fn settings_ui(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
@@ -106,6 +163,9 @@ impl App {
                             }
                         });
                         design::settings_section(ui, tr("Offline storage"), |ui| {
+                            if let Some(notice) = self.inline_notice(ctx, true) {
+                                ui.weak(notice);
+                            }
                             ui.label(tr("Automatic cache · 2 GiB"));
                             ui.weak(tr("Saved offline tracks are kept separately."));
                             if ui.button(tr("Clear automatic cache")).clicked() {
@@ -131,9 +191,10 @@ impl App {
                                     ui.horizontal(|ui| {
                                         ui.add_sized(
                                             [ui.available_width() - 44., 36.],
-                                            egui::Label::new(&t.title).truncate(),
-                                        )
-                                        .on_hover_text(&t.title);
+                                            egui::Label::new(&t.title)
+                                                .truncate()
+                                                .show_tooltip_when_elided(false),
+                                        );
                                         if design::button(
                                             ui,
                                             design::Icon::Close,
@@ -193,39 +254,166 @@ impl App {
 }
 
 impl App {
-    pub fn background(&mut self, ctx: &egui::Context, window_present: bool) {
+    fn show_window(&self, ctx: &egui::Context, window_present: bool) {
+        if !window_present {
+            self.show_requested
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn window_focused(ctx: &egui::Context) -> bool {
+        ctx.input(|i| {
+            i.viewport().focused.unwrap_or(i.focused) && i.viewport().minimized != Some(true)
+        })
+    }
+
+    fn hide_window(&mut self, ctx: &egui::Context) {
+        self.tray_focus = None;
+        self.hidden = true;
+        if let Some(tray) = &self.tray {
+            tray.set_window(None);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn request_tray_focus(
+        &mut self,
+        ctx: &egui::Context,
+        token: Option<String>,
+        hide_if_denied: bool,
+    ) {
+        if let Some(pending) = &mut self.tray_focus {
+            pending.hide_if_denied &= hide_if_denied;
+            return;
+        }
+        self.show_window(ctx, true);
+        if Self::window_focused(ctx) {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if self.wayland
+            && !self
+                .tray
+                .as_ref()
+                .is_some_and(|tray| tray.activate_window(token.as_deref()))
+        {
+            if hide_if_denied {
+                self.hide_window(ctx);
+            }
+            return;
+        }
+        self.await_tray_focus(Instant::now(), hide_if_denied);
+    }
+
+    fn await_tray_focus(&mut self, sent_at: Instant, hide_if_denied: bool) {
+        let deadline = sent_at + Duration::from_millis(400);
+        match &mut self.tray_focus {
+            Some(pending) => {
+                pending.deadline = pending.deadline.max(deadline);
+                pending.hide_if_denied &= hide_if_denied;
+            }
+            None => {
+                self.tray_focus = Some(TrayFocus {
+                    deadline,
+                    hide_if_denied,
+                })
+            }
+        }
+    }
+    fn settle_tray_focus(&mut self, ctx: &egui::Context, window_present: bool) -> Option<Instant> {
+        let pending = self.tray_focus.as_ref()?;
+        if !window_present
+            || self.quitting
+            || self.hidden
+            || Self::window_focused(ctx)
+            || ctx.input(|i| i.viewport().close_requested())
+        {
+            self.tray_focus = None;
+            return None;
+        }
+        if Instant::now() >= pending.deadline {
+            let hide = pending.hide_if_denied;
+            self.tray_focus = None;
+            if hide {
+                self.hide_window(ctx);
+            }
+            return None;
+        }
+        Some(pending.deadline)
+    }
+
+    fn handle_tray_event(&mut self, ctx: &egui::Context, window_present: bool, event: TrayEvent) {
+        if self.quitting {
+            return;
+        }
+        match event {
+            TrayEvent::FocusRequested {
+                window,
+                sent_at,
+                hide_if_denied,
+            } => {
+                if window_present
+                    && !self.hidden
+                    && self
+                        .tray
+                        .as_ref()
+                        .is_some_and(|tray| tray.targets_window(&window))
+                {
+                    self.await_tray_focus(sent_at, hide_if_denied);
+                }
+            }
+            TrayEvent::Toggle(_) if window_present && !self.hidden && Self::window_focused(ctx) => {
+                self.hide_window(ctx);
+            }
+            TrayEvent::Toggle(token) if window_present && !self.hidden => {
+                self.request_tray_focus(ctx, token, true);
+            }
+            TrayEvent::Show(token) if window_present && !self.hidden => {
+                self.request_tray_focus(ctx, token, false);
+            }
+            TrayEvent::Toggle(token) | TrayEvent::Show(token) => {
+                self.reopen_token = token;
+                self.show_window(ctx, false);
+            }
+            TrayEvent::Quit => {
+                self.execute(AppCommand::Quit);
+                if window_present {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            TrayEvent::PlayPause => {
+                self.execute(AppCommand::Pause(!self.state.playback().state().paused()));
+            }
+            TrayEvent::Next => self.execute(AppCommand::Next),
+        }
+    }
+
+    pub fn background(&mut self, ctx: &egui::Context, window_present: bool) -> Option<Duration> {
         self.process(ctx);
         self.process_control();
-        self.pump_offline();
         let now = std::time::Instant::now();
-        for track in self.track_wanted.clone() {
-            self.library_command(
-                tg_player_application::library::LibraryCommand::RequestMedia {
-                    track: track.into(),
-                    now,
-                },
-            );
-        }
-        for id in self.image_wanted.clone() {
-            let force = self
-                .artwork_path(id)
-                .is_some_and(|path| !std::path::Path::new(path).is_file());
-            self.library_command(
-                tg_player_application::library::LibraryCommand::RequestArtwork { id, now, force },
-            );
-        }
+        let offline = self.pump_offline(now);
 
         if window_present
+            && !self.hidden
+            && !self.quitting
             && self
                 .show_requested
                 .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.show_window(ctx, window_present);
         }
 
         self.frames += 1;
+        let mut smoke = None;
         if self.options.smoke_test {
-            if self.preview_started.elapsed() > Duration::from_secs(2) && !self.preview_captured {
+            let screenshot_at = self.preview_started + Duration::from_secs(2);
+            let quit_at = self.preview_started + Duration::from_millis(3500);
+            if now >= screenshot_at && !self.preview_captured {
                 self.preview_captured = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
@@ -244,41 +432,26 @@ impl App {
                     );
                 }
             }
-            if self.preview_started.elapsed() > Duration::from_millis(3500) {
+            if now >= quit_at {
                 self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                smoke = Some(if self.preview_captured {
+                    quit_at
+                } else {
+                    screenshot_at
+                });
             }
         }
         if let Some(tray) = &self.tray {
             for event in tray.events() {
-                match event {
-                    fastframe_tray::Event::Menu("quit") => {
-                        self.execute(AppCommand::Quit);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    fastframe_tray::Event::Toggle
-                    | fastframe_tray::Event::Show
-                    | fastframe_tray::Event::Menu("show") => {
-                        self.show_requested
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    }
-                    fastframe_tray::Event::Menu("play") => {
-                        self.execute(AppCommand::Pause(!self.state.playback().state().paused()));
-                    }
-                    fastframe_tray::Event::Menu("next") => self.execute(AppCommand::Next),
-                    _ => {}
-                }
+                self.handle_tray_event(ctx, window_present, event);
             }
         }
         if window_present
             && ctx.input(|i| i.viewport().close_requested())
             && !self.quitting
-            && self
-                .tray
-                .as_ref()
-                .is_some_and(fastframe_tray::Tray::is_shown)
+            && self.tray.as_ref().is_some_and(Tray::is_shown)
         {
             self.hidden = true;
         }
@@ -332,21 +505,36 @@ impl App {
                     self.execute(AppCommand::Quit);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                Command::Raise => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
+                Command::Raise => self.show_window(ctx, window_present),
                 _ => {}
             }
         }
+        self.process_player_events();
+
+        let mut mpris = None;
+        let snapshot = self
+            .player
+            .as_ref()
+            .map(|p| p.snapshot())
+            .unwrap_or_default();
+        let position = self
+            .restored_position(snapshot)
+            .unwrap_or(snapshot.position);
         if let Some(media) = &mut self.media {
+            let playback = if self.state.view().session.current().is_none() {
+                Playback::Stopped
+            } else if self.state.playback().state().paused()
+                || self.state.playback().state().loading()
+            {
+                Playback::Paused
+            } else {
+                Playback::Playing
+            };
+            if playback == Playback::Playing && self.player.is_some() {
+                mpris = Some(now + Duration::from_millis(200));
+            }
             media.update(MediaState {
-                playback: if self.state.view().session.current().is_none() {
-                    Playback::Stopped
-                } else if self.state.playback().state().paused()
-                    || self.state.playback().state().loading()
-                {
-                    Playback::Paused
-                } else {
-                    Playback::Playing
-                },
+                playback,
                 track: self
                     .state
                     .view()
@@ -360,13 +548,7 @@ impl App {
                         duration: Some(Duration::from_secs(t.duration)),
                         ..Default::default()
                     }),
-                position: Duration::from_secs_f64(
-                    self.player
-                        .as_ref()
-                        .map(|p| p.snapshot().position)
-                        .unwrap_or(0.)
-                        .max(0.),
-                ),
+                position: Duration::try_from_secs_f64(position).unwrap_or_default(),
                 volume: Some(self.state.view().volume as f64 / 100.),
                 shuffle: Some(self.state.view().shuffle),
                 repeat: Some(crate::adapters::system::repeat_to_system(
@@ -376,11 +558,13 @@ impl App {
             });
         }
 
-        ctx.request_repaint_after(Duration::from_millis(200));
-        let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
-        for event in events {
-            self.core_event(tg_player_application::workflow::AppEvent::Player(event));
-        }
+        offline
+            .into_iter()
+            .chain(smoke)
+            .chain(mpris)
+            .chain(self.settle_tray_focus(ctx, window_present))
+            .min()
+            .map(|at| at.saturating_duration_since(std::time::Instant::now()))
     }
 }
 
@@ -394,6 +578,10 @@ impl App {
         let remaining = || deadline.saturating_duration_since(std::time::Instant::now());
         self.process(&egui::Context::default());
         self.quitting = true;
+        self.process_player_events();
+        if let Some(player) = &self.player {
+            self.state.save_playback_position(player.snapshot());
+        }
         self.state.shutdown_operations();
         self.state.cancel_library_operations();
         if let Some(server) = &self.server {
@@ -436,6 +624,125 @@ impl App {
             Ok(())
         } else {
             Err(errors.join("; "))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::ViewportCommand as Window;
+    use fastframe_shell::Resident;
+
+    #[test]
+    fn tray_toggle_opens_raises_and_hides_without_quitting() {
+        let mut app = App::new_at(std::path::PathBuf::new(), true);
+        let dispatch = |app: &mut App, present, focused, minimized, event| {
+            let ctx = egui::Context::default();
+            let mut input = egui::RawInput {
+                focused,
+                ..Default::default()
+            };
+            let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+            viewport.focused = Some(focused);
+            viewport.minimized = Some(minimized);
+            let mut event = Some(event);
+            let mut output = ctx.run_ui(input, |ui| {
+                if let Some(event) = event.take() {
+                    app.handle_tray_event(ui.ctx(), present, event);
+                }
+            });
+            output.textures_delta.clear();
+            output
+                .viewport_output
+                .remove(&egui::ViewportId::ROOT)
+                .unwrap()
+                .commands
+        };
+        let commands = dispatch(&mut app, false, false, false, TrayEvent::Toggle(None));
+        assert!(!commands.contains(&Window::Focus));
+        assert!(!commands.contains(&Window::Close));
+        assert!(app
+            .show_requested
+            .swap(false, std::sync::atomic::Ordering::Relaxed));
+
+        for (focused, minimized) in [(false, false), (true, true)] {
+            let commands = dispatch(&mut app, true, focused, minimized, TrayEvent::Toggle(None));
+            assert!(commands.contains(&Window::Minimized(false)));
+            assert!(commands.contains(&Window::Focus));
+            assert!(!commands.contains(&Window::Close));
+            assert!(!app.hidden);
+            app.tray_focus = None;
+        }
+        let commands = dispatch(&mut app, true, true, false, TrayEvent::Show(None));
+        assert!(commands.contains(&Window::Focus));
+        assert!(!commands.contains(&Window::Close));
+
+        let commands = dispatch(&mut app, true, true, false, TrayEvent::Toggle(None));
+        assert!(commands.contains(&Window::Close));
+        assert_eq!(app.closed(), fastframe_shell::Closed::Hide);
+        app.window_gone();
+        dispatch(
+            &mut app,
+            false,
+            false,
+            false,
+            TrayEvent::Toggle(Some("token".into())),
+        );
+        assert_eq!(
+            app.headless_frame(&egui::Context::default()),
+            fastframe_shell::Headless::Show
+        );
+        assert_eq!(app.reopen_token.take().as_deref(), Some("token"));
+        assert!(app.reopen_token.take().is_none());
+    }
+
+    #[test]
+    fn tray_toggle_without_a_wayland_activation_path_hides_immediately() {
+        let mut app = App::new_at(std::path::PathBuf::new(), true);
+        app.wayland = true;
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            focused: false,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input(), |ui| {
+            app.handle_tray_event(ui.ctx(), true, TrayEvent::Show(None));
+            assert!(!app.hidden);
+            app.handle_tray_event(ui.ctx(), true, TrayEvent::Toggle(None));
+        });
+        output.textures_delta.clear();
+        assert!(app.hidden);
+        assert!(app.tray_focus.is_none());
+        assert!(output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .contains(&Window::Close));
+    }
+
+    #[test]
+    fn tray_focus_timeout_only_hides_the_same_unfocused_window_after_a_toggle() {
+        let mut app = App::new_at(std::path::PathBuf::new(), true);
+        for (present, focused, hide_if_denied, should_hide) in [
+            (true, false, true, true),
+            (true, true, true, false),
+            (true, false, false, false),
+            (false, false, true, false),
+        ] {
+            app.hidden = false;
+            app.await_tray_focus(Instant::now() - Duration::from_secs(1), hide_if_denied);
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    focused,
+                    ..Default::default()
+                },
+                |ui| {
+                    assert!(app.settle_tray_focus(ui.ctx(), present).is_none());
+                },
+            );
+            output.textures_delta.clear();
+            assert_eq!(app.hidden, should_hide);
+            assert!(app.tray_focus.is_none());
         }
     }
 }

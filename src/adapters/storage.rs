@@ -244,6 +244,12 @@ fn read_document(db: &rusqlite::Connection, key: &str) -> Result<String, String>
 }
 impl Store {
     pub fn open(path: &Path) -> Result<(Self, State), String> {
+        Self::open_with_wake(path, Default::default())
+    }
+    pub(crate) fn open_with_wake(
+        path: &Path,
+        wake: fastframe_shell::Waker,
+    ) -> Result<(Self, State), String> {
         let mut db = rusqlite::Connection::open(path).map_err(|e| format!("open: {e}"))?;
         let version: u32 = db
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -497,6 +503,7 @@ impl Store {
                 if let Err(e) = result {
                     failure = Some(e.clone());
                     *worker_shared.error.lock().unwrap() = Some(e);
+                    wake.wake();
                 }
             }
         });

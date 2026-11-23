@@ -61,12 +61,23 @@ fn queue_selection_preserves_occurrences_and_backwards_positions() {
 #[test]
 fn list_and_select_share_filters_search_and_sort_and_current_row_toggles_pause() {
     let mut app = app();
-    app.search = "Pacific".into();
     app.sort = 2;
+    let full = app.playlist_tracks(0);
+    app.search = "Pacific".into();
     let list = apply(&mut app, Request::Playlist { offset: 0 });
     let expected = list["items"][1]["message_id"].clone();
     let status = apply(&mut app, Request::Select { row: 2 });
     assert_eq!(status["current"]["message_id"], expected);
+    let index = full
+        .iter()
+        .position(|track| track.message == expected.as_i64().unwrap())
+        .unwrap();
+    let session = &app.state.view().session;
+    assert_eq!(
+        session.preceding()[index - 1].message,
+        full[index - 1].message
+    );
+    assert_eq!(session.remaining()[0].message, full[index + 1].message);
     let id = app
         .state
         .view()
@@ -190,6 +201,8 @@ fn previous_restarts_after_three_seconds_then_switches() {
                 paused: false,
                 seeking: false,
                 position: self.position.get(),
+                audio_position: None,
+                checkpoint_position: None,
                 duration: 180.,
                 volume: 75.,
             }

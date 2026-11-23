@@ -209,8 +209,10 @@ fn stale_publication_cleanup_survives_restart_and_removal_failure_then_retries()
     });
     assert!(core.offline().removing.contains_key("orphan-attempt"));
     assert!(core.pump(now, false).is_empty());
+    let deadline = core.offline().retry_deadline(now, false).unwrap();
+    assert!(deadline >= now + std::time::Duration::from_secs(30));
     let retry = core
-        .pump(Instant::now() + std::time::Duration::from_secs(31), false)
+        .pump(deadline, false)
         .into_iter()
         .find_map(|effect| match effect {
             Effect::RemoveOffline { operation, path } if path == "orphan-attempt" => {

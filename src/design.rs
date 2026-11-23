@@ -1,9 +1,11 @@
 use eframe::egui;
 fastframe_icons::icons! {
  pub enum Icon {
-prefix:"tgplayer-",directory:"../assets/",Play=>lucide "play",Pause=>lucide "pause",Next => "next",Previous => "previous",More=>lucide "ellipsis",Download => "download",Queue => "queue",Settings=>lucide "settings",Search=>lucide "search",Close=>lucide "x",Shuffle => "shuffle",Repeat => "repeat",Volume=>lucide "volume-2",Muted=>lucide "volume-x"}
+prefix:"tgplayer-",directory:"../assets/",Play=>lucide "play",Pause=>lucide "pause",Next => "next",Previous => "previous",More=>lucide "ellipsis",Download => "download",Queue => "queue",Settings=>lucide "settings",Search=>lucide "search",Close=>lucide "x",Shuffle => "shuffle",Repeat => "repeat",Volume=>lucide "volume-2",Muted=>lucide "volume-x",Minimize=>lucide "minus",Maximize=>lucide "square",Restore=>lucide "copy"}
 }
 pub const ROW_HEIGHT: f32 = 60.;
+pub const HEADER_HEIGHT: f32 = 44.;
+pub const APP_ICON: &[u8] = include_bytes!("../assets/tgplayer.svg");
 pub const GREEN: egui::Color32 = egui::Color32::from_rgb(82, 214, 154);
 pub struct Palette {
     pub background: egui::Color32,
@@ -57,25 +59,37 @@ pub fn style(ctx: &egui::Context, light: bool) {
     v.panel_fill = p.background;
     v.window_fill = p.panel;
     v.extreme_bg_color = p.panel;
+    v.text_edit_bg_color = Some(p.raised);
     v.override_text_color = Some(p.text);
     v.weak_text_color = Some(p.muted);
     v.hyperlink_color = p.accent;
     v.error_fg_color = p.error;
     v.widgets.inactive.bg_fill = p.raised;
     v.widgets.inactive.weak_bg_fill = p.raised;
-    v.widgets.hovered.bg_fill = p.selected;
-    v.widgets.active.bg_fill = p.selected;
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1., p.accent);
-    v.widgets.active.bg_stroke = egui::Stroke::new(1., p.accent);
-    v.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
-    v.widgets.hovered.corner_radius = egui::CornerRadius::same(8);
-    v.widgets.active.corner_radius = egui::CornerRadius::same(8);
+    for widgets in [
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        widgets.bg_fill = p.selected;
+        widgets.weak_bg_fill = p.selected;
+    }
+    for widgets in [
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        widgets.bg_stroke = egui::Stroke::NONE;
+        widgets.corner_radius = egui::CornerRadius::same(8);
+        widgets.expansion = 0.;
+    }
     v.selection.bg_fill = p.selected;
-    v.selection.stroke = egui::Stroke::new(1., p.accent);
+    v.selection.stroke = egui::Stroke::new(0., p.accent);
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8., 8.);
-        s.spacing.button_padding = egui::vec2(10., 8.);
+        s.spacing.button_padding = egui::vec2(8., 8.);
         s.spacing.interact_size = egui::vec2(36., 36.);
         s.interaction.selectable_labels = false;
         s.animation_time = 0.14;
@@ -92,24 +106,60 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, label: &'static str) -> bool {
 }
 pub fn labelled_button(ui: &mut egui::Ui, icon: Icon, label: String) -> bool {
     ui.add(
-        egui::Button::image(icon.image(ui.visuals().text_color(), 20.))
-            .frame(false)
+        egui::Button::image(icon.image(ui.visuals().text_color(), 20.).alt_text(&label))
+            .frame_when_inactive(false)
             .min_size(egui::vec2(36., 36.)),
     )
-    .on_hover_text(label)
     .clicked()
+}
+pub fn playback_button(ui: &mut egui::Ui, icon: Icon, label: &'static str) -> bool {
+    let label = crate::tr(label);
+    accent_button(ui, |ink| {
+        egui::Button::image(icon.image(ink, 22.).alt_text(&label))
+            .corner_radius(22)
+            .min_size(egui::vec2(44., 44.))
+    })
+    .clicked()
+}
+fn accent_button<'a>(
+    ui: &mut egui::Ui,
+    button: impl FnOnce(egui::Color32) -> egui::Button<'a>,
+) -> egui::Response {
+    let p = colors(ui);
+    let ink = if ui.visuals().dark_mode {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::WHITE
+    };
+    ui.scope(move |ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.weak_bg_fill = p.accent;
+        widgets.hovered.weak_bg_fill = p.accent.lerp_to_gamma(p.text, 0.08);
+        widgets.active.weak_bg_fill = p.accent.lerp_to_gamma(p.text, 0.18);
+        ui.add(button(ink))
+    })
+    .inner
 }
 pub fn toggle(ui: &mut egui::Ui, icon: Icon, active: bool, badge: &str, hint: String) -> bool {
     let p = colors(ui);
-    let response = ui.add(
-        egui::Button::image(icon.image(if active { p.accent } else { p.muted }, 20.))
-            .fill(if active {
-                p.selected
-            } else {
-                egui::Color32::TRANSPARENT
-            })
-            .min_size(egui::vec2(36., 36.)),
-    );
+    let response = ui
+        .scope(|ui| {
+            let widgets = &mut ui.visuals_mut().widgets;
+            widgets.inactive.weak_bg_fill = p.selected;
+            if active {
+                widgets.hovered.weak_bg_fill = p.raised;
+                widgets.active.weak_bg_fill = p.raised;
+            }
+            ui.add(
+                egui::Button::image(
+                    icon.image(if active { p.accent } else { p.muted }, 20.)
+                        .alt_text(&hint),
+                )
+                .frame_when_inactive(active)
+                .min_size(egui::vec2(36., 36.)),
+            )
+        })
+        .inner;
     if active {
         if badge.is_empty() {
             ui.painter().circle_filled(
@@ -127,20 +177,15 @@ pub fn toggle(ui: &mut egui::Ui, icon: Icon, active: bool, badge: &str, hint: St
             );
         }
     }
-    response.on_hover_text(hint).clicked()
+    response.clicked()
 }
 pub fn primary(ui: &mut egui::Ui, label: String) -> egui::Response {
-    let p = colors(ui);
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).color(if ui.visuals().dark_mode {
-            egui::Color32::BLACK
-        } else {
-            egui::Color32::WHITE
-        }))
-        .fill(p.accent)
-        .corner_radius(10)
-        .min_size(egui::vec2(ui.available_width(), 40.)),
-    )
+    let width = ui.available_width();
+    accent_button(ui, |ink| {
+        egui::Button::new(egui::RichText::new(label).color(ink))
+            .corner_radius(10)
+            .min_size(egui::vec2(width, 40.))
+    })
 }
 pub fn settings_section(ui: &mut egui::Ui, title: String, contents: impl FnOnce(&mut egui::Ui)) {
     let p = colors(ui);
@@ -160,24 +205,31 @@ pub fn settings_section(ui: &mut egui::Ui, title: String, contents: impl FnOnce(
 }
 pub fn choice(ui: &mut egui::Ui, label: String, active: bool) -> bool {
     let p = colors(ui);
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(if active {
-                format!("✓ {label}")
-            } else {
-                label
-            })
-            .color(if active { p.accent } else { p.text }),
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.weak_bg_fill = if active { p.selected } else { p.panel };
+        if active {
+            widgets.hovered.weak_bg_fill = p.raised;
+            widgets.active.weak_bg_fill = p.raised;
+        }
+        ui.add(
+            egui::Button::new(
+                egui::RichText::new(if active {
+                    format!("✓ {label}")
+                } else {
+                    label
+                })
+                .color(if active { p.accent } else { p.text }),
+            )
+            .corner_radius(8)
+            .min_size(egui::vec2(72., 36.)),
         )
-        .fill(if active { p.selected } else { p.panel })
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(8)
-        .min_size(egui::vec2(72., 36.)),
-    )
-    .clicked()
+        .clicked()
+    })
+    .inner
 }
 
-/// A labelled slider with a generous hit target, preview and explicit keyboard handling.
+/// A labelled slider with a generous hit target and explicit keyboard handling.
 pub fn slider(
     ui: &mut egui::Ui,
     value: &mut f64,
@@ -244,31 +296,10 @@ pub fn slider(
         [egui::pos2(rail.left(), y), egui::pos2(x, y)],
         egui::Stroke::new(4., p.accent),
     );
-    ui.painter().circle_filled(egui::pos2(x, y), 6., p.accent);
-    if response.has_focus() && time {
-        ui.painter()
-            .circle_stroke(egui::pos2(x, y), 9., egui::Stroke::new(1., p.accent));
-    } else if response.has_focus() {
-        ui.painter().rect_stroke(
-            rect,
-            4.,
-            egui::Stroke::new(1., p.accent),
-            egui::StrokeKind::Inside,
-        );
-    }
-    let preview = response
-        .hover_pos()
-        .map(|pos| ((pos.x - rail.left()) / rail.width()).clamp(0., 1.) as f64 * max)
-        .unwrap_or(*value);
-    response.on_hover_text(if time {
-        format!(
-            "{label}: {}:{:02}",
-            preview as u64 / 60,
-            preview as u64 % 60
-        )
-    } else {
-        format!("{label}: {:.0}%", *value)
-    })
+    let radius = if response.has_focus() { 8. } else { 6. };
+    ui.painter()
+        .circle_filled(egui::pos2(x, y), radius, p.accent);
+    response
 }
 
 #[derive(Clone)]

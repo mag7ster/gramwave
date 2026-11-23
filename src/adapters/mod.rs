@@ -8,3 +8,6 @@ pub mod streaming;
 pub(crate) mod system;
 pub mod telegram;
 pub(crate) mod telegram_mapping;
+pub(crate) mod tray;
+#[cfg(target_os = "linux")]
+pub(crate) mod window_activation;

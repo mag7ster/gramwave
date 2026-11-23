@@ -33,7 +33,7 @@ mod regression {
 mod native_tests {
     #[test]
     fn native_tdlib_version() {
-        let (tg, _) = super::Telegram::start().unwrap();
+        let (tg, _) = super::Telegram::start(Default::default()).unwrap();
         let v = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(tg.call_async(

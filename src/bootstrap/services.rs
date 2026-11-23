@@ -1,14 +1,15 @@
 //! Native service construction lives at the desktop composition boundary.
 use crate::{
-    adapters::{audio, storage, streaming, telegram},
+    adapters::{audio, storage, streaming, telegram, tray::Tray},
     application::ports::{PlayerBackend, Repository},
     launch::LaunchOptions,
-    tr,
 };
+use fastframe_shell::Waker;
 use std::{path::PathBuf, sync::mpsc};
 use tg_player_application::{tasks::Scheduler, telegram::TelegramUpdate, AppCore};
 
 pub(crate) struct Services {
+    pub wake: Waker,
     pub root: PathBuf,
     pub core: AppCore,
     pub repository: Option<Box<dyn Repository>>,
@@ -16,22 +17,23 @@ pub(crate) struct Services {
     pub player_error: String,
     pub tasks: Scheduler,
     pub media: Option<fastframe_now_playing::NowPlaying>,
-    pub tray: Option<fastframe_tray::Tray>,
+    pub tray: Option<Tray>,
     pub demo: bool,
 }
 impl Services {
-    pub(crate) fn for_launch(options: &LaunchOptions) -> Result<Self, String> {
+    pub(crate) fn for_launch(options: &LaunchOptions, wake: Waker) -> Result<Self, String> {
         let root = if options.demo {
             PathBuf::new()
         } else {
             data_root()
         };
-        Self::open(root, options.demo, options.desktop_integrations)
+        Self::open(root, options.demo, options.desktop_integrations, wake)
     }
     pub(crate) fn open(
         root: PathBuf,
         demo: bool,
         desktop_integrations: bool,
+        wake: Waker,
     ) -> Result<Self, String> {
         let (repository, state, offline) = if demo {
             (None, crate::demo::state(), Default::default())
@@ -42,14 +44,15 @@ impl Services {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).ok();
             }
-            let (store, state) = storage::Store::open(&root.join("library.sqlite"))?;
+            let (store, state) =
+                storage::Store::open_with_wake(&root.join("library.sqlite"), wake.clone())?;
             let offline = store.offline();
             (Some(Box::new(store) as Box<dyn Repository>), state, offline)
         };
         let (player, player_error) = if demo {
             (None, String::new())
         } else {
-            match audio::Player::new() {
+            match audio::Player::new(wake.clone()) {
                 Ok(player) => (
                     Some(Box::new(player) as Box<dyn PlayerBackend>),
                     String::new(),
@@ -59,33 +62,19 @@ impl Services {
         };
         let desktop = !demo || desktop_integrations;
         let media = desktop.then(|| {
+            let wake = wake.clone();
             fastframe_now_playing::NowPlaying::start(
                 fastframe_now_playing::App::new("tgplayer", "Gramwave"),
-                || {},
+                move || wake.wake(),
             )
         });
         let tray = if desktop {
-            fastframe_tray::Tray::spawn(
-                fastframe_tray::Config {
-                    id: "tgplayer",
-                    title: "Gramwave".into(),
-                    icon: crate::application::controller::tray_icon,
-                    template_icon: None,
-                    themed_icon: false,
-                    menu: vec![
-                        fastframe_tray::MenuItem::action("show", tr("Show player")),
-                        fastframe_tray::MenuItem::action("play", tr("Play / pause")),
-                        fastframe_tray::MenuItem::action("next", tr("Next")),
-                        fastframe_tray::MenuItem::Separator,
-                        fastframe_tray::MenuItem::action("quit", tr("Quit")),
-                    ],
-                },
-                || {},
-            )
+            Tray::spawn(wake.clone())
         } else {
             None
         };
         Ok(Self {
+            wake,
             root,
             core: AppCore::with_offline(state, offline),
             repository,
@@ -113,8 +102,8 @@ pub(crate) struct Connection {
     pub streaming: Result<(String, streaming::Server), String>,
 }
 /// Connect lazily after credentials are available, using the one desktop runtime.
-pub(crate) fn connect(handle: tokio::runtime::Handle) -> Result<Connection, String> {
-    let (telegram, updates) = telegram::Telegram::start()?;
+pub(crate) fn connect(handle: tokio::runtime::Handle, wake: Waker) -> Result<Connection, String> {
+    let (telegram, updates) = telegram::Telegram::start(wake)?;
     telegram.offline();
     telegram.configure_cache();
     let streaming = streaming::serve(telegram.clone(), handle);

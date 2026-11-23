@@ -32,8 +32,13 @@ cargo run --release --locked
 To try the interface without a Telegram account or native playback dependencies:
 
 ```sh
-cargo run --locked --no-default-features -- --demo
+cargo run --locked --no-default-features --features vulkan -- --demo
 ```
+
+Choose a renderer when building the release executable at `target/release/tg-player`.
+
+- Vulkan (default): `cargo build --release --locked`
+- OpenGL: `cargo build --release --locked --no-default-features --features telegram`
 
 ## Connect Telegram
 
@@ -58,7 +63,7 @@ cargo test --workspace --locked
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the project structure and full check
-matrix. Run `scripts/package.sh` to create a local bundle in `dist/tg-player`.
+matrix.
 
 ## License
 

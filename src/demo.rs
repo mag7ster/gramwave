@@ -49,6 +49,11 @@ pub fn apply(app: &mut App, scenario: &str) {
             }
         }
         "settings" => app.settings_open = true,
+        "resumed" => {
+            state.session.start(&tracks, 1, false);
+            state.session.set_position_ms(37_625);
+            app.queue_open = true;
+        }
         "empty" => state.playlists[0].tracks.clear(),
         "filters" => state.playlists[0].filters = [false; 3],
         "search" => app.search = "no-matching-demo-track".into(),

@@ -5,12 +5,13 @@ mod playback_tests {
     use super::*;
     use std::time::Duration;
     #[test]
-    fn native_eof_advances_two_tracks_and_manual_stop_is_distinct() {
-        let player =
-            Player::with_audio_output(Some("null")).expect("libmpv with null audio output");
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("sample.wav");
-        let samples = 800u32; // 0.1 second at 8 kHz, mono PCM16.
+    fn idle_native_worker_wakes_to_shutdown() {
+        let mut player = Player::with_audio_output(Some("null"), Default::default()).unwrap();
+        player.shutdown(Duration::from_secs(1)).unwrap();
+        assert!(player.worker.is_none());
+    }
+
+    fn write_wav(path: &std::path::Path, samples: u32) {
         let mut wav = Vec::new();
         wav.extend(b"RIFF");
         wav.extend((36 + samples * 2).to_le_bytes());
@@ -25,7 +26,53 @@ mod playback_tests {
         wav.extend(b"data");
         wav.extend((samples * 2).to_le_bytes());
         wav.resize(44 + samples as usize * 2, 0);
-        std::fs::write(&path, wav).unwrap();
+        std::fs::write(path, wav).unwrap();
+    }
+
+    #[test]
+    fn native_load_resumes_at_checkpoint_and_normal_load_starts_at_zero() {
+        use crate::application::ports::PlayerCommand;
+        use std::time::Instant;
+        let player = Player::with_audio_output(Some("null"), Default::default()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        for (name, start_ms) in [("resumed.wav", 3_250), ("next.wav", 0)] {
+            let path = temp.path().join(name);
+            write_wav(&path, 80_000);
+            player.command(PlayerCommand::Stop).unwrap();
+            player
+                .command(PlayerCommand::Load {
+                    path: path.to_str().unwrap().into(),
+                    start_ms,
+                })
+                .unwrap();
+            let expected = start_ms as f64 / 1000.;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut loaded = false;
+            loop {
+                for event in player.drain() {
+                    loaded |= event == PlaybackEvent::Loaded;
+                    assert!(!matches!(event, PlaybackEvent::Failed(_)), "{event:?}");
+                }
+                let position = player.snapshot().checkpoint_position;
+                if loaded && position.is_some_and(|value| (value - expected).abs() < 0.25) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{name}: expected {expected}, got {position:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    #[test]
+    fn native_eof_advances_two_tracks_and_manual_stop_is_distinct() {
+        let player = Player::with_audio_output(Some("null"), Default::default())
+            .expect("libmpv with null audio output");
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("sample.wav");
+        write_wav(&path, 800); // 0.1 second at 8 kHz, mono PCM16.
         let filename = path.to_str().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut completed = 0;
@@ -46,12 +93,7 @@ mod playback_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(completed, 2, "EOF was lost after mpv returned to idle");
-        let mut long = std::fs::read(&path).unwrap();
-        let bytes = 8000u32 * 4 * 2;
-        long[4..8].copy_from_slice(&(36 + bytes).to_le_bytes());
-        long[40..44].copy_from_slice(&bytes.to_le_bytes());
-        long.resize(44 + bytes as usize, 0);
-        std::fs::write(&path, long).unwrap();
+        write_wav(&path, 8000 * 4);
         player.try_cmd(&["loadfile", filename, "replace"]).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let mut loaded = false;
@@ -90,6 +132,8 @@ mod playback_tests {
         assert!(player.number("seeking") < 0.5, "mpv seek did not settle");
         // The null audio clock includes a small buffered offset while paused.
         let paused_at = player.number("time-pos");
+        let audio_paused_at = player.snapshot().audio_position.expect("mpv audio clock");
+        assert!((audio_paused_at - 2.).abs() < 0.25);
         std::thread::sleep(Duration::from_millis(40));
         assert!(
             (player.number("time-pos") - paused_at).abs() < 0.01,
@@ -98,6 +142,10 @@ mod playback_tests {
             player.number("pause"),
             player.drain()
         );
+        assert!(player
+            .snapshot()
+            .audio_position
+            .is_some_and(|position| (position - audio_paused_at).abs() < 0.01));
         assert!((player.number("volume") - 32.).abs() < 0.1);
         player.try_cmd(&["stop"]).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -172,7 +220,10 @@ fn player_port_reports_invalid_commands_and_a_closed_worker() {
     };
     let backend: &dyn PlayerBackend = &player;
     assert_eq!(
-        backend.command(PlayerCommand::Load("invalid\0path".into())),
+        backend.command(PlayerCommand::Load {
+            path: "invalid\0path".into(),
+            start_ms: 0
+        }),
         Err(AppError::Player("mpv command contains NUL".into()))
     );
     assert_eq!(player.generation.load(Ordering::Acquire), 0);

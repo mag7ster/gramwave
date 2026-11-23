@@ -18,6 +18,7 @@ impl App {
         self.core_event(AppEvent::Snapshot(snapshot));
         let effects = self.state.command(command);
         self.run_effects(effects);
+        self.wake.wake();
     }
     pub(crate) fn run_effects(&mut self, effects: Vec<Effect>) {
         for effect in effects {
@@ -184,6 +185,16 @@ impl App {
                             )
                         }
                         AuthorizationState::Confirmation(link) => self.qr = link,
+                        AuthorizationState::Ready => {
+                            if let Some(chat) = self.opened_chat {
+                                self.library_command(
+                                    tg_player_application::library::LibraryCommand::Open {
+                                        chat,
+                                        refresh: true,
+                                    },
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -249,7 +260,13 @@ impl App {
                     }
                 }
                 Effect::ClearSeek => self.seek_preview = None,
-                Effect::Notice(message) => self.status = super::notices::notice_text(message),
+                Effect::Notice(message) => {
+                    use tg_player_application::notice::Notice;
+                    self.status = super::notices::notice_text(message);
+                    if matches!(message, Notice::OfflineSaved | Notice::OfflineInterrupted) {
+                        self.set_inline_notice(self.status.clone(), true);
+                    }
+                }
                 Effect::Error(error) => self.error = error.to_string(),
                 Effect::Persist(changes) => {
                     if let Some(db) = &self.db {

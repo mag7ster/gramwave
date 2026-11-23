@@ -97,6 +97,15 @@ msgstr ""
 msgid "Close settings"
 msgstr ""
 
+msgid "Close window"
+msgstr ""
+
+msgid "Maximize window"
+msgstr ""
+
+msgid "Minimize window"
+msgstr ""
+
 #: src/main.rs:183
 msgid "Connect Telegram to discover your music"
 msgstr ""
@@ -203,6 +212,9 @@ msgstr ""
 
 #: src/screens.rs:63 src/screens.rs:121
 msgid "Find a chat"
+msgstr ""
+
+msgid "Gramwave menu"
 msgstr ""
 
 #: src/screens.rs:1063
@@ -357,6 +369,9 @@ msgstr ""
 msgid "Play / pause"
 msgstr ""
 
+msgid "Play all"
+msgstr ""
+
 #: src/screens.rs:874
 msgid "Play next"
 msgstr ""
@@ -407,6 +422,9 @@ msgstr ""
 
 #: src/screens.rs:639 src/screens.rs:731
 msgid "Refresh library"
+msgstr ""
+
+msgid "Restore window"
 msgstr ""
 
 #: src/auth.rs:104

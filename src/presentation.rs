@@ -3,6 +3,7 @@ use tg_player_application::{media::MediaTrack, model::Track as Metadata};
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Track {
     pub library_id: u64,
+    pub playlist_number: usize,
     pub entry_id: tg_player_domain::QueueEntryId,
     pub chat: i64,
     pub message: i64,
@@ -47,6 +48,7 @@ impl From<MediaTrack> for Track {
     fn from(t: MediaTrack) -> Self {
         Self {
             library_id: t.library_id,
+            playlist_number: 0,
             entry_id: t.entry_id,
             chat: t.chat,
             message: t.message,

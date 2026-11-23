@@ -1,4 +1,4 @@
-use crate::telegram::Telegram;
+use crate::telegram::{DownloadLease, DownloadState, Telegram};
 use axum::{
     body::{Body, Bytes},
     extract::{Path, State},
@@ -174,6 +174,8 @@ async fn response(
         _admission: admission,
         _active: active,
         lease: None,
+        file: None,
+        confirmed: None,
     };
     let stream = futures_util::stream::try_unfold(transfer, |mut transfer| async move {
         if transfer.position > transfer.end {
@@ -191,58 +193,116 @@ struct Transfer {
     end: u64,
     _admission: OwnedSemaphorePermit,
     _active: OwnedSemaphorePermit,
-    lease: Option<super::telegram::DownloadLease>,
+    lease: Option<DownloadLease>,
+    file: Option<(String, tokio::fs::File)>,
+    confirmed: Option<(DownloadState, u64)>,
 }
+
 impl Transfer {
     async fn next(&mut self) -> Result<Vec<u8>, String> {
-        let endpoint = &self.endpoint;
-        if self.lease.is_none() {
-            self.lease = Some(
-                endpoint
-                    .tg
-                    .begin_download(self.id, self.position, false, &endpoint.cancel)
-                    .await
-                    .map_err(|e| e.to_string())?,
-            );
-        }
-        let read = async {
-            loop {
-                let prefix = endpoint.tg.call_async(json!({"@type":"getFileDownloadedPrefixSize","file_id":self.id,"offset":self.position}), &endpoint.cancel).await.map_err(|e| e.to_string())?["size"].as_u64().unwrap_or(0);
-                if prefix == 0 {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-                let info = endpoint
-                    .tg
-                    .call_async(
-                        json!({"@type":"getFile","file_id":self.id}),
-                        &endpoint.cancel,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let path = info["local"]["path"].as_str().ok_or("No local file")?;
-                let mut file = tokio::fs::File::open(path)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                file.seek(io::SeekFrom::Start(self.position))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let mut bytes =
-                    vec![0; prefix.min(65536).min(self.end - self.position + 1) as usize];
-                file.read_exact(&mut bytes)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                return Ok::<_, String>(bytes);
-            }
-        };
+        let cancel = self.endpoint.cancel.clone();
         let bytes = tokio::select! {
             biased;
-            _ = endpoint.cancel.cancelled() => return Err("Transfer cancelled".into()),
-            result = tokio::time::timeout(Duration::from_secs(30), read) => result.map_err(|_| "Download stalled".to_owned())??,
+            _ = cancel.cancelled() => return Err("Transfer cancelled".into()),
+            result = tokio::time::timeout(Duration::from_secs(30), self.read()) => result.map_err(|_| "Download stalled".to_owned())??,
         };
         self.position += bytes.len() as u64;
         Ok(bytes)
     }
+    async fn read(&mut self) -> Result<Vec<u8>, String> {
+        let Self {
+            ref endpoint,
+            id,
+            position,
+            end,
+            ..
+        } = *self;
+        let lease = match &mut self.lease {
+            Some(lease) => lease,
+            slot @ None => slot.insert(
+                endpoint
+                    .tg
+                    .begin_download(id, position, false, &endpoint.cancel)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            ),
+        };
+        let mut refresh_path = true;
+        let mut check = tokio::time::interval(Duration::from_millis(100));
+        check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            let state = lease.state.borrow_and_update().clone();
+            let prefix = if state.complete {
+                end - position + 1
+            } else {
+                let known = if state.offset <= position {
+                    state.available_until
+                } else {
+                    0
+                };
+                let confirmed = self
+                    .confirmed
+                    .as_ref()
+                    .filter(|(source, _)| source == &state)
+                    .map_or(0, |(_, end)| *end);
+                known.max(confirmed).saturating_sub(position)
+            };
+            if let Some(path) = state.path.as_deref().filter(|_| prefix > 0) {
+                let mut bytes = vec![0; prefix.min(65536).min(end - position + 1) as usize];
+                match read_chunk(&mut self.file, path, position, &mut bytes).await {
+                    Ok(()) => return Ok(bytes),
+                    Err(e)
+                        if refresh_path
+                            && matches!(
+                                e.kind(),
+                                io::ErrorKind::NotFound | io::ErrorKind::UnexpectedEof
+                            ) =>
+                    {
+                        refresh_path = false;
+                        self.file = None;
+                        self.confirmed = None;
+                        endpoint
+                            .tg
+                            .call_async(json!({"@type":"getFile","file_id":id}), &endpoint.cancel)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        continue;
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            tokio::select! {
+                biased;
+                _ = check.tick() => {
+                    let prefix = endpoint.tg.call_async(json!({"@type":"getFileDownloadedPrefixSize","file_id":id,"offset":position}), &endpoint.cancel).await.map_err(|e| e.to_string())?["size"].as_u64().unwrap_or_default();
+                    if prefix > 0 {
+                        let latest = lease.state.borrow().clone();
+                        if latest.path.is_none() {
+                            endpoint.tg.call_async(json!({"@type":"getFile","file_id":id}), &endpoint.cancel).await.map_err(|e| e.to_string())?;
+                        } else if latest == state {
+                            self.confirmed = Some((state, position.saturating_add(prefix)));
+                        }
+                    }
+                }
+                changed = lease.state.changed() => changed.map_err(|_| "Download closed".to_owned())?,
+            }
+        }
+    }
+}
+
+async fn read_chunk(
+    open: &mut Option<(String, tokio::fs::File)>,
+    path: &str,
+    position: u64,
+    bytes: &mut [u8],
+) -> io::Result<()> {
+    if open.as_ref().is_none_or(|(current, _)| current != path) {
+        let mut file = tokio::fs::File::open(path).await?;
+        file.seek(io::SeekFrom::Start(position)).await?;
+        *open = Some((path.into(), file));
+    }
+    open.as_mut().unwrap().1.read_exact(bytes).await?;
+    Ok(())
 }
 fn parse_range(range: Option<&str>, size: u64) -> Result<(u64, u64), String> {
     if size == 0 {

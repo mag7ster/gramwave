@@ -7,6 +7,7 @@ use tg_player_domain::{RepeatMode, Session};
 #[serde(default)]
 pub struct Settings {
     pub chat_pins: Vec<i64>,
+    pub last_opened_chat: Option<i64>,
     pub repeat: RepeatMode,
     pub shuffle: bool,
     pub volume: f32,
@@ -25,6 +26,7 @@ impl From<&State> for Settings {
     fn from(s: &State) -> Self {
         Self {
             chat_pins: s.chat_pins.clone(),
+            last_opened_chat: s.last_opened_chat,
             repeat: s.repeat,
             shuffle: s.shuffle,
             volume: s.volume,
@@ -39,6 +41,7 @@ impl From<&State> for Settings {
 impl Settings {
     pub fn apply(self, s: &mut State) {
         s.chat_pins = self.chat_pins;
+        s.last_opened_chat = self.last_opened_chat;
         s.repeat = self.repeat;
         s.shuffle = self.shuffle;
         s.volume = self.volume;

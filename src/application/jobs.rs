@@ -30,28 +30,34 @@ impl App {
         {
             Ok(job) => {
                 let tx = self.tx.clone();
+                let wake = self.wake.clone();
                 self.tasks.watch(job, move |result| {
                     let event = match result {
                         Ok(event) => event,
                         Err(error) => failed(error),
                     };
-                    let _ = tx.send(event);
+                    if tx.send(event).is_ok() {
+                        wake.wake();
+                    }
                 });
             }
             Err(error) => {
-                let _ = self.tx.send(failed(error));
+                if self.tx.send(failed(error)).is_ok() {
+                    self.wake.wake();
+                }
             }
         }
     }
-    pub(crate) fn pump_offline(&mut self) {
+    pub(crate) fn pump_offline(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
         if self.quitting {
-            return;
+            return None;
         }
         let online = !self.demo
             && self.tg.is_some()
             && *self.state.auth().state()
                 == tg_player_application::telegram::AuthorizationState::Ready;
-        let effects = self.state.pump(std::time::Instant::now(), online);
+        let effects = self.state.pump(now, online);
         self.run_effects(effects);
+        self.state.offline().retry_deadline(now, online)
     }
 }

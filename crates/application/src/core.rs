@@ -86,6 +86,38 @@ impl AppCore {
     pub fn view(&self) -> &State {
         &self.state
     }
+    pub fn save_playback_position(&mut self, snapshot: crate::ports::PlayerSnapshot) {
+        use crate::playback::PlaybackState;
+        let Some(current) = self.state.session.current() else {
+            return;
+        };
+        if !matches!(
+            self.playback.state,
+            PlaybackState::Playing | PlaybackState::Paused
+        ) || !self
+            .playback
+            .target
+            .as_ref()
+            .is_some_and(|track| track.entry_id == current.entry_id)
+        {
+            return;
+        }
+        let Some(position) = snapshot
+            .checkpoint_position
+            .filter(|position| position.is_finite() && *position >= 0. && !snapshot.seeking)
+        else {
+            return;
+        };
+        let position_ms = if snapshot.duration > 0. && position >= snapshot.duration {
+            0
+        } else {
+            (position * 1000.).round() as u64
+        };
+        if position_ms != self.state.session.position_ms() {
+            self.state.session.set_position_ms(position_ms);
+            self.pending.session = Some(self.state.session.clone());
+        }
+    }
     pub fn library_version(&self) -> u64 {
         self.library.version()
     }

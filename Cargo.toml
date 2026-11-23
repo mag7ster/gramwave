@@ -10,9 +10,10 @@ members = ["crates/domain", "crates/application"]
 resolver = "2"
 
 [features]
-default = ["telegram"]
+default = ["telegram", "vulkan"]
 native-tests = []
 telegram = ["dep:tdlib-rs"]
+vulkan = ["eframe/wgpu_no_default_features", "dep:wgpu"]
 
 [dependencies]
 tg-player-domain = { path = "crates/domain" }
@@ -37,12 +38,21 @@ fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" 
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 
 fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+fastframe-titlebar = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 fastframe-instance = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 egui_extras = { version = "0.36.2", features = ["svg", "image", "file"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", features = ["blocking"] }
+raw-window-handle = "0.6"
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wgpu = { version = "30.0", default-features = false, features = ["vulkan"], optional = true }
+winit = { version = "0.30", default-features = false }
 
 [build-dependencies]
 tdlib-rs = { version = "=1.4.0", optional = true, features = ["download-tdlib"] }

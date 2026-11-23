@@ -7,7 +7,7 @@ pub enum PlaybackEvent {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {
-    Load(String),
+    Load { path: String, start_ms: u64 },
     Pause(bool),
     Stop,
     Seek(f64),
@@ -18,6 +18,10 @@ pub struct PlayerSnapshot {
     pub paused: bool,
     pub seeking: bool,
     pub position: f64,
+    /// Playback time from the audio output clock, when available.
+    pub audio_position: Option<f64>,
+    /// Confirmed timeline position of the current load after initial playback or seeking has settled.
+    pub checkpoint_position: Option<f64>,
     pub duration: f64,
     pub volume: f64,
 }

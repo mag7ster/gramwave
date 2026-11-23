@@ -163,6 +163,7 @@ self.execute(crate::application::commands::AppCommand::Authenticate(if email {Au
 let wait=self.resend_at.map(|t|t.saturating_duration_since(std::time::Instant::now()).as_secs()).unwrap_or(0);
 if self.state.auth().state().can_resend(){
 if wait>0{
+ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
 ui.weak(tr("Resend available in {seconds}s").replace("{seconds}",&wait.to_string()));
 }
 else if ui.button(tr("Resend code")).clicked(){

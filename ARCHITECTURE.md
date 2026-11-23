@@ -47,6 +47,10 @@ across restart and requeue. A page's jobs and both scan cursors commit together.
 Completing one of 10,000 downloads writes a copy and deletes one job, without
 serializing or querying the entire backlog.
 
+On normal exit the app captures the playback position before stopping the player
+and saves it with the queue in the session document. The session restores paused
+and Play loads the current occurrence at its saved position.
+
 Pending changes coalesce by entity before a flush barrier. The UI retains rejected
 changes and retries them on a later command; rejection does not recursively
 resubmit the same write. Flush acknowledges prior writes and returns write, closure or timeout
@@ -77,6 +81,9 @@ unchanged through the scheduler. Panics, cancellation and overload produce addre
 terminal delivery is tracked through shutdown. Progress uses a replaceable slot.
 The UI processes bounded batches and caches filtered/sorted playlist views by
 library, media and offline versions plus search and sort parameters.
+Producers publish before waking the desktop shell. The main loop waits for
+events or the next deadline for playback position, search, retries or visible
+timed UI. On Linux the same waker interrupts the shell's wait in the tray.
 
 SQLite, TDLib receiving and mpv have dedicated owner threads. Telegram's managed
 transport uses oneshot responses, a 60-second RPC deadline and short receive
@@ -92,15 +99,20 @@ executes commands and samples native properties outside the snapshot mutex.
 A brief lock publishes a complete typed snapshot; readers never wait for native
 property calls. Submission and native failures use AppError. Commands/events are correlated with
 loads and mpv playlist entry IDs, so stale EOF and manual Stop cannot advance a
-new queue entry. Initialization errors retain the original cause.
+new queue entry. Native events and submitted commands wake the owner. The
+owner only samples position on a timer while playing or seeking. Initialization
+errors retain the original cause.
 
 HTTP uses axum on 127.0.0.1 with a random port and a getrandom token. GET and HEAD
 support single byte ranges via http-range-header. Unsatisfiable ranges return 416;
 multiple ranges are ignored with a full 200 response. HEAD never downloads a body.
 Four transfers may be active with sixteen additional admitted requests. Permits
 live with response bodies. Partial-file reads observe cancellation and a 30-second
-no-progress timeout. Download leases coordinate streaming and offline consumers;
-release cancels the TDLib transfer only when its last consumer disappears.
+no-progress timeout. Each body keeps its file open until TDLib changes the path.
+Latest-state subscriptions to TDLib file updates cover the known contiguous
+downloaded range. A prefix query checks other offsets and backs up waits for
+missing data. Download leases coordinate streaming and offline consumers. Release
+cancels the TDLib transfer only when its last consumer disappears.
 
 Shutdown stops commands, cancels operations, stops streaming/mpv, closes Telegram,
 awaits task results and flushes/stops the repository against one 15-second deadline.

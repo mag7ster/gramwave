@@ -177,38 +177,41 @@ impl App {
                     return;
                 };
                 let tx = self.tx.clone();
+                let wake = self.wake.clone();
                 let cancel = operation.cancel.clone();
                 self.operation_event(
                     JobClass::Background,
                     operation,
                     async move {
+                        let publish = |event| {
+                            if tx
+                                .send(Event::Application(AppEvent::Library(event)))
+                                .is_ok()
+                            {
+                                wake.wake();
+                            }
+                        };
                         if refresh && playlist.url.is_empty() {
                             if let Ok(url) = tg.chat_url(playlist.id, &cancel).await {
-                                let _ = tx.send(Event::Application(AppEvent::Library(
-                                    LibraryEvent::Patch {
-                                        request,
-                                        patch: LibraryPatch {
-                                            chat: playlist.id,
-                                            url: Some(url),
-                                            ..Default::default()
-                                        }
-                                        .into(),
-                                    },
-                                )));
+                                publish(LibraryEvent::Patch {
+                                    request,
+                                    patch: LibraryPatch {
+                                        chat: playlist.id,
+                                        url: Some(url),
+                                        ..Default::default()
+                                    }
+                                    .into(),
+                                });
                             }
                         }
                         let result = if refresh {
                             crate::discovery::refresh_library(&tg, playlist, &cancel, |patch| {
-                                let _ = tx.send(Event::Application(AppEvent::Library(
-                                    LibraryEvent::Patch { request, patch },
-                                )));
+                                publish(LibraryEvent::Patch { request, patch });
                             })
                             .await
                         } else {
                             crate::discovery::index_library(&tg, playlist, &cancel, |playlist| {
-                                let _ = tx.send(Event::Application(AppEvent::Library(
-                                    LibraryEvent::Page { request, playlist },
-                                )));
+                                publish(LibraryEvent::Page { request, playlist });
                             })
                             .await
                         };
@@ -233,7 +236,9 @@ impl App {
                 });
             }
             LibraryEffect::ForgetArtwork(path) => {
-                let _ = self.tx.send(Event::ForgetArtwork(path));
+                if self.tx.send(Event::ForgetArtwork(path)).is_ok() {
+                    self.wake.wake();
+                }
             }
         }
     }

@@ -72,6 +72,7 @@ pub struct Session {
     order: Vec<QueueEntryId>,
     remaining: Vec<QueueEntryId>,
     current: Option<QueueEntryId>,
+    position_ms: u64,
     history: Vec<QueueEntryId>,
     preceding: Vec<QueueEntryId>,
     pub source: Option<i64>,
@@ -99,11 +100,25 @@ impl Session {
     pub fn current(&self) -> Option<&QueueEntry> {
         self.current.map(|id| &self.entries[&id])
     }
+    pub fn position_ms(&self) -> u64 {
+        self.position_ms
+    }
+    pub fn set_position_ms(&mut self, position_ms: u64) {
+        self.position_ms = if self.current.is_some() {
+            position_ms
+        } else {
+            0
+        };
+    }
     pub fn stop(&mut self) {
         self.current = None;
+        self.position_ms = 0;
         self.collect();
     }
     pub fn set_current(&mut self, track: TrackMetadata, entry_id: QueueEntryId) {
+        if self.current != Some(entry_id) {
+            self.position_ms = 0;
+        }
         if self.entries.contains_key(&entry_id) {
             self.current = Some(entry_id);
         } else {
@@ -141,6 +156,7 @@ impl Session {
             .map(|t| self.entry(t.into()))
             .collect();
         self.current = Some(self.order[index]);
+        self.position_ms = 0;
         self.remaining = if shuffle {
             self.order
                 .iter()
@@ -247,6 +263,7 @@ impl Session {
         }
         let mut skipped: Vec<_> = self.remaining.drain(..=index).collect();
         let id = skipped.pop()?;
+        self.position_ms = 0;
         if let Some(old) = self.current.replace(id) {
             self.history.push(old);
         }
@@ -254,6 +271,7 @@ impl Session {
         self.current().cloned()
     }
     pub fn advance(&mut self, repeat: RepeatMode, shuffle: bool, eof: bool) -> Option<QueueEntry> {
+        self.position_ms = 0;
         if eof && repeat == RepeatMode::One && self.current.is_some() {
             return self.current().cloned();
         }
@@ -278,6 +296,7 @@ impl Session {
     }
     pub fn previous(&mut self) -> Option<QueueEntry> {
         let id = self.history.pop().or_else(|| self.preceding.pop())?;
+        self.position_ms = 0;
         self.remaining.retain(|old| *old != id);
         if let Some(current) = self.current.replace(id) {
             self.remaining.insert(0, current);
@@ -297,6 +316,8 @@ struct StoredSession {
     order: Vec<QueueEntryId>,
     remaining: Vec<QueueEntryId>,
     current: Option<QueueEntryId>,
+    #[serde(default)]
+    position_ms: u64,
     history: Vec<QueueEntryId>,
     preceding: Vec<QueueEntryId>,
     source: Option<i64>,
@@ -358,6 +379,11 @@ impl<'de> Deserialize<'de> for Session {
                     order: s.order,
                     remaining: s.remaining,
                     current: s.current,
+                    position_ms: if s.current.is_some() {
+                        s.position_ms
+                    } else {
+                        0
+                    },
                     history: s.history,
                     preceding: s.preceding,
                     source: s.source,

@@ -8,8 +8,9 @@ use crate::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    time::Instant,
+    time::{Duration, Instant},
 };
+pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 use tg_player_domain::TrackId;
 
 pub enum LibraryCommand {
@@ -175,6 +176,19 @@ impl LibraryCore {
     }
     pub fn search(&self) -> &SearchState {
         &self.search
+    }
+    pub fn search_deadline(&self) -> Option<Instant> {
+        if self.connected() && !self.search.sent && !self.search.query.is_empty() {
+            self.search.since.map(|since| since + SEARCH_DEBOUNCE)
+        } else {
+            None
+        }
+    }
+    pub fn media_retry_at(&self, id: TrackId) -> Option<Instant> {
+        self.media_retry.get(&id).copied()
+    }
+    pub fn artwork_retry_at(&self, id: i64) -> Option<Instant> {
+        self.artwork_retry.get(&id).copied()
     }
     pub fn revision(&self, id: TrackId) -> u64 {
         self.revisions.get(&id).copied().unwrap_or(0)

@@ -53,7 +53,7 @@ impl AppCore {
                     && (!self.library.search.sent || force)
                     && (force
                         || self.library.search.since.is_none_or(|since| {
-                            now.saturating_duration_since(since) >= Duration::from_millis(250)
+                            now.saturating_duration_since(since) >= crate::library::SEARCH_DEBOUNCE
                         }))
                 {
                     if let Some(op) = self.library.search.operation.take() {
@@ -554,6 +554,10 @@ mod tests {
             })
             .is_empty());
         assert!(!core.library.search.loading());
+        assert_eq!(
+            core.library.search_deadline(),
+            Some(now + crate::library::SEARCH_DEBOUNCE)
+        );
         let effects = core.library_command(LibraryCommand::Search {
             query: "radio".into(),
             now: now + Duration::from_millis(250),
@@ -576,6 +580,7 @@ mod tests {
             result: Err(AppError::Cancelled),
         });
         assert!(core.library.search.loading());
+        assert_eq!(core.library.search_deadline(), None);
         assert!(core.library.search.error.is_none());
         core.library_command(LibraryCommand::Search {
             query: String::new(),

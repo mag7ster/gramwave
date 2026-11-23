@@ -3,13 +3,79 @@ use crate::{design, tr, App, RepeatMode};
 use design::{button, Icon};
 use eframe::egui;
 use std::time::Duration;
+use tg_player_domain::{playback::QueueView, QueueEntryId};
+
+const TRACK_SCROLL_GUTTER: i8 = 12;
+const TRACK_ROW_PADDING: f32 = 4.;
+
 impl App {
+    fn apply_application_menu(
+        &mut self,
+        ctx: &egui::Context,
+        action: Option<ApplicationMenuAction>,
+    ) {
+        match action {
+            Some(ApplicationMenuAction::Settings) => self.settings_open = true,
+            Some(ApplicationMenuAction::Quit) => {
+                self.execute(AppCommand::Quit);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            None => {}
+        }
+    }
+
+    fn chat_search(&mut self, ui: &mut egui::Ui) {
+        let (rect, field) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.), egui::Sense::CLICK);
+        let p = design::colors(ui);
+        ui.painter().rect_filled(rect, 9., p.raised);
+
+        let mut row = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect.shrink2(egui::vec2(8., 2.)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        row.spacing_mut().item_spacing.x = 6.;
+        row.spacing_mut().button_padding = egui::Vec2::splat(7.);
+        row.add(Icon::Search.image(p.muted, 18.));
+        let width = (row.available_width() - 30. - row.spacing().item_spacing.x).max(0.);
+        let edit = row.add(
+            egui::TextEdit::singleline(&mut self.chat_query)
+                .id(egui::Id::new("chat-search"))
+                .hint_text(tr("Find a chat"))
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .vertical_align(egui::Align::Center)
+                .desired_width(width)
+                .min_size(egui::vec2(width, 36.)),
+        );
+        if field.clicked() {
+            edit.request_focus();
+        }
+        if field.clicked() || edit.clicked() || edit.gained_focus() {
+            self.chat_search_active = true;
+        }
+        if self.chat_search_active {
+            let label = tr("Close search");
+            let close = row.add(
+                egui::Button::image(Icon::Close.image(p.muted, 16.).alt_text(&label))
+                    .frame_when_inactive(false)
+                    .min_size(egui::vec2(30., 36.)),
+            );
+            if close.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.chat_search_active = false;
+                self.chat_query.clear();
+                edit.surrender_focus();
+            }
+        }
+    }
+
     pub(crate) fn render(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
         self.image_wanted.clear();
         self.track_wanted.clear();
         design::style(&ctx, self.state.view().light);
-        self.poll_chat_search(&ctx);
+        root.set_style(ctx.global_style());
         if !self.settings_open
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
@@ -21,11 +87,26 @@ impl App {
             self.quitting = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if self.options.preview_auth.is_some()
+        let needs_auth = self.options.preview_auth.is_some()
             || (!self.demo
                 && *self.state.auth().state()
-                    != tg_player_application::telegram::AuthorizationState::Ready)
-        {
+                    != tg_player_application::telegram::AuthorizationState::Ready);
+        let header_height = if fastframe_titlebar::visible(&ctx) {
+            let action = window_header(
+                root,
+                self.state
+                    .view()
+                    .session
+                    .current()
+                    .map(|track| track.title.as_str()),
+                !needs_auth,
+            );
+            self.apply_application_menu(&ctx, action);
+            design::HEADER_HEIGHT
+        } else {
+            0.
+        };
+        if needs_auth {
             egui::CentralPanel::default().show(root, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(50.);
@@ -60,7 +141,11 @@ impl App {
             .show(root, |ui| {
                 self.transport(ui);
             });
-        if ctx.content_rect().width() < 750. {
+        const PLAYLIST_MIN_WIDTH: f32 = 400.;
+        const QUEUE_MIN_WIDTH: f32 = 250.;
+        let window_width = ctx.content_rect().width();
+        let dock_queue = window_width >= 1040.;
+        if window_width < 750. {
             egui::Panel::top("compact-library").show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.menu_button(tr("Your library"), |ui| {
@@ -79,66 +164,29 @@ impl App {
                             ui.close();
                         }
                     });
-                    if button(ui, Icon::Settings, "Settings") {
-                        self.settings_open = true;
+                    if header_height == 0. {
+                        let (_, action) = application_menu(ui, true);
+                        self.apply_application_menu(&ctx, action);
                     }
-                    ui.menu_button("…", |ui| {
-                        if ui.button(tr("Quit Gramwave")).clicked() {
-                            self.quitting = true;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
                 });
             });
         } else {
+            let reserved_width = PLAYLIST_MIN_WIDTH + if dock_queue { QUEUE_MIN_WIDTH } else { 0. };
             egui::Panel::left("sidebar")
-                .exact_size(if ctx.content_rect().width() < 1000. {
-                    200.
-                } else {
-                    232.
-                })
+                .default_size(if window_width < 1000. { 200. } else { 232. })
+                .size_range(180. ..=(window_width - reserved_width).min(400.))
                 .frame(
                     egui::Frame::new()
                         .fill(design::palette(self.state.view().light).panel)
                         .inner_margin(16.),
                 )
                 .show(root, |ui| {
-                    ui.add_space(8.);
-                    ui.heading(egui::RichText::new("Gramwave").size(23.).strong());
-                    ui.add_space(16.);
-                    ui.horizontal(|ui| {
-                        ui.strong(tr("Your library"));
-                        ui.menu_button("…", |ui| {
-                            if ui.button(tr("Settings")).clicked() {
-                                self.settings_open = true;
-                                ui.close();
-                            }
-                            if ui.button(tr("Quit Gramwave")).clicked() {
-                                self.quitting = true;
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            }
-                        });
-                    });
-                    ui.add_space(12.);
-                    ui.horizontal(|ui| {
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.chat_query)
-                                .id(egui::Id::new("chat-search"))
-                                .hint_text(tr("Find a chat"))
-                                .desired_width(ui.available_width() - 28.),
-                        );
-                        if response.clicked() || response.gained_focus() {
-                            self.chat_search_active = true;
-                        }
-                        if self.chat_search_active
-                            && (button(ui, Icon::Close, "Close search")
-                                || ui.input(|i| i.key_pressed(egui::Key::Escape)))
-                        {
-                            self.chat_search_active = false;
-                            self.chat_query.clear();
-                            response.surrender_focus();
-                        }
-                    });
+                    ui.take_available_width();
+                    if header_height == 0. {
+                        let (_, action) = application_menu(ui, true);
+                        self.apply_application_menu(&ctx, action);
+                    }
+                    self.chat_search(ui);
                     let mut indices = self
                         .state
                         .view()
@@ -186,9 +234,14 @@ impl App {
                                     let p = &self.state.view().playlists[i];
                                     let id = p.id;
                                     let pinned = self.state.view().chat_pins.contains(&id);
+                                    let row_id = ui.id().with(("chat", id));
+                                    let focused = ui.memory(|m| m.has_focus(row_id));
+                                    let colors = design::colors(ui);
                                     let frame = egui::Frame::new()
-                                        .fill(if self.opened_chat == Some(id) {
-                                            design::palette(self.state.view().light).selected
+                                        .fill(if focused {
+                                            colors.raised
+                                        } else if self.opened_chat == Some(id) {
+                                            colors.selected
                                         } else {
                                             egui::Color32::TRANSPARENT
                                         })
@@ -211,24 +264,14 @@ impl App {
                                                     egui::Label::new(
                                                         egui::RichText::new(&p.title).strong(),
                                                     )
-                                                    .truncate(),
+                                                    .truncate()
+                                                    .show_tooltip_when_elided(false),
                                                 );
                                             });
                                         })
                                         .response;
-                                    let response = ui.interact(
-                                        frame.rect,
-                                        ui.id().with(("chat", id)),
-                                        egui::Sense::click(),
-                                    );
-                                    if response.has_focus() {
-                                        ui.painter().rect_stroke(
-                                            response.rect,
-                                            8.,
-                                            egui::Stroke::new(1., design::colors(ui).accent),
-                                            egui::StrokeKind::Inside,
-                                        );
-                                    }
+                                    let response =
+                                        ui.interact(frame.rect, row_id, egui::Sense::click());
                                     if ui.is_rect_visible(response.rect) {
                                         self.image_wanted
                                             .push(self.state.library().playlist_artwork(p.id).file);
@@ -271,36 +314,54 @@ impl App {
                 });
         }
         if self.queue_open {
-            if root.available_width() < 800. {
+            if !dock_queue {
                 let mut open = true;
                 egui::Window::new(tr("Queue"))
+                    .id(egui::Id::new("compact-queue"))
                     .open(&mut open)
                     .default_width(290.)
-                    .max_height((ctx.content_rect().height() - 150.).max(100.))
+                    .min_width(QUEUE_MIN_WIDTH)
+                    .max_width(480.)
+                    .max_height((ctx.content_rect().height() - header_height - 150.).max(100.))
                     .title_bar(false)
                     .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::RIGHT_TOP, [-16., 16.])
-                    .show(&ctx, |ui| self.queue_screen(ui));
+                    .resizable([true, false])
+                    .anchor(egui::Align2::RIGHT_TOP, [-16., header_height + 16.])
+                    .show(&ctx, |ui| {
+                        ui.take_available_width();
+                        self.queue_screen(ui, false);
+                    });
                 if !open {
                     self.queue_open = false;
                 }
             } else {
+                let max_width =
+                    (root.available_width() - PLAYLIST_MIN_WIDTH).clamp(QUEUE_MIN_WIDTH, 480.);
                 egui::Panel::right("queue")
                     .default_size(290.)
+                    .size_range(QUEUE_MIN_WIDTH..=max_width)
                     .frame(
                         egui::Frame::new()
                             .fill(design::palette(self.state.view().light).panel)
-                            .inner_margin(20.),
+                            .inner_margin(egui::Margin {
+                                right: 20 - TRACK_SCROLL_GUTTER,
+                                ..egui::Margin::same(20)
+                            }),
                     )
-                    .show(root, |ui| self.queue_screen(ui));
+                    .show(root, |ui| {
+                        ui.take_available_width();
+                        self.queue_screen(ui, true);
+                    });
             }
         }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(design::palette(self.state.view().light).background)
-                    .inner_margin(24.),
+                    .inner_margin(egui::Margin {
+                        right: 24 - TRACK_SCROLL_GUTTER,
+                        ..egui::Margin::same(24)
+                    }),
             )
             .show(root, |ui| {
                 if ctx.content_rect().height() < 500. {
@@ -313,30 +374,8 @@ impl App {
             });
         self.settings_ui(&ctx);
         self.error_ui(&ctx);
-        if self.status != self.notice {
-            self.notice = self.status.clone();
-            self.notice_until = Some(std::time::Instant::now() + Duration::from_secs(5));
-        }
-        if self
-            .notice_until
-            .is_some_and(|t| t > std::time::Instant::now())
-            && !self.notice.is_empty()
-            && !self.settings_open
-        {
-            egui::Area::new(egui::Id::new("notification"))
-                .anchor(egui::Align2::RIGHT_BOTTOM, [-20., -116.])
-                .order(egui::Order::Foreground)
-                .show(&ctx, |ui| {
-                    egui::Frame::new()
-                        .fill(design::palette(self.state.view().light).raised)
-                        .corner_radius(8)
-                        .inner_margin(14.)
-                        .show(ui, |ui| {
-                            ui.set_max_width(420.);
-                            ui.label(&self.notice);
-                        });
-                });
-        }
+        self.poll_chat_search(&ctx);
+        self.request_visible_media(&ctx);
     }
     fn error_ui(&mut self, ctx: &egui::Context) {
         if !self.error.is_empty() {
@@ -364,14 +403,17 @@ impl App {
         }
     }
     fn transport(&mut self, ui: &mut egui::Ui) {
-        if let Some(t) = self
+        let current = self
             .state
             .view()
             .session
             .current()
-            .map(|t| self.media_track(t.into()))
-        {
+            .map(|t| self.media_track(t.into()));
+        if let Some(t) = &current {
             self.image_wanted.push(t.image_file);
+            if t.file == 0 {
+                self.track_wanted.push(t.clone());
+            }
         }
         ui.spacing_mut().item_spacing.y = 4.;
         ui.add_space(8.);
@@ -396,12 +438,6 @@ impl App {
                 ui.allocate_ui(egui::vec2(metadata_width, 72.), |ui| {
                     ui.set_min_width(metadata_width);
                     ui.horizontal(|ui| {
-                        let current = self
-                            .state
-                            .view()
-                            .session
-                            .current()
-                            .map(|t| self.media_track(t.into()));
                         let t = current.as_ref();
                         art(
                             ui,
@@ -419,14 +455,14 @@ impl App {
                                     .unwrap_or_else(|| tr("Select a track to get started"));
                                 ui.add(
                                     egui::Label::new(egui::RichText::new(&title).strong())
-                                        .truncate(),
-                                )
-                                .on_hover_text(title);
+                                        .truncate()
+                                        .show_tooltip_when_elided(false),
+                                );
                                 ui.add(
                                     egui::Label::new(egui::RichText::new(&artist).weak())
-                                        .truncate(),
-                                )
-                                .on_hover_text(artist);
+                                        .truncate()
+                                        .show_tooltip_when_elided(false),
+                                );
                                 if self.state.playback().state().loading() {
                                     ui.small(tr("Loading track…"));
                                 }
@@ -439,7 +475,7 @@ impl App {
                 ui.set_min_width(center_width);
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {
-                        ui.add_space((center_width - 212.).max(0.) / 2.);
+                        ui.add_space((center_width - 220.).max(0.) / 2.);
                         let shuffle_hint = if self.state.view().shuffle {
                             tr("Shuffle on · Turn off")
                         } else {
@@ -457,7 +493,7 @@ impl App {
                         if button(ui, Icon::Previous, "Previous") {
                             self.execute(AppCommand::Previous);
                         }
-                        if button(
+                        if design::playback_button(
                             ui,
                             if self.state.playback().state().paused()
                                 || self.state.view().session.current().is_none()
@@ -494,43 +530,46 @@ impl App {
                             self.execute(AppCommand::Repeat(self.state.view().repeat.next()));
                         }
                     });
-                    let duration = if self.state.playback().state().loading() {
+                    let playback = self.state.playback().state();
+                    let snapshot = self
+                        .player
+                        .as_ref()
+                        .map(|player| player.snapshot())
+                        .unwrap_or_default();
+                    let current = self.state.view().session.current();
+                    let restored = self.restored_position(snapshot);
+                    let duration = if restored.is_some() {
+                        current.map_or(0., |track| track.duration as f64)
+                    } else if playback.loading() {
                         0.
+                    } else if self.demo {
+                        current.as_ref().map_or(0., |track| track.duration as f64)
                     } else {
-                        self.player
-                            .as_ref()
-                            .map(|p| p.snapshot().duration)
-                            .unwrap_or(0.)
+                        snapshot.duration
                     };
-                    let duration = if self.demo {
-                        self.state
-                            .view()
-                            .session
-                            .current()
-                            .as_ref()
-                            .map(|t| t.duration as f64)
-                            .unwrap_or(0.)
+                    let has_duration = duration.is_finite() && duration > 0. && current.is_some();
+                    let enabled = restored.is_none() && has_duration;
+                    if enabled && self.player.is_some() && !playback.paused() {
+                        ui.ctx().request_repaint_after(Duration::from_millis(16));
+                    }
+                    let position = if let Some(position) = restored {
+                        position
+                    } else if enabled {
+                        let sampled = if snapshot.seeking {
+                            snapshot.position
+                        } else {
+                            snapshot.audio_position.unwrap_or(snapshot.position)
+                        };
+                        sampled.max(0.).min(duration)
                     } else {
-                        duration
-                    };
-                    let pos = if self.state.playback().state().loading() {
                         0.
-                    } else {
-                        self.player
-                            .as_ref()
-                            .map(|p| p.snapshot().position)
-                            .unwrap_or(0.)
                     };
-                    let mut preview = self.seek_preview.unwrap_or(pos);
+                    let mut preview = self.seek_preview.unwrap_or(position);
                     ui.horizontal(|ui| {
                         ui.add_sized(
                             [42., 28.],
                             egui::Label::new(egui::RichText::new(clock(preview)).small()),
                         );
-                        let enabled = duration.is_finite()
-                            && duration > 0.
-                            && self.state.view().session.current().is_some()
-                            && !self.state.playback().state().loading();
                         let response = ui
                             .add_enabled_ui(enabled, |ui| {
                                 ui.push_id(("seek", self.state.playback().generation()), |ui| {
@@ -560,7 +599,7 @@ impl App {
                         {
                             self.execute(AppCommand::Seek(preview));
                         }
-                        ui.small(if enabled {
+                        ui.small(if has_duration {
                             clock(duration)
                         } else {
                             "—:—".into()
@@ -647,11 +686,19 @@ impl App {
         let title = p.title.clone();
         let artwork = self.state.library().playlist_artwork(p.id).path;
         let url = p.url.clone();
+        let can_play = p
+            .tracks
+            .iter()
+            .any(|track| p.filters[usize::from(track.kind)]);
 
         egui::Frame::new()
             .fill(design::palette(self.state.view().light).panel)
             .corner_radius(12)
             .inner_margin(16.)
+            .outer_margin(egui::Margin {
+                right: TRACK_SCROLL_GUTTER,
+                ..egui::Margin::ZERO
+            })
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -676,8 +723,7 @@ impl App {
                             ui.available_width(),
                         );
                         job.wrap.max_rows = 2;
-                        job.wrap.break_anywhere = true;
-                        ui.label(job).on_hover_text(&title);
+                        ui.add(egui::Label::new(job).show_tooltip_when_elided(false));
                     });
                 });
             });
@@ -686,21 +732,14 @@ impl App {
         let mut play_all = false;
         let mut pin_all = false;
         ui.horizontal_wrapped(|ui| {
-            play_all = ui
-                .add(
-                    egui::Button::image(Icon::Play.image(
-                        if self.state.view().light {
-                            egui::Color32::WHITE
-                        } else {
-                            egui::Color32::BLACK
-                        },
-                        22.,
-                    ))
-                    .fill(design::palette(self.state.view().light).accent)
-                    .corner_radius(30)
-                    .min_size(egui::vec2(44., 44.)),
-                )
-                .clicked();
+            let play = ui.add_enabled_ui(can_play, |ui| {
+                design::playback_button(ui, Icon::Play, "Play all")
+            });
+            play_all = play.inner;
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(egui::Id::new("test-play-all"), play.response.rect)
+            });
             if ui
                 .button(if self.state.view().chat_pins.contains(&chat_id) {
                     tr("Unpin chat")
@@ -764,10 +803,7 @@ impl App {
         }
         let tracks = self.playlist_tracks(selected);
         if play_all {
-            self.execute(AppCommand::StartSession(
-                tracks.iter().map(|t| t.metadata()).collect(),
-                0,
-            ));
+            self.play_playlist_from(selected, None);
         }
         if pin_all {
             self.execute(AppCommand::SavePlaylist(
@@ -782,6 +818,10 @@ impl App {
                     ui.spinner();
                     ui.small(tr("Loading music from this chat…"));
                 });
+            } else if !self.settings_open {
+                if let Some(notice) = self.inline_notice(ui.ctx(), false) {
+                    ui.weak(notice);
+                }
             }
         });
         if tracks.is_empty() {
@@ -806,9 +846,11 @@ impl App {
             }
         }
         let mut action = None;
-        let scroll = egui::ScrollArea::vertical()
+        let mut list_frame = track_list_frame().begin(ui);
+        let list_ui = &mut list_frame.content_ui;
+        let scroll = track_scroll_area(list_ui)
             .id_salt(("playlist-tracks", chat_id))
-            .show_rows(ui, design::ROW_HEIGHT, tracks.len(), |ui, range| {
+            .show_rows(list_ui, design::ROW_HEIGHT, tracks.len(), |ui, range| {
                 for i in range {
                     let t = &tracks[i];
                     self.image_wanted.push(t.image_file);
@@ -838,11 +880,11 @@ impl App {
                         response.hovered(),
                         0.14,
                     );
-                    if active || hover > 0. {
+                    if active || response.has_focus() || hover > 0. {
                         ui.painter().rect_filled(
                             rect,
                             8.,
-                            if active {
+                            if active || response.has_focus() {
                                 p.selected
                             } else {
                                 p.raised.gamma_multiply(hover)
@@ -859,18 +901,10 @@ impl App {
                             p.accent,
                         );
                     }
-                    if response.has_focus() {
-                        ui.painter().rect_stroke(
-                            rect,
-                            8.,
-                            egui::Stroke::new(1., p.accent),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
                     let mut menu_clicked = false;
                     ui.scope_builder(
                         egui::UiBuilder::new()
-                            .max_rect(rect.shrink2(egui::vec2(8., 6.)))
+                            .max_rect(rect.shrink2(egui::vec2(TRACK_ROW_PADDING, 6.)))
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         |ui| {
                             let indicator = if active {
@@ -884,7 +918,7 @@ impl App {
                             } else {
                                 None
                             }
-                            .map_or_else(|| (i + 1).to_string(), str::to_owned);
+                            .map_or_else(|| t.playlist_number.to_string(), str::to_owned);
                             ui.add_sized(
                                 [22., 36.],
                                 egui::Label::new(egui::RichText::new(indicator).color(if active {
@@ -893,9 +927,10 @@ impl App {
                                     p.muted
                                 })),
                             );
+                            let cover_left = ui.next_widget_position().x;
                             art(ui, &t.title, t.image_path.as_deref(), 44.);
                             let offline = if t.pinned.is_some() {
-                                Some(("✓", tr("Saved offline")))
+                                Some("✓")
                             } else if self
                                 .state
                                 .offline()
@@ -903,19 +938,19 @@ impl App {
                                 .values()
                                 .any(|p| p.id() == t.id())
                             {
-                                Some(("↓", tr("Downloading…")))
+                                Some("↓")
                             } else if self
                                 .state
                                 .offline()
                                 .errors()
                                 .contains_key(&(t.chat, t.message))
                             {
-                                Some(("!", tr("Download failed · Save offline to retry")))
+                                Some("!")
                             } else {
                                 None
                             };
-                            if let Some((mark, hint)) = offline {
-                                let pos = egui::pos2(rect.left() + 78., rect.bottom() - 10.);
+                            if let Some(mark) = offline {
+                                let pos = egui::pos2(cover_left + 40., rect.bottom() - 10.);
                                 ui.painter().circle_filled(pos, 9., p.panel);
                                 ui.painter().text(
                                     pos,
@@ -924,12 +959,6 @@ impl App {
                                     egui::FontId::proportional(12.),
                                     p.accent,
                                 );
-                                ui.interact(
-                                    egui::Rect::from_center_size(pos, egui::vec2(18., 18.)),
-                                    response.id.with("offline"),
-                                    egui::Sense::hover(),
-                                )
-                                .on_hover_text(hint);
                             }
                             track_labels(ui, &t.title, &t.artist, active);
                             ui.add_sized(
@@ -990,15 +1019,18 @@ impl App {
                                         ui.label(error.to_string());
                                     }
                                 };
-                                let menu = ui.menu_button("…", &mut contents);
+                                let (menu, popup) =
+                                    egui::containers::menu::MenuButton::from_button(
+                                        egui::Button::new("…").min_size(egui::Vec2::splat(36.)),
+                                    )
+                                    .ui(ui, &mut contents);
                                 response.context_menu(&mut contents);
                                 #[cfg(test)]
-                                self.test_rows.insert(t.message, (rect, menu.response.rect));
+                                self.test_rows.insert(t.message, (rect, menu.rect));
                                 #[cfg(test)]
                                 self.test_row_ids.insert(t.message, response.id);
-                                menu_clicked = menu.response.contains_pointer()
-                                    || menu.response.has_focus()
-                                    || menu.inner.is_some();
+                                menu_clicked =
+                                    menu.contains_pointer() || menu.has_focus() || popup.is_some();
                             });
                         },
                     );
@@ -1016,6 +1048,10 @@ impl App {
                     }
                 }
             });
+        list_frame.end(ui);
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::new("test-playlist-scroll"), scroll.id));
         design::middle_scroll(ui, scroll.id, scroll.inner_rect, scroll.content_size.y);
         let more = self.state.view().playlists[selected].has_more();
         if more && self.state.library().indexing_chat().is_none() && !self.demo {
@@ -1028,10 +1064,7 @@ impl App {
         }
         if let Some((kind, i)) = action {
             match kind {
-                0 => self.execute(AppCommand::StartSession(
-                    tracks.iter().map(|t| t.metadata()).collect(),
-                    i,
-                )),
+                0 => self.play_playlist_from(selected, Some(tracks[i].library_id)),
                 6 => self.execute(AppCommand::SelectPlaylistRow(i)),
                 5 => ui.ctx().copy_text(tracks[i].title.clone()),
                 1 => self.execute(AppCommand::Insert(tracks[i].metadata(), true)),
@@ -1043,9 +1076,153 @@ impl App {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplicationMenuAction {
+    Settings,
+    Quit,
+}
+
+fn application_menu(
+    ui: &mut egui::Ui,
+    settings_available: bool,
+) -> (egui::Rect, Option<ApplicationMenuAction>) {
+    let label = tr("Gramwave menu");
+    let (response, menu) = ui
+        .scope(|ui| {
+            ui.spacing_mut().button_padding = egui::Vec2::splat(6.);
+            let icon = egui::Image::from_bytes("bytes://gramwave-window.svg", design::APP_ICON)
+                .fit_to_exact_size(egui::Vec2::splat(24.))
+                .alt_text(&label);
+            egui::containers::menu::MenuButton::from_button(
+                egui::Button::image(icon).frame_when_inactive(false),
+            )
+            .ui(ui, |ui| {
+                let action = if settings_available && ui.button(tr("Settings")).clicked() {
+                    Some(ApplicationMenuAction::Settings)
+                } else if ui.button(tr("Quit Gramwave")).clicked() {
+                    Some(ApplicationMenuAction::Quit)
+                } else {
+                    None
+                };
+                if action.is_some() {
+                    ui.close();
+                }
+                action
+            })
+        })
+        .inner;
+    (response.rect, menu.and_then(|menu| menu.inner))
+}
+
+fn track_scroll_area(ui: &mut egui::Ui) -> egui::ScrollArea {
+    let scroll = &mut ui.spacing_mut().scroll;
+    scroll.floating = false;
+    scroll.bar_inner_margin = 4.;
+    scroll.bar_width = f32::from(TRACK_SCROLL_GUTTER) - scroll.bar_inner_margin;
+    scroll.bar_outer_margin = 0.;
+    egui::ScrollArea::vertical().auto_shrink([false, true])
+}
+
+fn track_list_frame() -> egui::Frame {
+    egui::Frame::NONE.inner_margin(egui::Margin {
+        left: -8,
+        right: -4,
+        ..egui::Margin::ZERO
+    })
+}
+
+fn window_header(
+    root: &mut egui::Ui,
+    title: Option<&str>,
+    settings_available: bool,
+) -> Option<ApplicationMenuAction> {
+    let p = design::colors(root);
+    egui::Panel::top("window-header")
+        .exact_size(design::HEADER_HEIGHT)
+        .show_separator_line(false)
+        .frame(egui::Frame::new().fill(p.panel))
+        .show(root, |ui| {
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), design::HEADER_HEIGHT),
+                egui::Sense::hover(),
+            );
+            let caption = egui::Rect::from_min_max(
+                rect.left_top() + egui::vec2(8., 4.),
+                rect.right_bottom() - egui::vec2(132., 4.),
+            );
+
+            let mut text_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(caption)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            let (menu_rect, action) = application_menu(&mut text_ui, settings_available);
+            fastframe_titlebar::drag(ui, caption.with_min_x(menu_rect.right()));
+            if let Some(title) = title {
+                let suffix = egui::WidgetText::from(egui::RichText::new("— Gramwave").weak())
+                    .into_galley(
+                        &text_ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Body,
+                    );
+                let title_width = (text_ui.available_width()
+                    - suffix.size().x
+                    - text_ui.spacing().item_spacing.x)
+                    .max(0.);
+                let track = egui::WidgetText::from(egui::RichText::new(title).strong())
+                    .into_galley(
+                        &text_ui,
+                        Some(egui::TextWrapMode::Truncate),
+                        title_width,
+                        egui::TextStyle::Body,
+                    );
+                text_ui.add(egui::Label::new(track).show_tooltip_when_elided(false));
+                text_ui.add(egui::Label::new(suffix));
+            } else {
+                text_ui.strong("Gramwave");
+            }
+
+            let controls_rect = egui::Rect::from_min_max(
+                egui::pos2(caption.right(), rect.top()),
+                rect.right_bottom() - egui::vec2(8., 0.),
+            );
+            let mut controls = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(controls_rect)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            controls.spacing_mut().item_spacing.x = 4.;
+            let maximized = controls.input(|i| i.viewport().maximized.unwrap_or(false));
+            let (icon, label) = if maximized {
+                (Icon::Restore, "Restore window")
+            } else {
+                (Icon::Maximize, "Maximize window")
+            };
+            for (icon, label, command) in [
+                (Icon::Close, "Close window", egui::ViewportCommand::Close),
+                (icon, label, egui::ViewportCommand::Maximized(!maximized)),
+                (
+                    Icon::Minimize,
+                    "Minimize window",
+                    egui::ViewportCommand::Minimized(true),
+                ),
+            ] {
+                if button(&mut controls, icon, label) {
+                    ui.ctx().send_viewport_cmd(command);
+                }
+            }
+            action
+        })
+        .inner
+}
+
 fn track_labels(ui: &mut egui::Ui, title: &str, artist: &str, active: bool) -> egui::Response {
     ui.allocate_ui(
-        egui::vec2((ui.available_width() - 104.).max(40.), 40.),
+        egui::vec2(
+            (ui.available_width() - 44. - 36. - 2. * ui.spacing().item_spacing.x).max(0.),
+            40.,
+        ),
         |ui| {
             ui.set_min_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 4.;
@@ -1056,11 +1233,14 @@ fn track_labels(ui: &mut egui::Ui, title: &str, artist: &str, active: bool) -> e
                     } else {
                         ui.visuals().text_color()
                     }))
-                    .truncate(),
-                )
-                .on_hover_text(title);
-                ui.add(egui::Label::new(egui::RichText::new(artist).weak()).truncate())
-                    .on_hover_text(artist);
+                    .truncate()
+                    .show_tooltip_when_elided(false),
+                );
+                ui.add(
+                    egui::Label::new(egui::RichText::new(artist).weak())
+                        .truncate()
+                        .show_tooltip_when_elided(false),
+                );
             });
         },
     )
@@ -1111,122 +1291,363 @@ fn art(ui: &mut egui::Ui, title: &str, path: Option<&str>, size: f32) {
     cover(ui, title, size);
 }
 
+#[derive(Clone, Copy)]
+struct QueueDrag {
+    entry: QueueEntryId,
+    grab: egui::Vec2,
+    slot: usize,
+}
+
+struct LiftedQueueRow {
+    from: usize,
+    slot: usize,
+    rect: egui::Rect,
+}
+
+fn queue_row_rect(list: egui::Rect, stride: f32, slot: f32) -> egui::Rect {
+    egui::Rect::from_min_size(
+        list.min + egui::vec2(0., stride * slot),
+        egui::vec2(list.width(), design::ROW_HEIGHT),
+    )
+}
+
+fn queue_drag(
+    ui: &egui::Ui,
+    list: egui::Rect,
+    stride: f32,
+    queue: QueueView<'_>,
+    key: egui::Id,
+) -> (Option<LiftedQueueRow>, Option<AppCommand>) {
+    let ctx = ui.ctx();
+    let mut drag = ctx.data(|data| data.get_temp::<QueueDrag>(key));
+    let (down, released, cancelled, origin, pointer, dt) = ui.input(|i| {
+        (
+            i.pointer.primary_down(),
+            i.pointer.primary_released(),
+            !i.focused || i.key_pressed(egui::Key::Escape),
+            i.pointer.press_origin(),
+            i.pointer.interact_pos(),
+            i.stable_dt.min(0.05),
+        )
+    });
+    if drag.is_none() && down {
+        drag = ctx.drag_started_id().zip(origin).and_then(|(id, origin)| {
+            let (slot, track) = queue
+                .iter()
+                .enumerate()
+                .find(|(_, track)| key.with(track.entry_id) == id)?;
+            let response = ctx.read_response(id)?;
+            Some(QueueDrag {
+                entry: track.entry_id,
+                grab: origin - response.rect.min,
+                slot,
+            })
+        });
+    }
+    let Some(mut drag) = drag else {
+        return (None, None);
+    };
+    let id = key.with(drag.entry);
+    let stop = || {
+        ctx.data_mut(|data| data.remove::<QueueDrag>(key));
+        if ctx.is_being_dragged(id) {
+            ctx.stop_dragging();
+        }
+    };
+    let Some((pointer, from)) = pointer.zip(queue.iter().position(|t| t.entry_id == drag.entry))
+    else {
+        stop();
+        return (None, None);
+    };
+    let dragging = down && ctx.is_being_dragged(id);
+    let dropping = released && ctx.drag_stopped_id() == Some(id);
+    if !dragging && !dropping && !cancelled {
+        stop();
+        return (None, None);
+    }
+    let viewport = egui::Rect::from_x_y_ranges(list.x_range(), ui.clip_rect().y_range())
+        .intersect(ui.clip_rect());
+    let inside = viewport.contains(pointer);
+    let rect = egui::Rect::from_min_size(
+        pointer - drag.grab,
+        egui::vec2(list.width(), design::ROW_HEIGHT),
+    );
+    if inside {
+        drag.slot = ((rect.top() - list.top()) / stride).round() as usize;
+    }
+    drag.slot = drag.slot.min(queue.len() - 1);
+    let slot = drag.slot;
+    if cancelled || dropping {
+        stop();
+        // Start the settling animation where the lifted row was released.
+        ctx.animate_value_with_time(id.with("y"), (rect.top() - list.top()) / stride, 0.);
+        ctx.animate_value_with_time(id.with("x"), rect.left() - list.left(), 0.);
+        if !cancelled && inside && from != slot {
+            return (
+                Some(LiftedQueueRow { from, slot, rect }),
+                Some(AppCommand::Move(from, slot + usize::from(slot > from))),
+            );
+        }
+        return (None, None);
+    }
+
+    ctx.data_mut(|data| data.insert_temp(key, drag));
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    if inside {
+        let edge = (viewport.height() / 3.).min(36.);
+        let top = (viewport.top() + edge - pointer.y).max(0.);
+        let bottom = (pointer.y - viewport.bottom() + edge).max(0.);
+        let speed = (bottom - top) * 18.;
+        if (speed < 0. && list.top() < viewport.top())
+            || (speed > 0. && list.bottom() > viewport.bottom())
+        {
+            ui.scroll_with_delta_animation(
+                egui::vec2(0., -speed * dt),
+                egui::style::ScrollAnimation::none(),
+            );
+            ctx.request_repaint();
+        }
+    }
+    (Some(LiftedQueueRow { from, slot, rect }), None)
+}
+
+fn queue_row_contents(ui: &mut egui::Ui, rect: egui::Rect, track: &crate::Track) -> egui::Response {
+    let inset = rect.shrink2(egui::vec2(TRACK_ROW_PADDING, 6.));
+    let center_y = inset.center().y;
+    let cover_pos = egui::pos2(inset.left(), center_y - 22.);
+    let mut cover_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(cover_pos, egui::Vec2::splat(44.))),
+    );
+    art(
+        &mut cover_ui,
+        &track.title,
+        track.image_path.as_deref(),
+        44.,
+    );
+
+    let labels_left = cover_pos.x + 52.;
+    let labels_right = inset.right() - 44.;
+    if labels_right > labels_left {
+        let labels_rect = egui::Rect::from_min_max(
+            egui::pos2(labels_left, center_y - 19.),
+            egui::pos2(labels_right, center_y + 19.),
+        );
+        let mut labels = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(labels_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        labels.set_clip_rect(ui.clip_rect().intersect(labels_rect));
+        labels.spacing_mut().item_spacing.y = 4.;
+        labels.add(
+            egui::Label::new(&track.title)
+                .truncate()
+                .show_tooltip_when_elided(false),
+        );
+        labels.add(
+            egui::Label::new(egui::RichText::new(&track.artist).weak())
+                .truncate()
+                .show_tooltip_when_elided(false),
+        );
+    }
+
+    let label = tr("Queue");
+    let response = ui.place(
+        egui::Rect::from_min_size(
+            egui::pos2(inset.right() - 36., center_y - 18.),
+            egui::Vec2::splat(36.),
+        ),
+        egui::Button::image(
+            Icon::More
+                .image(ui.visuals().text_color(), 18.)
+                .alt_text(&label),
+        )
+        .frame_when_inactive(false)
+        .sense(egui::Sense::click_and_drag()),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
+    });
+    response
+}
+
 impl App {
-    fn queue_screen(&mut self, ui: &mut egui::Ui) {
+    fn queue_screen(&mut self, ui: &mut egui::Ui, extend_rows: bool) {
         ui.horizontal(|ui| {
             ui.heading(tr("Up next"));
-            if button(ui, Icon::Close, "Close queue") {
-                self.queue_open = false;
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if button(ui, Icon::Close, "Close queue") {
+                    self.queue_open = false;
+                }
+            });
         });
         ui.weak(if self.state.view().shuffle {
             tr("Shuffled order")
         } else {
             tr("Playlist order")
         });
-        ui.small(tr("Playback uses the tracks loaded when you started."));
         if ui.button(tr("Clear queue")).clicked() {
             self.execute(AppCommand::Clear);
             self.persist();
         }
-        if let Some(t) = &self.state.view().session.current() {
-            ui.label(format!("{}: {}", tr("Now playing"), t.title));
-        }
         if self.state.view().session.remaining().is_empty() {
             ui.label(tr("Your queue is empty"));
         }
-        let mut play = None;
-        let mut remove = None;
-        let mut up = None;
-        let mut down = None;
-        let mut moved = None;
-        let queue_scroll = egui::ScrollArea::vertical()
+        let mut action = None;
+        #[cfg(test)]
+        self.test_queue_rows.clear();
+        let mut list_frame = if extend_rows {
+            track_list_frame()
+        } else {
+            egui::Frame::NONE
+        }
+        .begin(ui);
+        let list_ui = &mut list_frame.content_ui;
+        let queue_scroll = track_scroll_area(list_ui)
             .id_salt("queue-list")
-            .show(ui, |ui| {
-                for (i, t) in self.state.view().session.remaining().iter().enumerate() {
-                    let context = ui.interact(
-                        egui::Rect::from_min_size(
-                            ui.cursor().min,
-                            egui::vec2(ui.available_width(), 44.),
-                        ),
-                        ui.id().with(("queue-context", t.entry_id)),
-                        egui::Sense::click(),
+            .show(list_ui, |ui| {
+                let queue = self.state.view().session.remaining();
+                let spacing = ui.spacing().item_spacing.y;
+                let stride = design::ROW_HEIGHT + spacing;
+                let (list, _) = ui.allocate_exact_size(
+                    egui::vec2(
+                        ui.available_width(),
+                        (stride * queue.len() as f32 - spacing).max(0.),
+                    ),
+                    egui::Sense::hover(),
+                );
+                let key = ui.id().with("reorder");
+                let (lifted, moved) = queue_drag(ui, list, stride, queue, key);
+                action = moved;
+                let palette = design::colors(ui);
+                if let Some(lifted) = &lifted {
+                    ui.painter().rect_filled(
+                        queue_row_rect(list, stride, lifted.slot as f32),
+                        8.,
+                        palette.raised,
                     );
-                    let row = ui.horizontal(|ui| {
-                        let handle = ui.add(egui::Label::new("⠿").sense(egui::Sense::drag()));
-                        if handle.drag_started() {
-                            handle.dnd_set_drag_payload(i);
+                }
+                // A lifted entry shifts its neighbours by at most one slot.
+                let top = ((ui.clip_rect().top() - list.top()) / stride) as usize;
+                let bottom = ((ui.clip_rect().bottom() - list.top()) / stride).ceil() as usize;
+                let animation_time = ui.style().animation_time;
+                for i in top.saturating_sub(2)..bottom.saturating_add(2).min(queue.len()) {
+                    let entry = &queue[i];
+                    let mut slot = i;
+                    if let Some(lifted) = &lifted {
+                        if i == lifted.from {
+                            continue;
                         }
-                        ui.add_sized(
-                            [20., 36.],
-                            egui::Label::new(
-                                egui::RichText::new((i + 1).to_string()).weak().small(),
-                            ),
-                        );
-                        if button(ui, Icon::Play, "Play") {
-                            play = Some(t.entry_id);
-                        }
-                        ui.allocate_ui(
-                            egui::vec2((ui.available_width() - 50.).max(60.), 44.),
-                            |ui| {
-                                ui.vertical(|ui| {
-                                    ui.add(egui::Label::new(&t.title).truncate())
-                                        .on_hover_text(&t.title);
-                                    ui.add(
-                                        egui::Label::new(egui::RichText::new(&t.artist).weak())
-                                            .truncate(),
-                                    );
-                                });
-                            },
-                        );
-                        let mut contents = |ui: &mut egui::Ui| {
-                            if i > 0 && ui.button(tr("Move up")).clicked() {
-                                up = Some(i);
-                                ui.close();
-                            }
-                            if i + 1 < self.state.view().session.remaining().len()
-                                && ui.button(tr("Move down")).clicked()
-                            {
-                                down = Some(i);
-                                ui.close();
-                            }
-                            if ui.button(tr("Remove")).clicked() {
-                                remove = Some(i);
-                                ui.close();
-                            }
-                        };
-                        ui.menu_button("…", &mut contents);
-                        context.context_menu(&mut contents);
-                    });
-                    if let Some(from) = row.response.dnd_release_payload::<usize>() {
-                        moved = Some((*from, i));
+                        slot -= usize::from(i > lifted.from);
+                        slot += usize::from(slot >= lifted.slot);
                     }
+                    let id = key.with(entry.entry_id);
+                    let y =
+                        ui.ctx()
+                            .animate_value_with_time(id.with("y"), slot as f32, animation_time);
+                    let mut rect = queue_row_rect(list, stride, y);
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    let x = ui
+                        .ctx()
+                        .animate_value_with_time(id.with("x"), 0., animation_time);
+                    rect = rect.translate(egui::vec2(x, 0.));
+                    let track = self.media_track(entry.into());
+                    self.image_wanted.push(track.image_file);
+                    if track.file == 0 {
+                        self.track_wanted.push(track.clone());
+                    }
+                    let row = ui.interact(rect, id, egui::Sense::click_and_drag());
+                    row.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            &track.title,
+                        )
+                    });
+                    if lifted.is_none() && row.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let fill = if row.has_focus() {
+                        palette.selected
+                    } else if row.hovered() {
+                        palette.raised
+                    } else {
+                        palette.panel
+                    };
+                    ui.painter().rect_filled(rect, 8., fill);
+                    let mut row_ui =
+                        ui.new_child(egui::UiBuilder::new().id(id.with("body")).max_rect(rect));
+                    let menu = queue_row_contents(&mut row_ui, rect, &track);
+                    #[cfg(test)]
+                    self.test_queue_rows
+                        .insert(entry.entry_id, (rect, menu.rect, row.id));
+                    if lifted.is_none() && !menu.clicked() && row.clicked() {
+                        action = Some(AppCommand::PlayQueue(entry.entry_id));
+                    }
+                    let mut contents = |ui: &mut egui::Ui| {
+                        if i > 0 && ui.button(tr("Move up")).clicked() {
+                            action = Some(AppCommand::Move(i, i - 1));
+                            ui.close();
+                        }
+                        if i + 1 < queue.len() && ui.button(tr("Move down")).clicked() {
+                            action = Some(AppCommand::Move(i, i + 2));
+                            ui.close();
+                        }
+                        if ui.button(tr("Remove")).clicked() {
+                            action = Some(AppCommand::Remove(i));
+                            ui.close();
+                        }
+                    };
+                    egui::Popup::menu(&menu).show(&mut contents);
+                    row.context_menu(&mut contents);
+                }
+                if let Some(lifted) = lifted {
+                    let track = self.media_track((&queue[lifted.from]).into());
+                    self.image_wanted.push(track.image_file);
+                    let id = key.with("lifted");
+                    let mut overlay = ui.new_child(
+                        egui::UiBuilder::new()
+                            .id(id)
+                            .layer_id(egui::LayerId::new(egui::Order::Tooltip, id))
+                            .max_rect(lifted.rect),
+                    );
+                    overlay.visuals_mut().disabled_alpha = 1.;
+                    overlay.disable();
+                    overlay.set_clip_rect(ui.ctx().content_rect());
+                    overlay.painter().add(
+                        egui::epaint::Shadow {
+                            offset: [0, 5],
+                            blur: 16,
+                            spread: 0,
+                            color: egui::Color32::from_black_alpha(65),
+                        }
+                        .as_shape(lifted.rect, 8),
+                    );
+                    overlay
+                        .painter()
+                        .rect_filled(lifted.rect, 8., palette.raised);
+                    queue_row_contents(&mut overlay, lifted.rect, &track);
                 }
             });
+        list_frame.end(ui);
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::new("test-queue-scroll"), queue_scroll.id));
         design::middle_scroll(
             ui,
             queue_scroll.id,
             queue_scroll.inner_rect,
             queue_scroll.content_size.y,
         );
-        if let Some((from, to)) = moved {
-            self.execute(AppCommand::Move(from, to));
-            self.persist();
-        }
-        if let Some(id) = play {
-            self.execute(AppCommand::PlayQueue(id));
-        }
-        if let Some(i) = remove {
-            self.execute(AppCommand::Remove(i));
-            self.persist();
-        }
-        if let Some(i) = up {
-            self.execute(AppCommand::Move(i, i - 1));
-            self.persist();
-        }
-        if let Some(i) = down {
-            self.execute(AppCommand::Move(i, i + 2));
-            self.persist();
+        if let Some(action) = action {
+            let persist = !matches!(action, AppCommand::PlayQueue(_));
+            self.execute(action);
+            if persist {
+                self.persist();
+            }
         }
     }
 }

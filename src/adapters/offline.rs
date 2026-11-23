@@ -9,7 +9,36 @@ use tg_player_application::{
     AppError,
 };
 use tokio_util::sync::CancellationToken;
-pub(crate) type Progress = Mutex<Option<(u64, String)>>;
+#[derive(Default)]
+pub(crate) struct Progress {
+    latest: Mutex<Option<(u64, String)>>,
+    wake: fastframe_shell::Waker,
+}
+
+impl Progress {
+    pub(crate) fn new(wake: fastframe_shell::Waker) -> Self {
+        Self {
+            wake,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn take(&self) -> Option<(u64, String)> {
+        self.latest.lock().unwrap().take()
+    }
+
+    fn publish(&self, generation: u64, status: String) {
+        let first = self
+            .latest
+            .lock()
+            .unwrap()
+            .replace((generation, status))
+            .is_none();
+        if first {
+            self.wake.wake();
+        }
+    }
+}
 /// Publish a verified file under a unique name; an older attempt cannot overwrite it.
 pub(crate) async fn download(
     downloader: &Telegram,
@@ -73,13 +102,13 @@ async fn wait_for_download(
             if file.complete {
                 return Ok(file);
             }
-            *progress.lock().unwrap() = Some((
+            progress.publish(
                 generation,
                 format!(
                     "Offline: {} · {} / {} bytes",
                     track.title, file.downloaded, file.size,
                 ),
-            ));
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     };
