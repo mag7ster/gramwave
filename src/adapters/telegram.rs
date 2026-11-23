@@ -14,6 +14,10 @@ use tg_player_application::{
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
+#[path = "telegram_cache.rs"]
+mod cache;
+pub(crate) use cache::{CacheCategory, CacheFilter, CacheReport, CacheSelection, CacheStats};
+
 struct Pending {
     deadline: Instant,
     reply: oneshot::Sender<Value>,
@@ -45,6 +49,8 @@ pub struct Telegram {
     stopping: Arc<AtomicBool>,
     worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     downloads: Downloads,
+    cache_access: Arc<tokio::sync::RwLock<()>>,
+    artwork_cache: Arc<tokio::sync::RwLock<()>>,
     resolved: Resolutions,
     pub connection: u64,
 }
@@ -175,6 +181,8 @@ impl Telegram {
                 stopping,
                 worker: Arc::new(Mutex::new(Some(worker))),
                 downloads,
+                cache_access: Default::default(),
+                artwork_cache: Default::default(),
                 resolved,
                 connection,
             },
@@ -314,10 +322,27 @@ impl Telegram {
         file: i64,
         cancel: &CancellationToken,
     ) -> Result<String, AppError> {
+        self.cached_artwork(file, cancel)
+            .await
+            .map(|(path, _)| path)
+    }
+    pub(crate) async fn cached_artwork(
+        &self,
+        file: i64,
+        cancel: &CancellationToken,
+    ) -> Result<(String, tokio::sync::OwnedRwLockReadGuard<()>), AppError> {
+        let cache = self.artwork_cache_read(cancel).await?;
+        let mut pending = CancelCacheDownload {
+            telegram: self,
+            file: Some(file),
+        };
         let value=self.call_async(json!({"@type":"downloadFile","file_id":file,"priority":1,"offset":0,"limit":0,"synchronous":true}),cancel).await?;
+        pending.file = None;
         let file = super::telegram_mapping::file_state(&value);
         if file.complete {
-            file.path.ok_or(AppError::Unavailable("Artwork"))
+            file.path
+                .map(|path| (path, cache))
+                .ok_or(AppError::Unavailable("Artwork"))
         } else {
             Err(AppError::Unavailable("Artwork"))
         }
@@ -329,6 +354,7 @@ impl Telegram {
         full: bool,
         cancel: &CancellationToken,
     ) -> Result<DownloadLease, AppError> {
+        let cache = self.cache_read(cancel).await?;
         let (gate, state) = {
             let mut downloads = self.downloads.lock().unwrap();
             let entry = downloads.entry(file).or_default();
@@ -341,6 +367,7 @@ impl Telegram {
             (entry.gate.clone(), entry.state.subscribe())
         };
         let lease = DownloadLease {
+            _cache: cache,
             tg: self.clone(),
             file,
             full,
@@ -368,12 +395,22 @@ impl Telegram {
         Ok(lease)
     }
     pub(crate) fn configure_cache(&self) {
-        self.request(json!({"@type":"setLogVerbosityLevel","new_verbosity_level":0}));
-        self.request(json!({"@type":"setOption","name":"use_storage_optimizer","value":{"@type":"optionValueBoolean","value":true}}));
-        self.request(json!({"@type":"setOption","name":"storage_max_files_size","value":{"@type":"optionValueInteger","value":2147483648i64}}));
+        self.request(json!({"@type":"setOption","name":"use_storage_optimizer","value":{"@type":"optionValueBoolean","value":false}}));
     }
-    pub(crate) fn prefetch(&self, file: i64) {
-        self.request(json!({"@type":"downloadFile","file_id":file,"priority":1,"offset":0,"limit":1048576,"synchronous":false}));
+    pub(crate) async fn prefetch(&self, file: i64) {
+        let Ok(_cache) = self.cache_access.try_read() else {
+            return;
+        };
+        if self.downloads.lock().unwrap().contains_key(&file) {
+            return;
+        }
+        let mut pending = CancelCacheDownload {
+            telegram: self,
+            file: Some(file),
+        };
+        if self.call_async(json!({"@type":"downloadFile","file_id":file,"priority":1,"offset":0,"limit":1048576,"synchronous":true}), &Default::default()).await.is_ok() {
+            pending.file = None;
+        }
     }
     pub(crate) async fn message_link(
         &self,
@@ -387,14 +424,28 @@ impl Telegram {
             .map(str::to_owned)
             .ok_or(AppError::Unavailable("Message link"))
     }
-    pub(crate) async fn clear_cache(&self, cancel: &CancellationToken) -> Result<(), AppError> {
-        self.call_async(json!({"@type":"optimizeStorage","size":0,"ttl":0,"count":0,"immunity_delay":0,"file_types":[],"chat_ids":[],"exclude_chat_ids":[],"return_deleted_file_statistics":true,"chat_limit":0}),cancel).await.map(|_|())
-    }
     pub fn offline(&self) {
         self.request(json!({"@type":"setOption","name":"online","value":{"@type":"optionValueBoolean","value":false}}));
     }
 }
 type Downloads = Arc<Mutex<HashMap<i64, DownloadEntry>>>;
+
+struct CancelCacheDownload<'a> {
+    telegram: &'a Telegram,
+    file: Option<i64>,
+}
+impl Drop for CancelCacheDownload<'_> {
+    fn drop(&mut self) {
+        if let Some(file) = self.file {
+            let downloads = self.telegram.downloads.lock().unwrap();
+            if !downloads.contains_key(&file) {
+                self.telegram.request(json!({
+                    "@type":"cancelDownloadFile","file_id":file,"only_if_pending":false
+                }));
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct DownloadState {
@@ -450,6 +501,7 @@ struct DownloadEntry {
     state: watch::Sender<DownloadState>,
 }
 pub(crate) struct DownloadLease {
+    _cache: tokio::sync::OwnedRwLockReadGuard<()>,
     offset: u64,
     tg: Telegram,
     file: i64,
@@ -517,6 +569,7 @@ fn privacy_safe(v: &Value) -> bool {
             | "searchPublicChats"
             | "searchChatsOnServer"
             | "getFile"
+            | "getCustomEmojiStickers"
             | "getFileDownloadedPrefixSize"
             | "downloadFile"
             | "cancelDownloadFile"
@@ -524,6 +577,7 @@ fn privacy_safe(v: &Value) -> bool {
             | "getSupergroup"
             | "getUser"
             | "getOption"
+            | "getStorageStatistics"
             | "optimizeStorage"
             | "close"
             | "setLogVerbosityLevel"
@@ -535,11 +589,7 @@ fn privacy_safe(v: &Value) -> bool {
             | "setAuthenticationEmailAddress"
             | "setAuthenticationPhoneNumber"
             | "resendAuthenticationCode"
-    ) || (method == "setOption"
-        && matches!(
-            v["name"].as_str(),
-            Some("use_storage_optimizer" | "storage_max_files_size")
-        ))
+    ) || (method == "setOption" && matches!(v["name"].as_str(), Some("use_storage_optimizer")))
         || (method == "setOption" && v["name"] == "online" && v["value"]["value"] == false)
 }
 
@@ -569,6 +619,8 @@ impl Telegram {
             worker: Default::default(),
             connection: 1,
             downloads,
+            cache_access: Default::default(),
+            artwork_cache: Default::default(),
             resolved: Default::default(),
         }
     }

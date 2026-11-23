@@ -49,7 +49,10 @@ serializing or querying the entire backlog.
 
 On normal exit the app captures the playback position before stopping the player
 and saves it with the queue in the session document. The session restores paused
-and Play loads the current occurrence at its saved position.
+and Play loads the current occurrence at its saved position. Startup selection
+can use either the last opened playlist or the chat of the last loaded track.
+The latter is persisted separately from the session so stopping playback keeps
+the startup choice available.
 
 Pending changes coalesce by entity before a flush barrier. The UI retains rejected
 changes and retries them on a later command; rejection does not recursively
@@ -113,6 +116,16 @@ Latest-state subscriptions to TDLib file updates cover the known contiguous
 downloaded range. A prefix query checks other offsets and backs up waits for
 missing data. Download leases coordinate streaming and offline consumers. Release
 cancels the TDLib transfer only when its last consumer disappears.
+
+TDLib's temporary media cache is measured and trimmed through its storage API.
+The desktop serializes cleanup with statistics reads. Audio and artwork use
+separate cache leases. Manual cleanup runs available categories and retains the
+rest until their leases and any active Telegram stream release access. mpv keeps
+an opened local file usable while its cache path is removed. SQLite,
+authorization data and published offline copies are outside the cleanup scope.
+Custom emoji use the same temporary media cache.
+Caption entities and chat status IDs are persisted alongside library metadata.
+The desktop decodes emoji off the UI thread and repaints visible animations.
 
 Shutdown stops commands, cancels operations, stops streaming/mpv, closes Telegram,
 awaits task results and flushes/stops the repository against one 15-second deadline.

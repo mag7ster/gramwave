@@ -1,6 +1,8 @@
 use clap::Parser;
 use std::{path::PathBuf, sync::OnceLock};
 
+pub(crate) const MIN_WINDOW_SIZE: [f32; 2] = [220., 96.];
+
 #[derive(Clone, Debug, Default, Parser)]
 #[command(name = "tg-player", version, about)]
 pub struct LaunchOptions {
@@ -49,7 +51,7 @@ impl LaunchOptions {
             if let Some((w, h)) = self.size.as_deref().and_then(|s| s.split_once('x')) {
                 if let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>()) {
                     if w.is_finite() && h.is_finite() {
-                        return [w.max(850.), h.max(550.)];
+                        return [w.max(MIN_WINDOW_SIZE[0]), h.max(MIN_WINDOW_SIZE[1])];
                     }
                 }
             }

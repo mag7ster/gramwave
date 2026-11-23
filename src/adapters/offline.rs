@@ -2,7 +2,12 @@ use crate::{
     adapters::{media_loader, telegram::Telegram},
     model::Track,
 };
-use std::{path::Path, sync::Mutex, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::Duration,
+};
 use tg_player_application::{
     ports::{OfflinePublication, OfflineStorage},
     telegram::{GatewayFuture, TelegramFile, TelegramGateway},
@@ -122,6 +127,30 @@ async fn wait_for_download(
 pub(crate) struct FileStorage {
     root: std::path::PathBuf,
 }
+pub(crate) async fn saved_sizes(root: PathBuf, paths: Vec<String>) -> HashMap<String, u64> {
+    tokio::task::spawn_blocking(move || {
+        if paths.is_empty() {
+            return HashMap::new();
+        }
+        let Ok(root) = root.canonicalize() else {
+            return HashMap::new();
+        };
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                let file = std::fs::canonicalize(&path).ok()?;
+                if !file.starts_with(&root) {
+                    return None;
+                }
+                let metadata = file.metadata().ok()?;
+                metadata.is_file().then_some((path, metadata.len()))
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 impl FileStorage {
     pub(crate) fn new(root: std::path::PathBuf) -> Self {
         Self { root }
@@ -236,6 +265,19 @@ mod tests {
             assert_ne!(first, second);
             assert!(storage.verify(&first, 5).await.unwrap());
             assert!(storage.remove(source.to_str().unwrap()).await.is_err());
+            let sizes = saved_sizes(
+                root.clone(),
+                vec![
+                    first.clone(),
+                    second.clone(),
+                    source.to_string_lossy().into(),
+                ],
+            )
+            .await;
+            assert_eq!(
+                sizes,
+                HashMap::from([(first.clone(), 5), (second.clone(), 5)])
+            );
             storage.remove(&first).await.unwrap();
             assert!(!storage.verify(&first, 5).await.unwrap());
             assert!(storage.verify(&second, 5).await.unwrap());

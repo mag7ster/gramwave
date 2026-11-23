@@ -7,10 +7,21 @@ use tg_player_application::telegram::TelegramUpdate;
 use tg_player_application::AppCore;
 pub(crate) enum Event {
     Noop,
+    Cache {
+        connection: u64,
+        job: super::cache::CacheJob,
+        result: Result<crate::telegram::CacheReport, tg_player_application::AppError>,
+        offline_sizes: Option<std::collections::HashMap<String, u64>>,
+    },
     Application(tg_player_application::workflow::AppEvent),
     Error(tg_player_application::AppError),
     Link(String),
+    SourceChatError(String),
     ForgetArtwork(String),
+    Emoji(
+        tg_player_application::tasks::RequestId,
+        Vec<(i64, crate::adapters::emoji::EmojiAsset)>,
+    ),
 }
 pub(crate) enum RetryAction {
     Playback(tg_player_application::model::Track),
@@ -62,12 +73,14 @@ pub(crate) struct DesktopApp {
     pub(crate) rx: mpsc::Receiver<Event>,
     pub(crate) control: Option<mpsc::Receiver<application::control::Pending>>,
     pub(crate) player: Option<Box<dyn application::ports::PlayerBackend>>,
+    pub(crate) cache_playback: super::cache::CachePlayback,
     pub(crate) stream_base: String,
     pub(crate) server: Option<streaming::Server>,
     pub(crate) opened_chat: Option<i64>,
     pub(crate) chat_query: String,
     pub(crate) chat_search_active: bool,
     pub(crate) image_wanted: Vec<i64>,
+    pub(crate) custom_emoji: crate::emoji::CustomEmoji,
     pub(crate) track_wanted: Vec<Track>,
     pub(crate) search: String,
     pub(crate) status: String,
@@ -82,6 +95,7 @@ pub(crate) struct DesktopApp {
     pub(crate) error: String,
     pub(crate) error_retry: Option<RetryAction>,
     pub(crate) queue_open: bool,
+    pub(crate) pane: crate::screens::WorkspacePane,
     pub(crate) demo: bool,
     pub(crate) media: Option<fastframe_now_playing::NowPlaying>,
     pub(crate) sort: usize,
@@ -102,6 +116,7 @@ pub(crate) struct DesktopApp {
     pub(crate) preview_started: std::time::Instant,
     pub(crate) preview_captured: bool,
     pub(crate) settings_open: bool,
+    pub(crate) cache: super::cache::CacheState,
     pub(crate) last_link: String,
 }
 impl DesktopApp {
@@ -132,18 +147,7 @@ impl DesktopApp {
             tray,
             demo,
         } = services;
-        let opened_chat = state
-            .view()
-            .last_opened_chat
-            .into_iter()
-            .chain(state.view().session.source)
-            .find(|id| {
-                state
-                    .view()
-                    .playlists
-                    .iter()
-                    .any(|playlist| playlist.id == *id)
-            });
+        let opened_chat = state.view().startup_chat();
         let (tx, rx) = mpsc::channel();
         Self {
             progress: std::sync::Arc::new(crate::adapters::offline::Progress::new(wake.clone())),
@@ -175,6 +179,7 @@ impl DesktopApp {
             control: None,
             player,
             player_error,
+            cache_playback: Default::default(),
             shutdown_finished: false,
             shutdown_error: Default::default(),
             stream_base: String::new(),
@@ -183,6 +188,7 @@ impl DesktopApp {
             chat_query: String::new(),
             chat_search_active: false,
             image_wanted: Vec::new(),
+            custom_emoji: Default::default(),
             track_wanted: Vec::new(),
             search: String::new(),
             inline_notice: None,
@@ -203,6 +209,7 @@ impl DesktopApp {
             error: String::new(),
             error_retry: None,
             queue_open: false,
+            pane: Default::default(),
             demo,
             media,
             sort: 0,
@@ -224,6 +231,7 @@ impl DesktopApp {
             preview_started: std::time::Instant::now(),
             preview_captured: false,
             settings_open: false,
+            cache: Default::default(),
             last_link: String::new(),
         }
     }
@@ -266,6 +274,7 @@ impl DesktopApp {
                     connection.telegram.connection,
                 ));
                 self.tg = Some(connection.telegram);
+                self.cache = Default::default();
                 self.updates = Some(connection.updates);
                 self.status = tr("Connecting…");
             }
@@ -289,6 +298,10 @@ impl DesktopApp {
     }
     pub(crate) fn request_visible_media(&mut self, ctx: &egui::Context) {
         use tg_player_application::library::LibraryCommand;
+        if self.settings_open {
+            return;
+        }
+        self.request_custom_emoji(ctx);
         let now = std::time::Instant::now();
         let mut tracks = std::mem::take(&mut self.track_wanted);
         let mut images = std::mem::take(&mut self.image_wanted);
@@ -558,6 +571,8 @@ impl DesktopApp {
                 ),
             }
         }
+        self.custom_emoji
+            .set_connection(self.emoji_telegram().map(|telegram| telegram.connection));
         let mut received = 0;
         for _ in 0..128 {
             let Ok(e) = self.rx.try_recv() else {
@@ -567,7 +582,14 @@ impl DesktopApp {
             received += 1;
             match e {
                 Event::Noop => {}
+                Event::Cache {
+                    connection,
+                    job,
+                    result,
+                    offline_sizes,
+                } => self.cache_finished(connection, job, result, offline_sizes),
                 Event::ForgetArtwork(path) => ctx.forget_image(&format!("file://{path}")),
+                Event::Emoji(request, assets) => self.custom_emoji.complete(request, assets),
                 Event::Application(event) => self.core_event(event),
                 Event::Error(s) => {
                     self.error = s.to_string();
@@ -579,6 +601,7 @@ impl DesktopApp {
                     self.status = tr("Link copied");
                     self.set_inline_notice(self.status.clone(), false);
                 }
+                Event::SourceChatError(message) => self.set_inline_notice(message, false),
             }
         }
         if received == 128 {

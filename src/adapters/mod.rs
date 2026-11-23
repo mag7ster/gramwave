@@ -1,8 +1,10 @@
 pub mod audio;
 pub mod control;
 pub mod discovery;
+pub(crate) mod emoji;
 pub mod media_loader;
 pub(crate) mod offline;
+pub(crate) mod source_chat;
 pub mod storage;
 pub mod streaming;
 pub(crate) mod system;

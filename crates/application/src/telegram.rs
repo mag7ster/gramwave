@@ -56,6 +56,7 @@ pub enum TelegramUpdate {
     File(TelegramFile),
     Chat(MediaPlaylist),
     ChatTitle(i64, String),
+    ChatEmojiStatus(i64, Option<crate::model::EmojiStatus>),
     Message {
         id: TrackId,
         track: Option<MediaTrack>,

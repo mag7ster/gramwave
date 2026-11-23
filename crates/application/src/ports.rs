@@ -32,6 +32,9 @@ pub trait PlayerBackend {
     }
     fn drain(&self) -> Vec<PlaybackEvent>;
     fn snapshot(&self) -> PlayerSnapshot;
+    fn is_idle(&self) -> bool {
+        self.snapshot().duration <= 0.
+    }
 }
 pub trait Repository {
     fn apply(&self, changes: crate::persistence::ChangeSet) -> Result<(), crate::AppError>;

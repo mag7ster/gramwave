@@ -8,6 +8,74 @@ use tg_player_domain::{playback::QueueView, QueueEntryId};
 const TRACK_SCROLL_GUTTER: i8 = 12;
 const TRACK_ROW_PADDING: f32 = 4.;
 
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
+pub(crate) enum WorkspacePane {
+    Library,
+    #[default]
+    Playlist,
+    Queue,
+}
+
+fn search_field(
+    ui: &mut egui::Ui,
+    query: &mut String,
+    id: &'static str,
+    hint: String,
+    mut active: Option<&mut bool>,
+) {
+    let (rect, field) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.), egui::Sense::CLICK);
+    let p = design::colors(ui);
+    ui.painter().rect_filled(rect, 9., p.raised);
+    let mut row = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(8., 2.)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    row.spacing_mut().item_spacing.x = 6.;
+    row.spacing_mut().button_padding = egui::Vec2::splat(7.);
+    row.add(Icon::Search.image(p.muted, 18.));
+    let width = (row.available_width() - 30. - row.spacing().item_spacing.x).max(0.);
+    let edit = row.add(
+        egui::TextEdit::singleline(query)
+            .id(egui::Id::new(id))
+            .hint_text(hint)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .vertical_align(egui::Align::Center)
+            .desired_width(width)
+            .min_size(egui::vec2(width, 36.)),
+    );
+    if field.clicked() {
+        edit.request_focus();
+    }
+    if let Some(active) = active.as_deref_mut() {
+        *active |= field.clicked() || edit.clicked() || edit.gained_focus();
+    }
+    if active.as_deref().copied().unwrap_or(!query.is_empty()) {
+        let label = if active.is_some() {
+            tr("Close search")
+        } else {
+            tr("Clear search")
+        };
+        let close = row.add(
+            egui::Button::image(Icon::Close.image(p.muted, 16.).alt_text(&label))
+                .frame_when_inactive(false)
+                .min_size(egui::vec2(30., 36.)),
+        );
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        if close.clicked()
+            || (escape && (active.is_some() || edit.has_focus() || edit.lost_focus()))
+        {
+            if let Some(active) = active {
+                *active = false;
+            }
+            query.clear();
+            edit.surrender_focus();
+        }
+    }
+}
+
 impl App {
     fn apply_application_menu(
         &mut self,
@@ -21,52 +89,6 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             None => {}
-        }
-    }
-
-    fn chat_search(&mut self, ui: &mut egui::Ui) {
-        let (rect, field) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.), egui::Sense::CLICK);
-        let p = design::colors(ui);
-        ui.painter().rect_filled(rect, 9., p.raised);
-
-        let mut row = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(rect.shrink2(egui::vec2(8., 2.)))
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        row.spacing_mut().item_spacing.x = 6.;
-        row.spacing_mut().button_padding = egui::Vec2::splat(7.);
-        row.add(Icon::Search.image(p.muted, 18.));
-        let width = (row.available_width() - 30. - row.spacing().item_spacing.x).max(0.);
-        let edit = row.add(
-            egui::TextEdit::singleline(&mut self.chat_query)
-                .id(egui::Id::new("chat-search"))
-                .hint_text(tr("Find a chat"))
-                .frame(egui::Frame::NONE)
-                .margin(egui::Margin::ZERO)
-                .vertical_align(egui::Align::Center)
-                .desired_width(width)
-                .min_size(egui::vec2(width, 36.)),
-        );
-        if field.clicked() {
-            edit.request_focus();
-        }
-        if field.clicked() || edit.clicked() || edit.gained_focus() {
-            self.chat_search_active = true;
-        }
-        if self.chat_search_active {
-            let label = tr("Close search");
-            let close = row.add(
-                egui::Button::image(Icon::Close.image(p.muted, 16.).alt_text(&label))
-                    .frame_when_inactive(false)
-                    .min_size(egui::vec2(30., 36.)),
-            );
-            if close.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.chat_search_active = false;
-                self.chat_query.clear();
-                edit.surrender_focus();
-            }
         }
     }
 
@@ -91,7 +113,8 @@ impl App {
             || (!self.demo
                 && *self.state.auth().state()
                     != tg_player_application::telegram::AuthorizationState::Ready);
-        let header_height = if fastframe_titlebar::visible(&ctx) {
+        let header_visible = fastframe_titlebar::visible(&ctx);
+        if header_visible {
             let action = window_header(
                 root,
                 self.state
@@ -102,29 +125,28 @@ impl App {
                 !needs_auth,
             );
             self.apply_application_menu(&ctx, action);
-            design::HEADER_HEIGHT
-        } else {
-            0.
-        };
+        }
         if needs_auth {
             egui::CentralPanel::default().show(root, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add_space(50.);
+                    let compact = ui.available_width() < 480. || ctx.content_rect().height() < 400.;
+                    ui.add_space(if compact { 6. } else { 50. });
                     ui.vertical_centered(|ui| {
                         ui.heading(egui::RichText::new("Gramwave").size(32.));
                         ui.weak(tr("Your Telegram. Your soundtrack."));
                     });
-                    ui.add_space(28.);
+                    ui.add_space(if compact { 6. } else { 28. });
                     ui.horizontal(|ui| {
-                        ui.add_space(((ui.available_width() - 440.) / 2.).max(0.));
+                        let width = ui.available_width().min(440.);
+                        ui.add_space((ui.available_width() - width) / 2.);
                         ui.allocate_ui_with_layout(
-                            egui::vec2(440., 0.),
+                            egui::vec2(width, 0.),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
                                 egui::Frame::new()
                                     .fill(design::palette(self.state.view().light).panel)
                                     .corner_radius(16)
-                                    .inner_margin(28.)
+                                    .inner_margin(if compact { 10. } else { 28. })
                                     .show(ui, |ui| {
                                         self.auth_ui(ui);
                                     });
@@ -136,259 +158,322 @@ impl App {
             self.error_ui(&ctx);
             return;
         }
-        egui::Panel::bottom("transport")
-            .exact_size(96.)
-            .show(root, |ui| {
-                self.transport(ui);
-            });
-        const PLAYLIST_MIN_WIDTH: f32 = 400.;
-        const QUEUE_MIN_WIDTH: f32 = 250.;
-        let window_width = ctx.content_rect().width();
-        let dock_queue = window_width >= 1040.;
-        if window_width < 750. {
-            egui::Panel::top("compact-library").show(root, |ui| {
-                ui.horizontal(|ui| {
-                    ui.menu_button(tr("Your library"), |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.chat_query)
-                                .hint_text(tr("Find a chat")),
-                        );
-                        let mut open = None;
-                        for i in self.state.view().sidebar_chats(true, &self.chat_query) {
-                            if ui.button(&self.state.view().playlists[i].title).clicked() {
-                                open = Some(i);
-                            }
-                        }
-                        if let Some(i) = open {
-                            self.open_chat(i);
-                            ui.close();
-                        }
-                    });
-                    if header_height == 0. {
-                        let (_, action) = application_menu(ui, true);
-                        self.apply_application_menu(&ctx, action);
-                    }
-                });
+        let size = ctx.content_rect().size();
+        let dock = size.x >= 1040.;
+        let compact_heading = size.y < 600. || size.x < 520.;
+        let controls_only = size.y < 150. || size.x < 300.;
+        let player_only = controls_only || size.y < 260.;
+        let dense = size.y < 350.;
+
+        if player_only {
+            egui::CentralPanel::default().show(root, |ui| {
+                if controls_only {
+                    self.seek_preview = None;
+                    let rect = ui.available_rect_before_wrap();
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(egui::Rect::from_center_size(
+                                rect.center(),
+                                egui::vec2(132., 44.),
+                            ))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        |ui| self.transport_buttons(ui, false),
+                    );
+                } else {
+                    ui.add_space((ui.available_height() - 80.).max(0.) / 2.);
+                    self.transport(ui, false, true);
+                }
             });
         } else {
-            let reserved_width = PLAYLIST_MIN_WIDTH + if dock_queue { QUEUE_MIN_WIDTH } else { 0. };
-            egui::Panel::left("sidebar")
-                .default_size(if window_width < 1000. { 200. } else { 232. })
-                .size_range(180. ..=(window_width - reserved_width).min(400.))
+            let transport = egui::Panel::bottom("transport");
+            if dense {
+                transport
+                    .exact_size(52.)
+                    .frame(
+                        egui::Frame::new()
+                            .fill(design::colors(root).background)
+                            .inner_margin(4.),
+                    )
+                    .show(root, |ui| {
+                        self.seek_preview = None;
+                        self.compact_transport_controls(ui, dock);
+                    });
+            } else {
+                transport
+                    .exact_size(96.)
+                    .show(root, |ui| self.transport(ui, dock, false));
+            }
+            if dock {
+                self.desktop_panes(root, size.x, header_visible);
+            } else {
+                egui::Panel::top("compact-navigation")
+                    .frame(
+                        egui::Frame::new()
+                            .fill(design::colors(root).panel)
+                            .inner_margin(4.),
+                    )
+                    .show(root, |ui| self.pane_switcher(ui, header_visible));
+            }
+
+            let inset = if compact_heading { 10 } else { 24 };
+            egui::CentralPanel::default()
                 .frame(
                     egui::Frame::new()
-                        .fill(design::palette(self.state.view().light).panel)
-                        .inner_margin(16.),
+                        .fill(design::colors(root).background)
+                        .inner_margin(egui::Margin {
+                            right: (inset - TRACK_SCROLL_GUTTER).max(4),
+                            top: if dense { 4 } else { inset },
+                            bottom: if dense { 4 } else { inset },
+                            ..egui::Margin::same(inset)
+                        }),
                 )
                 .show(root, |ui| {
-                    ui.take_available_width();
-                    if header_height == 0. {
-                        let (_, action) = application_menu(ui, true);
-                        self.apply_application_menu(&ctx, action);
+                    if dense {
+                        ui.spacing_mut().item_spacing.y = 4.;
                     }
-                    self.chat_search(ui);
-                    let mut indices = self
-                        .state
-                        .view()
-                        .sidebar_chats(self.chat_search_active, &self.chat_query);
-                    if self.chat_search_active {
-                        for (i, p) in self.state.view().playlists.iter().enumerate() {
-                            if self.state.library().search().ids.contains(&p.id)
-                                && !indices.contains(&i)
-                            {
-                                indices.push(i);
+                    if dock {
+                        self.playlist_screen(ui, compact_heading, dense);
+                    } else {
+                        match self.pane {
+                            WorkspacePane::Library => self.library_screen(ui),
+                            WorkspacePane::Playlist => {
+                                self.playlist_screen(ui, compact_heading, dense)
                             }
+                            WorkspacePane::Queue => self.queue_screen(ui, false),
                         }
-                        if self.state.library().search().loading() {
-                            ui.weak(tr("Searching chats…"));
-                        }
-                        if self.state.library().search().error.is_some() {
-                            ui.label(
-                                self.state
-                                    .library()
-                                    .search()
-                                    .error
-                                    .as_ref()
-                                    .map(ToString::to_string)
-                                    .unwrap_or_default(),
-                            );
-                            if ui.button(tr("Retry search")).clicked() {
-                                self.retry_chat_search();
-                            }
-                        }
-                    }
-                    if indices.is_empty() {
-                        ui.weak(if self.chat_search_active {
-                            tr("No chats found")
-                        } else {
-                            tr("Pin chats here, or find one using search.")
-                        });
-                    }
-                    let mut open = None;
-                    let mut toggle = None;
-                    let chats_scroll =
-                        egui::ScrollArea::vertical()
-                            .id_salt("chat-list")
-                            .show(ui, |ui| {
-                                for i in indices {
-                                    let p = &self.state.view().playlists[i];
-                                    let id = p.id;
-                                    let pinned = self.state.view().chat_pins.contains(&id);
-                                    let row_id = ui.id().with(("chat", id));
-                                    let focused = ui.memory(|m| m.has_focus(row_id));
-                                    let colors = design::colors(ui);
-                                    let frame = egui::Frame::new()
-                                        .fill(if focused {
-                                            colors.raised
-                                        } else if self.opened_chat == Some(id) {
-                                            colors.selected
-                                        } else {
-                                            egui::Color32::TRANSPARENT
-                                        })
-                                        .corner_radius(8)
-                                        .inner_margin(8.)
-                                        .show(ui, |ui| {
-                                            ui.set_min_width(ui.available_width());
-                                            ui.horizontal(|ui| {
-                                                art(
-                                                    ui,
-                                                    &p.title,
-                                                    self.state
-                                                        .library()
-                                                        .playlist_artwork(p.id)
-                                                        .path
-                                                        .as_deref(),
-                                                    40.,
-                                                );
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        egui::RichText::new(&p.title).strong(),
-                                                    )
-                                                    .truncate()
-                                                    .show_tooltip_when_elided(false),
-                                                );
-                                            });
-                                        })
-                                        .response;
-                                    let response =
-                                        ui.interact(frame.rect, row_id, egui::Sense::click());
-                                    if ui.is_rect_visible(response.rect) {
-                                        self.image_wanted
-                                            .push(self.state.library().playlist_artwork(p.id).file);
-                                    }
-                                    if response.clicked() {
-                                        open = Some(i);
-                                    }
-                                    response.context_menu(|ui| {
-                                        if ui
-                                            .button(if pinned {
-                                                tr("Unpin chat")
-                                            } else {
-                                                tr("Pin chat")
-                                            })
-                                            .clicked()
-                                        {
-                                            toggle = Some(id);
-                                            ui.close();
-                                        }
-                                    });
-                                    ui.add_space(3.);
-                                }
-                            });
-                    design::middle_scroll(
-                        ui,
-                        chats_scroll.id,
-                        chats_scroll.inner_rect,
-                        chats_scroll.content_size.y,
-                    );
-                    if let Some(id) = toggle {
-                        self.toggle_chat_pin(id);
-                    }
-                    if let Some(i) = open {
-                        self.open_chat(i);
-                        self.chat_search_active = false;
-                        self.chat_query.clear();
-                        ui.ctx()
-                            .memory_mut(|m| m.surrender_focus(egui::Id::new("chat-search")));
                     }
                 });
         }
-        if self.queue_open {
-            if !dock_queue {
-                let mut open = true;
-                egui::Window::new(tr("Queue"))
-                    .id(egui::Id::new("compact-queue"))
-                    .open(&mut open)
-                    .default_width(290.)
-                    .min_width(QUEUE_MIN_WIDTH)
-                    .max_width(480.)
-                    .max_height((ctx.content_rect().height() - header_height - 150.).max(100.))
-                    .title_bar(false)
-                    .collapsible(false)
-                    .resizable([true, false])
-                    .anchor(egui::Align2::RIGHT_TOP, [-16., header_height + 16.])
-                    .show(&ctx, |ui| {
-                        ui.take_available_width();
-                        self.queue_screen(ui, false);
-                    });
-                if !open {
-                    self.queue_open = false;
-                }
-            } else {
-                let max_width =
-                    (root.available_width() - PLAYLIST_MIN_WIDTH).clamp(QUEUE_MIN_WIDTH, 480.);
-                egui::Panel::right("queue")
-                    .default_size(290.)
-                    .size_range(QUEUE_MIN_WIDTH..=max_width)
-                    .frame(
-                        egui::Frame::new()
-                            .fill(design::palette(self.state.view().light).panel)
-                            .inner_margin(egui::Margin {
-                                right: 20 - TRACK_SCROLL_GUTTER,
-                                ..egui::Margin::same(20)
-                            }),
-                    )
-                    .show(root, |ui| {
-                        ui.take_available_width();
-                        self.queue_screen(ui, true);
-                    });
-            }
-        }
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(design::palette(self.state.view().light).background)
-                    .inner_margin(egui::Margin {
-                        right: 24 - TRACK_SCROLL_GUTTER,
-                        ..egui::Margin::same(24)
-                    }),
-            )
-            .show(root, |ui| {
-                if ctx.content_rect().height() < 500. {
-                    egui::ScrollArea::vertical()
-                        .id_salt("compact-content")
-                        .show(ui, |ui| self.playlist_screen(ui));
-                } else {
-                    self.playlist_screen(ui);
-                }
-            });
         self.settings_ui(&ctx);
         self.error_ui(&ctx);
         self.poll_chat_search(&ctx);
         self.request_visible_media(&ctx);
     }
+
+    fn pane_switcher(&mut self, ui: &mut egui::Ui, header_visible: bool) {
+        ui.horizontal(|ui| {
+            if !header_visible {
+                let (_, action) = application_menu(ui, true);
+                self.apply_application_menu(ui.ctx(), action);
+            }
+            let p = design::colors(ui);
+            egui::Frame::new()
+                .corner_radius(10)
+                .fill(p.background)
+                .inner_margin(2)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.;
+                    let width = ((ui.available_width() - 4.) / 3.).max(0.);
+                    for (pane, label) in [
+                        (WorkspacePane::Library, tr("Library")),
+                        (WorkspacePane::Playlist, tr("Tracks")),
+                        (WorkspacePane::Queue, tr("Queue")),
+                    ] {
+                        let selected = self.pane == pane;
+                        let response = ui.add_sized(
+                            [width, 32.],
+                            egui::Button::selectable(
+                                selected,
+                                egui::RichText::new(label).color(if selected {
+                                    p.accent
+                                } else {
+                                    p.text
+                                }),
+                            )
+                            .corner_radius(8)
+                            .truncate(),
+                        );
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(egui::Id::new(("test-pane", pane)), response.rect)
+                        });
+                        if response.clicked() {
+                            self.pane = pane;
+                        }
+                    }
+                });
+        });
+    }
+
+    fn desktop_panes(&mut self, root: &mut egui::Ui, width: f32, header_visible: bool) {
+        const PLAYLIST_MIN_WIDTH: f32 = 400.;
+        const QUEUE_MIN_WIDTH: f32 = 250.;
+        let reserve = PLAYLIST_MIN_WIDTH + QUEUE_MIN_WIDTH;
+        let palette = design::colors(root);
+        egui::Panel::left("sidebar")
+            .default_size(232.)
+            .size_range(180. ..=(width - reserve).min(400.))
+            .frame(egui::Frame::new().fill(palette.panel).inner_margin(16.))
+            .show(root, |ui| {
+                ui.take_available_width();
+                if !header_visible {
+                    let (_, action) = application_menu(ui, true);
+                    self.apply_application_menu(ui.ctx(), action);
+                }
+                self.library_screen(ui);
+            });
+        if self.queue_open {
+            let max_width =
+                (root.available_width() - PLAYLIST_MIN_WIDTH).clamp(QUEUE_MIN_WIDTH, 480.);
+            egui::Panel::right("queue")
+                .default_size(290.)
+                .size_range(QUEUE_MIN_WIDTH..=max_width)
+                .frame(
+                    egui::Frame::new()
+                        .fill(palette.panel)
+                        .inner_margin(egui::Margin {
+                            right: 20 - TRACK_SCROLL_GUTTER,
+                            ..egui::Margin::same(20)
+                        }),
+                )
+                .show(root, |ui| {
+                    ui.take_available_width();
+                    self.queue_screen(ui, true);
+                });
+        }
+    }
+
+    fn library_screen(&mut self, ui: &mut egui::Ui) {
+        search_field(
+            ui,
+            &mut self.chat_query,
+            "chat-search",
+            tr("Find a chat"),
+            Some(&mut self.chat_search_active),
+        );
+        let mut indices = self
+            .state
+            .view()
+            .sidebar_chats(self.chat_search_active, &self.chat_query);
+        if self.chat_search_active {
+            for (i, p) in self.state.view().playlists.iter().enumerate() {
+                if self.state.library().search().ids.contains(&p.id) && !indices.contains(&i) {
+                    indices.push(i);
+                }
+            }
+            if self.state.library().search().loading() {
+                ui.weak(tr("Searching chats…"));
+            }
+            if self.state.library().search().error.is_some() {
+                ui.label(
+                    self.state
+                        .library()
+                        .search()
+                        .error
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                );
+                if ui.button(tr("Retry search")).clicked() {
+                    self.retry_chat_search();
+                }
+            }
+        }
+        if indices.is_empty() {
+            ui.weak(if self.chat_search_active {
+                tr("No chats found")
+            } else {
+                tr("Pin chats here, or find one using search.")
+            });
+        }
+        let mut open = None;
+        let mut toggle = None;
+        let chats_scroll = egui::ScrollArea::vertical()
+            .id_salt("chat-list")
+            .show(ui, |ui| {
+                for i in indices {
+                    let p = &self.state.view().playlists[i];
+                    let id = p.id;
+                    let pinned = self.state.view().chat_pins.contains(&id);
+                    let row_id = ui.id().with(("chat", id));
+                    let focused = ui.memory(|m| m.has_focus(row_id));
+                    let colors = design::colors(ui);
+                    let frame = egui::Frame::new()
+                        .fill(if focused {
+                            colors.raised
+                        } else if self.opened_chat == Some(id) {
+                            colors.selected
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .corner_radius(8)
+                        .inner_margin(8.)
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                art(
+                                    ui,
+                                    &p.title,
+                                    self.state.library().playlist_artwork(p.id).path.as_deref(),
+                                    40.,
+                                );
+                                chat_title(ui, &p.title, p.emoji_status.is_some(), 14., 1);
+                                self.chat_emoji(ui, p.emoji_status, 18., None);
+                            });
+                        })
+                        .response;
+                    let response = ui.interact(frame.rect, row_id, egui::Sense::click());
+                    if ui.is_rect_visible(response.rect) {
+                        self.image_wanted
+                            .push(self.state.library().playlist_artwork(p.id).file);
+                    }
+                    if response.clicked() {
+                        open = Some(i);
+                    }
+                    response.context_menu(|ui| {
+                        if ui
+                            .button(if pinned {
+                                tr("Unpin chat")
+                            } else {
+                                tr("Pin chat")
+                            })
+                            .clicked()
+                        {
+                            toggle = Some(id);
+                            ui.close();
+                        }
+                    });
+                    ui.add_space(3.);
+                }
+            });
+        design::middle_scroll(
+            ui,
+            chats_scroll.id,
+            chats_scroll.inner_rect,
+            chats_scroll.content_size.y,
+        );
+        if let Some(id) = toggle {
+            self.toggle_chat_pin(id);
+        }
+        if let Some(i) = open {
+            self.open_chat(i);
+            self.pane = WorkspacePane::Playlist;
+            ui.ctx().request_repaint();
+            self.chat_search_active = false;
+            self.chat_query.clear();
+            ui.ctx()
+                .memory_mut(|m| m.surrender_focus(egui::Id::new("chat-search")));
+        }
+    }
     fn error_ui(&mut self, ctx: &egui::Context) {
         if !self.error.is_empty() {
+            let size = ctx.content_rect().size();
+            let width = (size.x - 24.).clamp(100., 400.);
+            let mut open = true;
             egui::Window::new(tr("Something went wrong"))
                 .id(egui::Id::new("player-error"))
                 .order(egui::Order::Foreground)
                 .collapsible(false)
                 .resizable(false)
-                .default_width(360.)
+                .open(&mut open)
+                .default_width(width.min(360.))
+                .max_width(width)
+                .max_height((size.y - 48.).max(24.))
+                .vscroll(true)
                 .show(ctx, |ui| {
-                    ui.set_max_width(400.);
+                    ui.set_max_width(width);
                     ui.label(&self.error);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button(tr("Copy error")).clicked() {
                             ui.ctx().copy_text(self.error.clone());
                         }
@@ -400,9 +485,129 @@ impl App {
                         }
                     });
                 });
+            if !open {
+                self.error.clear();
+            }
         }
     }
-    fn transport(&mut self, ui: &mut egui::Ui) {
+    fn transport_buttons(&mut self, ui: &mut egui::Ui, extended: bool) {
+        if extended {
+            let shuffle_hint = if self.state.view().shuffle {
+                tr("Shuffle on · Turn off")
+            } else {
+                tr("Shuffle off · Turn on")
+            };
+            if design::toggle(
+                ui,
+                Icon::Shuffle,
+                self.state.view().shuffle,
+                "",
+                shuffle_hint,
+            ) {
+                self.execute(AppCommand::Shuffle(!self.state.view().shuffle));
+            }
+        }
+        if button(ui, Icon::Previous, "Previous") {
+            self.execute(AppCommand::Previous);
+        }
+        if design::playback_button(
+            ui,
+            if self.state.playback().state().paused()
+                || self.state.view().session.current().is_none()
+            {
+                Icon::Play
+            } else {
+                Icon::Pause
+            },
+            "Play / pause",
+        ) {
+            self.execute(AppCommand::Pause(!self.state.playback().state().paused()));
+        }
+        if button(ui, Icon::Next, "Next") {
+            self.execute(AppCommand::Next);
+        }
+        if extended {
+            let hint = match self.state.view().repeat {
+                RepeatMode::Off => tr("Repeat off · Repeat all"),
+                RepeatMode::All => tr("Repeat all · Repeat one"),
+                RepeatMode::One => tr("Repeat one · Turn off"),
+            };
+            if design::toggle(
+                ui,
+                Icon::Repeat,
+                self.state.view().repeat != RepeatMode::Off,
+                if self.state.view().repeat == RepeatMode::One {
+                    "1"
+                } else {
+                    ""
+                },
+                hint,
+            ) {
+                self.execute(AppCommand::Repeat(self.state.view().repeat.next()));
+            }
+        }
+    }
+
+    fn queue_button(&mut self, ui: &mut egui::Ui) {
+        if design::toggle(
+            ui,
+            Icon::Queue,
+            self.queue_open,
+            "",
+            if self.queue_open {
+                tr("Queue open · Close queue")
+            } else {
+                tr("Queue closed · Open queue")
+            },
+        ) {
+            self.queue_open = !self.queue_open;
+        }
+    }
+
+    fn mute_button(&mut self, ui: &mut egui::Ui) {
+        let (icon, label) = if self.state.view().volume == 0. {
+            (Icon::Muted, "Unmute")
+        } else {
+            (Icon::Volume, "Mute")
+        };
+        if button(ui, icon, label) {
+            self.toggle_mute();
+        }
+    }
+
+    fn volume_slider(&mut self, ui: &mut egui::Ui, width: f32) {
+        let mut volume = self.state.view().volume as f64;
+        let slider = design::slider(ui, &mut volume, 100., width, tr("Volume"), false);
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::new("test-volume"), (slider.rect, slider.id));
+        });
+        if slider.changed() {
+            self.execute(AppCommand::Volume(volume as f32));
+        }
+    }
+
+    fn compact_transport_controls(&mut self, ui: &mut egui::Ui, dock: bool) {
+        let gap = ui.spacing().item_spacing.x;
+        let buttons = 44. + 5. * (36. + gap) + if dock { 36. + gap } else { 0. };
+        let available = ui.available_width();
+        let slider_width = (available - buttons - gap).min(104.);
+        let show_slider = slider_width >= 72.;
+        let width = buttons + if show_slider { gap + slider_width } else { 0. };
+        ui.horizontal(|ui| {
+            ui.add_space((available - width).max(0.) / 2.);
+            self.transport_buttons(ui, true);
+            self.mute_button(ui);
+            if show_slider {
+                self.volume_slider(ui, slider_width);
+            }
+            if dock {
+                self.queue_button(ui);
+            }
+        });
+    }
+
+    fn transport(&mut self, ui: &mut egui::Ui, dock: bool, player_only: bool) {
         let current = self
             .state
             .view()
@@ -417,24 +622,22 @@ impl App {
         }
         ui.spacing_mut().item_spacing.y = 4.;
         ui.add_space(8.);
-        let width = ui.available_width() - 48.;
-        let compact = width < 750.;
+        let compact = player_only || ui.available_width() < 798.;
+        let width = ui.available_width() - if compact { 0. } else { 48. };
         let metadata_width = if compact {
             0.
         } else {
             (width * 0.25).min(300.)
         };
-        let right_width = if compact {
-            88.
-        } else if width < 950. {
-            176.
+        let right_width = if dock { 200. } else { 144. };
+        let center_width = if compact {
+            width
         } else {
-            200.
+            width - metadata_width - right_width - 24.
         };
-        let center_width = width - metadata_width - right_width - 24.;
         ui.horizontal(|ui| {
-            ui.add_space(24.);
             if !compact {
+                ui.add_space(24.);
                 ui.allocate_ui(egui::vec2(metadata_width, 72.), |ui| {
                     ui.set_min_width(metadata_width);
                     ui.horizontal(|ui| {
@@ -474,62 +677,14 @@ impl App {
             ui.allocate_ui(egui::vec2(center_width, 72.), |ui| {
                 ui.set_min_width(center_width);
                 ui.vertical_centered(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.add_space((center_width - 220.).max(0.) / 2.);
-                        let shuffle_hint = if self.state.view().shuffle {
-                            tr("Shuffle on · Turn off")
-                        } else {
-                            tr("Shuffle off · Turn on")
-                        };
-                        if design::toggle(
-                            ui,
-                            Icon::Shuffle,
-                            self.state.view().shuffle,
-                            "",
-                            shuffle_hint,
-                        ) {
-                            self.execute(AppCommand::Shuffle(!self.state.view().shuffle));
-                        }
-                        if button(ui, Icon::Previous, "Previous") {
-                            self.execute(AppCommand::Previous);
-                        }
-                        if design::playback_button(
-                            ui,
-                            if self.state.playback().state().paused()
-                                || self.state.view().session.current().is_none()
-                            {
-                                Icon::Play
-                            } else {
-                                Icon::Pause
-                            },
-                            "Play / pause",
-                        ) {
-                            self.execute(AppCommand::Pause(
-                                !self.state.playback().state().paused(),
-                            ));
-                        }
-                        if button(ui, Icon::Next, "Next") {
-                            self.execute(AppCommand::Next);
-                        }
-                        let hint = match self.state.view().repeat {
-                            RepeatMode::Off => tr("Repeat off · Repeat all"),
-                            RepeatMode::All => tr("Repeat all · Repeat one"),
-                            RepeatMode::One => tr("Repeat one · Turn off"),
-                        };
-                        if design::toggle(
-                            ui,
-                            Icon::Repeat,
-                            self.state.view().repeat != RepeatMode::Off,
-                            if self.state.view().repeat == RepeatMode::One {
-                                "1"
-                            } else {
-                                ""
-                            },
-                            hint,
-                        ) {
-                            self.execute(AppCommand::Repeat(self.state.view().repeat.next()));
-                        }
-                    });
+                    if compact {
+                        self.compact_transport_controls(ui, false);
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.add_space((center_width - 220.).max(0.) / 2.);
+                            self.transport_buttons(ui, true);
+                        });
+                    }
                     let playback = self.state.playback().state();
                     let snapshot = self
                         .player
@@ -607,59 +762,70 @@ impl App {
                     });
                 });
             });
-            ui.allocate_ui(egui::vec2(right_width, 72.), |ui| {
-                ui.set_min_width(right_width);
-                ui.add_space(16.);
-                ui.horizontal(|ui| {
-                    if design::toggle(
-                        ui,
-                        Icon::Queue,
-                        self.queue_open,
-                        "",
-                        if self.queue_open {
-                            tr("Queue open · Close queue")
-                        } else {
-                            tr("Queue closed · Open queue")
-                        },
-                    ) {
-                        self.queue_open = !self.queue_open;
-                    }
-                    if design::labelled_button(
-                        ui,
-                        if self.state.view().volume == 0. {
-                            Icon::Muted
-                        } else {
-                            Icon::Volume
-                        },
-                        if self.state.view().volume == 0. {
-                            tr("Unmute")
-                        } else {
-                            tr("Mute")
-                        },
-                    ) {
-                        self.toggle_mute();
-                    }
-                    let mut volume = self.state.view().volume as f64;
-                    if !compact
-                        && design::slider(
+            if !compact {
+                ui.allocate_ui(egui::vec2(right_width, 72.), |ui| {
+                    ui.set_min_width(right_width);
+                    ui.add_space(16.);
+                    ui.horizontal(|ui| {
+                        if dock {
+                            self.queue_button(ui);
+                        }
+                        self.mute_button(ui);
+                        self.volume_slider(
                             ui,
-                            &mut volume,
-                            100.,
-                            (right_width - 96.).min(104.),
-                            tr("Volume"),
-                            false,
-                        )
-                        .changed()
-                    {
-                        self.execute(AppCommand::Volume(volume as f32));
-                    }
+                            (right_width - if dock { 96. } else { 48. }).min(104.),
+                        );
+                    });
                 });
-            });
+            }
         });
     }
-    fn playlist_screen(&mut self, ui: &mut egui::Ui) {
+    fn playlist_menu(&mut self, ui: &mut egui::Ui, selected: usize, chat_id: i64, url: &str) {
+        if ui
+            .add_enabled(!self.demo, egui::Button::new(tr("Open source chat")))
+            .clicked()
+        {
+            self.open_source_chat(chat_id, url);
+            ui.close();
+        }
+        if !url.is_empty() && ui.button(tr("Copy chat link")).clicked() {
+            ui.ctx().copy_text(url.to_owned());
+            ui.close();
+        }
+        if ui.button(tr("Refresh library")).clicked() {
+            self.open_chat(selected);
+            ui.close();
+        }
+    }
+
+    fn sort_playlist(&mut self, ui: &mut egui::Ui) {
+        let orders = [tr("Newest first"), tr("Title"), tr("Artist")];
+        egui::ComboBox::from_id_salt("order")
+            .selected_text(&orders[self.sort])
+            .show_ui(ui, |ui| {
+                for (i, label) in orders.iter().enumerate() {
+                    ui.selectable_value(&mut self.sort, i, label);
+                }
+            });
+    }
+
+    fn playlist_pin_action(&mut self, ui: &mut egui::Ui, chat_id: i64) {
+        let label = if self.state.view().chat_pins.contains(&chat_id) {
+            tr("Unpin chat")
+        } else {
+            tr("Pin chat")
+        };
+        if ui.button(label).clicked() {
+            self.toggle_chat_pin(chat_id);
+            ui.close();
+        }
+    }
+
+    fn playlist_screen(&mut self, ui: &mut egui::Ui, compact: bool, dense: bool) {
         if !self.demo && self.opened_chat.is_none() {
-            ui.add_space(60.);
+            if !compact {
+                ui.add_space(60.);
+            }
             ui.heading(tr("Choose a chat"));
             ui.weak(tr("Music loads only when you open a chat."));
             return;
@@ -681,8 +847,10 @@ impl App {
             return;
         };
         let chat_id = p.id;
-        self.image_wanted
-            .push(self.state.library().playlist_artwork(p.id).file);
+        if !dense {
+            self.image_wanted
+                .push(self.state.library().playlist_artwork(p.id).file);
+        }
         let title = p.title.clone();
         let artwork = self.state.library().playlist_artwork(p.id).path;
         let url = p.url.clone();
@@ -691,112 +859,127 @@ impl App {
             .iter()
             .any(|track| p.filters[usize::from(track.kind)]);
 
-        egui::Frame::new()
-            .fill(design::palette(self.state.view().light).panel)
-            .corner_radius(12)
-            .inner_margin(16.)
-            .outer_margin(egui::Margin {
-                right: TRACK_SCROLL_GUTTER,
-                ..egui::Margin::ZERO
-            })
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    art(
-                        ui,
-                        &title,
-                        artwork.as_deref(),
-                        if ui.available_width() < 650. {
-                            72.
-                        } else {
-                            112.
-                        },
-                    );
-                    ui.add_space(16.);
-                    ui.vertical(|ui| {
-                        ui.add_space(4.);
-                        ui.small(tr("TELEGRAM PLAYLIST"));
-                        let mut job = egui::text::LayoutJob::simple(
-                            title.clone(),
-                            egui::FontId::proportional(30.),
-                            ui.visuals().text_color(),
-                            ui.available_width(),
-                        );
-                        job.wrap.max_rows = 2;
-                        ui.add(egui::Label::new(job).show_tooltip_when_elided(false));
-                    });
-                });
-            });
-        ui.add_space(18.);
-        let mut toggle_pin = false;
+        let emoji_status = p.emoji_status;
+        let before_filters = p.filters;
+        let mut filters = before_filters;
+        let filter_labels = [tr("Music"), tr("Audio files"), tr("Voice messages")];
         let mut play_all = false;
         let mut pin_all = false;
-        ui.horizontal_wrapped(|ui| {
-            let play = ui.add_enabled_ui(can_play, |ui| {
-                design::playback_button(ui, Icon::Play, "Play all")
-            });
-            play_all = play.inner;
-            #[cfg(test)]
-            ui.ctx().data_mut(|data| {
-                data.insert_temp(egui::Id::new("test-play-all"), play.response.rect)
-            });
-            if ui
-                .button(if self.state.view().chat_pins.contains(&chat_id) {
-                    tr("Unpin chat")
-                } else {
-                    tr("Pin chat")
-                })
-                .clicked()
-            {
-                toggle_pin = true;
-            }
-            if button(ui, Icon::Download, "Save playlist offline") {
-                pin_all = true;
-            }
-            ui.menu_button("…", |ui| {
-                if !url.is_empty() {
-                    ui.hyperlink_to(tr("Open source chat"), &url);
-                    if ui.button(tr("Copy chat link")).clicked() {
-                        ui.ctx().copy_text(url.clone());
-                    }
-                }
-                if ui.button(tr("Refresh library")).clicked() {
-                    self.open_chat(selected);
-                    ui.close();
-                }
-            });
+        if compact && !dense {
             ui.horizontal(|ui| {
-                let orders = [tr("Newest first"), tr("Title"), tr("Artist")];
-                egui::ComboBox::from_id_salt("order")
-                    .selected_text(&orders[self.sort])
-                    .show_ui(ui, |ui| {
-                        for (i, label) in orders.iter().enumerate() {
-                            ui.selectable_value(&mut self.sort, i, label);
-                        }
+                art(ui, &title, artwork.as_deref(), 32.);
+                chat_title(ui, &title, emoji_status.is_some(), 18., 1);
+                self.chat_emoji(ui, emoji_status, 24., None);
+            });
+        } else if !compact {
+            egui::Frame::new()
+                .fill(design::colors(ui).panel)
+                .corner_radius(12)
+                .inner_margin(16.)
+                .outer_margin(egui::Margin {
+                    right: TRACK_SCROLL_GUTTER,
+                    ..egui::Margin::ZERO
+                })
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        art(
+                            ui,
+                            &title,
+                            artwork.as_deref(),
+                            if ui.available_width() < 650. {
+                                72.
+                            } else {
+                                112.
+                            },
+                        );
+                        ui.add_space(16.);
+                        ui.vertical(|ui| {
+                            ui.add_space(4.);
+                            ui.small(tr("TELEGRAM PLAYLIST"));
+                            ui.horizontal(|ui| {
+                                let line_end =
+                                    chat_title(ui, &title, emoji_status.is_some(), 30., 2);
+                                let anchor = line_end + egui::vec2(ui.spacing().item_spacing.x, 0.);
+                                self.chat_emoji(ui, emoji_status, 24., Some(anchor));
+                            });
+                        });
                     });
+                });
+            ui.add_space(18.);
+            ui.horizontal_wrapped(|ui| {
+                let play = ui.add_enabled_ui(can_play, |ui| {
+                    design::playback_button(ui, Icon::Play, "Play all")
+                });
+                play_all = play.inner;
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::new("test-play-all"), play.response.rect)
+                });
+                pin_all = button(ui, Icon::Download, "Save playlist offline");
+                self.sort_playlist(ui);
+                ui.menu_button("…", |ui| {
+                    self.playlist_menu(ui, selected, chat_id, &url);
+                    self.playlist_pin_action(ui, chat_id);
+                });
+            });
+        }
+        ui.horizontal(|ui| {
+            let inline_filters = !compact && ui.available_width() >= 620.;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if inline_filters {
+                    for (filter, label) in filters.iter_mut().zip(&filter_labels).rev() {
+                        ui.toggle_value(filter, label.as_str());
+                    }
+                } else {
+                    let label = if compact {
+                        tr("Playlist options")
+                    } else {
+                        tr("Filters")
+                    };
+                    let p = design::colors(ui);
+                    egui::containers::menu::MenuButton::from_button(
+                        egui::Button::image(Icon::More.image(p.muted, 20.).alt_text(&label))
+                            .min_size(egui::vec2(40., 40.)),
+                    )
+                    .ui(ui, |ui| {
+                        if compact {
+                            play_all = ui
+                                .add_enabled(can_play, egui::Button::new(tr("Play all")))
+                                .clicked();
+                            pin_all = ui.button(tr("Save playlist offline")).clicked();
+                            if play_all || pin_all {
+                                ui.close();
+                            }
+                            self.playlist_menu(ui, selected, chat_id, &url);
+                            ui.separator();
+                            self.sort_playlist(ui);
+                        }
+                        for (filter, label) in filters.iter_mut().zip(&filter_labels) {
+                            ui.checkbox(filter, label.as_str());
+                        }
+                        if compact {
+                            ui.separator();
+                            self.playlist_pin_action(ui, chat_id);
+                        }
+                    })
+                    .0
+                    .on_hover_text(if dense {
+                        format!("{title}\n{label}")
+                    } else {
+                        label
+                    });
+                }
+                search_field(
+                    ui,
+                    &mut self.search,
+                    "track-search",
+                    tr("Search this playlist"),
+                    None,
+                );
             });
         });
-        if toggle_pin {
-            self.toggle_chat_pin(chat_id);
-        }
-        let before_filters = self.state.view().playlists[selected].filters;
-        let mut filters = before_filters;
-        ui.horizontal_wrapped(|ui| {
-            ui.add(Icon::Search.image(egui::Color32::GRAY, 18.));
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text(tr("Search this playlist"))
-                    .desired_width(200.),
-            );
-
-            for (i, label) in [tr("Music"), tr("Audio files"), tr("Voice messages")]
-                .iter()
-                .enumerate()
-            {
-                ui.toggle_value(&mut filters[i], label.as_str());
-            }
-        });
-        ui.add_space(12.);
+        ui.add_space(if compact { 2. } else { 12. });
         if before_filters != filters {
             self.execute(AppCommand::Filters(chat_id, filters));
             self.open_chat(selected);
@@ -811,21 +994,27 @@ impl App {
                 self.state.view().playlists[selected].filters,
             ));
         }
-        // This reserved status line avoids shifting the list as loading starts/ends.
-        ui.allocate_ui(egui::vec2(ui.available_width(), 24.), |ui| {
-            if self.state.library().indexing_chat() == Some(chat_id) {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.small(tr("Loading music from this chat…"));
-                });
-            } else if !self.settings_open {
-                if let Some(notice) = self.inline_notice(ui.ctx(), false) {
+        let loading = self.state.library().indexing_chat() == Some(chat_id);
+        let notice = (!self.settings_open)
+            .then(|| self.inline_notice(ui.ctx(), false))
+            .flatten();
+        if !compact || loading || notice.is_some() {
+            // Reserve the status line in the full layout to avoid shifting the list while loading.
+            ui.allocate_ui(egui::vec2(ui.available_width(), 24.), |ui| {
+                if let Some(notice) = notice {
                     ui.weak(notice);
+                } else if loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.small(tr("Loading music from this chat…"));
+                    });
                 }
-            }
-        });
+            });
+        }
         if tracks.is_empty() {
-            ui.add_space(24.);
+            if !compact {
+                ui.add_space(24.);
+            }
             ui.heading(
                 if !self.state.view().playlists[selected]
                     .filters
@@ -1018,6 +1207,7 @@ impl App {
                                         ui.label(tr("Download failed · Save offline to retry"));
                                         ui.label(error.to_string());
                                     }
+                                    self.track_caption(ui, t.caption.as_ref());
                                 };
                                 let (menu, popup) =
                                     egui::containers::menu::MenuButton::from_button(
@@ -1131,6 +1321,54 @@ fn track_list_frame() -> egui::Frame {
     })
 }
 
+fn chat_title(
+    ui: &mut egui::Ui,
+    title: &str,
+    emoji: bool,
+    size: f32,
+    max_rows: usize,
+) -> egui::Pos2 {
+    let width = ui.available_width()
+        - if emoji {
+            size.max(24.) + ui.spacing().item_spacing.x
+        } else {
+            0.
+        };
+    let mut job = egui::text::LayoutJob::simple(
+        title.to_owned(),
+        egui::FontId::proportional(size),
+        ui.visuals().text_color(),
+        width.max(0.),
+    );
+    job.wrap.max_rows = max_rows;
+    job.wrap.break_anywhere = max_rows == 1;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let line_end = galley
+        .rows
+        .last()
+        .map_or(egui::Pos2::ZERO, |row| row.rect().right_center());
+    let response = ui.add(egui::Label::new(galley).show_tooltip_when_elided(false));
+    response.rect.min + line_end.to_vec2()
+}
+
+fn drag_window_caption(ui: &mut egui::Ui, rect: egui::Rect) {
+    let response = ui.interact(
+        rect,
+        ui.id().with("window-caption"),
+        egui::Sense::click_and_drag(),
+    );
+    let primary = egui::PointerButton::Primary;
+    if response.double_clicked_by(primary) {
+        let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    } else if response.drag_started_by(primary) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        // The compositor takes over the gesture and may keep the release event.
+        ui.ctx().stop_dragging();
+    }
+}
+
 fn window_header(
     root: &mut egui::Ui,
     title: Option<&str>,
@@ -1146,9 +1384,11 @@ fn window_header(
                 egui::vec2(ui.available_width(), design::HEADER_HEIGHT),
                 egui::Sense::hover(),
             );
+            let compact = rect.width() < 300.;
+            let controls_width = if compact { 48. } else { 132. };
             let caption = egui::Rect::from_min_max(
-                rect.left_top() + egui::vec2(8., 4.),
-                rect.right_bottom() - egui::vec2(132., 4.),
+                rect.left_top() + egui::vec2(8., 6.),
+                rect.right_bottom() - egui::vec2(controls_width, 6.),
             );
 
             let mut text_ui = ui.new_child(
@@ -1157,8 +1397,8 @@ fn window_header(
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             let (menu_rect, action) = application_menu(&mut text_ui, settings_available);
-            fastframe_titlebar::drag(ui, caption.with_min_x(menu_rect.right()));
-            if let Some(title) = title {
+            drag_window_caption(ui, caption.with_min_x(menu_rect.right() + 1.));
+            if let Some(title) = title.filter(|_| !compact) {
                 let suffix = egui::WidgetText::from(egui::RichText::new("— Gramwave").weak())
                     .into_galley(
                         &text_ui,
@@ -1199,7 +1439,7 @@ fn window_header(
             } else {
                 (Icon::Maximize, "Maximize window")
             };
-            for (icon, label, command) in [
+            let commands = [
                 (Icon::Close, "Close window", egui::ViewportCommand::Close),
                 (icon, label, egui::ViewportCommand::Maximized(!maximized)),
                 (
@@ -1207,7 +1447,9 @@ fn window_header(
                     "Minimize window",
                     egui::ViewportCommand::Minimized(true),
                 ),
-            ] {
+            ];
+            let count = if compact { 1 } else { commands.len() };
+            for (icon, label, command) in commands.into_iter().take(count) {
                 if button(&mut controls, icon, label) {
                     ui.ctx().send_viewport_cmd(command);
                 }
@@ -1476,21 +1718,19 @@ impl App {
     fn queue_screen(&mut self, ui: &mut egui::Ui, extend_rows: bool) {
         ui.horizontal(|ui| {
             ui.heading(tr("Up next"));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if button(ui, Icon::Close, "Close queue") {
-                    self.queue_open = false;
-                }
-            });
+            if extend_rows {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if button(ui, Icon::Close, "Close queue") {
+                        self.queue_open = false;
+                    }
+                });
+            }
         });
         ui.weak(if self.state.view().shuffle {
             tr("Shuffled order")
         } else {
             tr("Playlist order")
         });
-        if ui.button(tr("Clear queue")).clicked() {
-            self.execute(AppCommand::Clear);
-            self.persist();
-        }
         if self.state.view().session.remaining().is_empty() {
             ui.label(tr("Your queue is empty"));
         }

@@ -1,7 +1,7 @@
 //! Typed transient transport records. Persistent library and queue metadata live in model.
 use crate::{
     core::LibraryPatch,
-    model::{Playlist, Track},
+    model::{Caption, EmojiStatus, Playlist, Track},
 };
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RuntimeMedia {
@@ -24,6 +24,7 @@ pub struct MediaTrack {
     pub message: i64,
     pub title: String,
     pub artist: String,
+    pub caption: Option<Caption>,
     pub duration: u64,
     pub kind: tg_player_domain::MediaKind,
     pub file: i64,
@@ -59,6 +60,7 @@ impl From<Track> for MediaTrack {
             message: track.message,
             title: track.title,
             artist: track.artist,
+            caption: track.caption,
             duration: track.duration,
             kind: track.kind,
             ..Default::default()
@@ -74,6 +76,7 @@ impl From<MediaTrack> for Track {
             message: track.message,
             title: track.title,
             artist: track.artist,
+            caption: track.caption,
             duration: track.duration,
             kind: track.kind,
         }
@@ -85,6 +88,7 @@ pub struct MediaPlaylist {
     pub entry_serial: u64,
     pub id: i64,
     pub title: String,
+    pub emoji_status: Option<EmojiStatus>,
     pub url: String,
     pub image_file: i64,
     pub image_path: Option<String>,
@@ -108,6 +112,7 @@ impl From<Playlist> for MediaPlaylist {
             entry_serial: p.entry_serial,
             id: p.id,
             title: p.title,
+            emoji_status: p.emoji_status,
             url: p.url,
             tracks: p.tracks.into_iter().map(Into::into).collect(),
             filters: p.filters,
@@ -124,6 +129,7 @@ impl From<MediaPlaylist> for Playlist {
             entry_serial: p.entry_serial,
             id: p.id,
             title: p.title,
+            emoji_status: p.emoji_status,
             url: p.url,
             tracks: p.tracks.into_iter().map(Into::into).collect(),
             filters: p.filters,

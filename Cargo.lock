@@ -1357,6 +1357,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastframe-emoji"
+version = "0.15.4"
+source = "git+https://github.com/crmne/fastframe?tag=v0.15.4#8faf6f99ba782b22916a118c77d1a25d97d1414f"
+dependencies = [
+ "egui",
+ "fastframe-fonts",
+ "harfrust",
+ "log",
+ "memmap2",
+ "png 0.18.1",
+ "skrifa",
+ "unicode-segmentation",
+ "windows 0.62.2",
+ "windows-core",
+ "windows-numerics",
+]
+
+[[package]]
 name = "fastframe-file"
 version = "0.15.4"
 source = "git+https://github.com/crmne/fastframe?tag=v0.15.4#8faf6f99ba782b22916a118c77d1a25d97d1414f"
@@ -4298,6 +4316,7 @@ dependencies = [
  "clap",
  "eframe",
  "egui_extras",
+ "fastframe-emoji",
  "fastframe-fonts",
  "fastframe-i18n",
  "fastframe-icons",
@@ -4305,6 +4324,7 @@ dependencies = [
  "fastframe-now-playing",
  "fastframe-shell",
  "fastframe-titlebar",
+ "flate2",
  "futures-util",
  "getrandom 0.3.4",
  "http-range-header",
@@ -4320,6 +4340,7 @@ dependencies = [
  "tempfile",
  "tg-player-application",
  "tg-player-domain",
+ "tlottie",
  "tokio",
  "tokio-util",
  "wayland-client",
@@ -4477,6 +4498,11 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
+name = "tlottie"
+version = "1.0.6"
+source = "git+https://github.com/dkaraush/tlottie?rev=92df98dc209bc39b1e567ec74a8c86a0af5239de#92df98dc209bc39b1e567ec74a8c86a0af5239de"
 
 [[package]]
 name = "tokio"

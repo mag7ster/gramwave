@@ -57,7 +57,24 @@ pub fn apply(app: &mut App, scenario: &str) {
         "empty" => state.playlists[0].tracks.clear(),
         "filters" => state.playlists[0].filters = [false; 3],
         "search" => app.search = "no-matching-demo-track".into(),
-        "queue" => app.queue_open = true,
+        "emojis" => {
+            use tg_player_application::model::{Caption, CaptionEmoji, EmojiStatus};
+            let id = crate::adapters::emoji::DEMO_ID;
+            state.playlists[0].title = "Midnight frequencies 🌙".into();
+            state.playlists[0].emoji_status = Some(EmojiStatus { id, expires_at: 0 });
+            let track = &mut state.playlists[0].tracks[0];
+            track.title = "Эфир 🌗 · Late night radio".into();
+            track.artist = "Диджей 👍🏽".into();
+            track.caption = Some(Caption {
+                text: "Live from the studio ✨ with headphones 🎧".into(),
+                emoji: vec![CaptionEmoji { bytes: 21..24, id }],
+            });
+            app.custom_emoji.set_demo();
+        }
+        "queue" => {
+            app.queue_open = true;
+            app.pane = crate::screens::WorkspacePane::Queue;
+        }
         _ => {}
     }
     app.state = tg_player_application::AppCore::with_offline(state, offline.data());

@@ -318,31 +318,45 @@ impl LibraryCore {
         self.artwork.insert(id, path);
         self.media_version = self.media_version.wrapping_add(1);
     }
-    pub(crate) fn update_file(&mut self, file: TelegramFile) {
+    pub(crate) fn update_file(&mut self, file: TelegramFile) -> Option<String> {
+        let evicted = !file.complete && file.path.is_none();
+        let mut forgotten = None;
         if file.complete {
             if let Some(path) = &file.path {
                 self.cache_artwork(file.id, path.clone());
             }
-        }
-        let mut changed = false;
-        for media in self
-            .runtime
-            .values_mut()
-            .filter(|media| media.file == file.id)
-        {
-            let cached = if file.complete {
-                file.path.clone()
-            } else {
-                None
-            };
-            if media.cached != cached {
-                media.cached = cached;
-                changed = true;
+        } else if evicted {
+            forgotten = self.artwork.remove(&file.id);
+            self.artwork_retry.remove(&file.id);
+            for artwork in self
+                .chat_artwork
+                .values_mut()
+                .filter(|artwork| artwork.file == file.id)
+            {
+                forgotten = artwork.path.take().or(forgotten);
             }
         }
-        if changed {
+        let mut changed = false;
+        for media in self.runtime.values_mut() {
+            if media.file == file.id {
+                let cached = if file.complete {
+                    file.path.clone()
+                } else {
+                    None
+                };
+                if media.cached != cached {
+                    media.cached = cached;
+                    changed = true;
+                }
+            }
+            if evicted && media.image_file == file.id {
+                forgotten = media.image_path.take().or(forgotten);
+            }
+        }
+        if changed || forgotten.is_some() {
             self.media_version = self.media_version.wrapping_add(1);
         }
+        forgotten
     }
 }
 

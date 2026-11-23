@@ -1,4 +1,72 @@
 use tg_player_application::media::MediaTrack as Track;
+use tg_player_application::model::{Caption, CaptionEmoji, EmojiStatus};
+
+pub(super) fn telegram_int64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_str()
+        .and_then(|id| id.parse().ok())
+        .or_else(|| value.as_i64())
+}
+
+pub(super) fn emoji_status(value: &serde_json::Value) -> Option<EmojiStatus> {
+    let kind = &value["type"];
+    let id = match kind["@type"].as_str() {
+        Some("emojiStatusTypeCustomEmoji") => telegram_int64(&kind["custom_emoji_id"]),
+        Some("emojiStatusTypeUpgradedGift") => telegram_int64(&kind["model_custom_emoji_id"]),
+        _ => telegram_int64(&value["custom_emoji_id"]),
+    }?;
+    (id != 0).then_some(EmojiStatus {
+        id,
+        expires_at: value["expiration_date"].as_u64().unwrap_or(0),
+    })
+}
+
+fn caption(value: &serde_json::Value) -> Option<Caption> {
+    let text = value["text"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())?;
+    let mut offsets = vec![Some(0)];
+    for (byte, character) in text.char_indices() {
+        if character.len_utf16() == 2 {
+            offsets.push(None);
+        }
+        offsets.push(Some(byte + character.len_utf8()));
+    }
+    let mut emoji: Vec<_> = value["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entity| {
+            let kind = &entity["type"];
+            if kind["@type"] != "textEntityTypeCustomEmoji" {
+                return None;
+            }
+            let id = telegram_int64(&kind["custom_emoji_id"]).filter(|id| *id != 0)?;
+            let start = usize::try_from(entity["offset"].as_u64()?).ok()?;
+            let length = usize::try_from(entity["length"].as_u64()?).ok()?;
+            let from = offsets.get(start).copied().flatten()?;
+            let to = offsets.get(start.checked_add(length)?).copied().flatten()?;
+            (from < to).then_some(CaptionEmoji {
+                bytes: from..to,
+                id,
+            })
+        })
+        .collect();
+    emoji.sort_by_key(|entity| entity.bytes.start);
+    let mut end = 0;
+    emoji.retain(|entity| {
+        if entity.bytes.start < end {
+            return false;
+        }
+        end = entity.bytes.end;
+        true
+    });
+    Some(Caption {
+        text: text.to_owned(),
+        emoji,
+    })
+}
+
 pub fn audio_document(name: &str, mime: &str) -> bool {
     mime.starts_with("audio/")
         || [
@@ -44,6 +112,7 @@ pub fn track(chat: i64, v: &serde_json::Value) -> Option<Track> {
         file: f["id"].as_i64()?,
         title,
         artist: a["performer"].as_str().unwrap_or("").into(),
+        caption: caption(&c["caption"]),
         duration: a["duration"].as_u64().unwrap_or(0),
         kind: kind.try_into().ok()?,
         cached: local_path(f),
@@ -121,6 +190,10 @@ pub(crate) fn update(v: serde_json::Value) -> Option<TelegramUpdate> {
         "updateChatTitle" => {
             TelegramUpdate::ChatTitle(v["chat_id"].as_i64()?, v["title"].as_str()?.into())
         }
+        "updateChatEmojiStatus" => TelegramUpdate::ChatEmojiStatus(
+            v["chat_id"].as_i64()?,
+            emoji_status(&v["emoji_status"]),
+        ),
         "updateNewMessage" => {
             let m = &v["message"];
             let chat = m["chat_id"].as_i64()?;
@@ -221,6 +294,46 @@ mod tests {
         let v = serde_json::json!({"id":123,"content":{"@type":"messageAudio","audio":{"title":"Song","performer":"Artist","audio":{"id":8}}}});
         let t = track(7, &v).unwrap();
         assert_eq!((t.chat, t.message, t.file), (7, 123, 8));
+    }
+
+    #[test]
+    fn custom_emoji_caption_offsets_are_utf16_code_units() {
+        let caption = super::caption(&serde_json::json!({
+            "text":"😀a💿!",
+            "entities":[
+                {"offset":4,"length":1,"type":{"@type":"textEntityTypeCustomEmoji","custom_emoji_id":"2"}},
+                {"offset":3,"length":2,"type":{"@type":"textEntityTypeCustomEmoji","custom_emoji_id":"9007199254740999"}},
+                {"offset":3,"length":2,"type":{"@type":"textEntityTypeCustomEmoji","custom_emoji_id":"5"}}
+            ]
+        })).unwrap();
+        assert_eq!(caption.emoji.len(), 1);
+        assert_eq!(caption.emoji[0].id, 9007199254740999);
+        assert_eq!(&caption.text[caption.emoji[0].bytes.clone()], "💿");
+    }
+
+    #[test]
+    fn chat_emoji_status_updates_can_remove_the_badge() {
+        let status = super::update(serde_json::json!({
+            "@type":"updateChatEmojiStatus","chat_id":42,"emoji_status":{
+                "expiration_date":123,"type":{"@type":"emojiStatusTypeCustomEmoji","custom_emoji_id":"456"}
+            }
+        }));
+        assert!(matches!(
+            status,
+            Some(TelegramUpdate::ChatEmojiStatus(
+                42,
+                Some(EmojiStatus {
+                    id: 456,
+                    expires_at: 123
+                })
+            ))
+        ));
+        assert!(matches!(
+            super::update(serde_json::json!({
+                "@type":"updateChatEmojiStatus","chat_id":42,"emoji_status":null
+            })),
+            Some(TelegramUpdate::ChatEmojiStatus(42, None))
+        ));
     }
 }
 

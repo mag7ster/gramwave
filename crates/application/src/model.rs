@@ -9,6 +9,24 @@ impl Track {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmojiStatus {
+    pub id: i64,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptionEmoji {
+    pub bytes: std::ops::Range<usize>,
+    pub id: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Caption {
+    pub text: String,
+    pub emoji: Vec<CaptionEmoji>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Track {
@@ -18,6 +36,8 @@ pub struct Track {
     pub message: i64,
     pub title: String,
     pub artist: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caption: Option<Caption>,
     pub duration: u64,
     pub kind: MediaKind,
 }
@@ -27,6 +47,7 @@ pub struct Playlist {
     pub entry_serial: u64,
     pub id: i64,
     pub title: String,
+    pub emoji_status: Option<EmojiStatus>,
     pub url: String,
     pub tracks: Vec<Track>,
     pub filters: [bool; 3],
@@ -94,6 +115,8 @@ pub struct State {
     pub playlists: Vec<Playlist>,
     pub chat_pins: Vec<i64>,
     pub last_opened_chat: Option<i64>,
+    pub startup_playlist: StartupPlaylist,
+    pub last_played_chat: Option<i64>,
     pub session: tg_player_domain::playback::Session,
     pub repeat: tg_player_domain::playback::RepeatMode,
     pub shuffle: bool,
@@ -102,6 +125,7 @@ pub struct State {
     pub api_id: String,
     pub api_hash: String,
     pub light: bool,
+    pub cache_policy: crate::persistence::CachePolicy,
     #[serde(default = "default_filters")]
     pub filters: [bool; 3],
 }
@@ -111,6 +135,8 @@ impl Default for State {
             playlists: Vec::new(),
             chat_pins: Vec::new(),
             last_opened_chat: None,
+            startup_playlist: StartupPlaylist::default(),
+            last_played_chat: None,
             session: Default::default(),
             repeat: Default::default(),
             shuffle: false,
@@ -119,11 +145,35 @@ impl Default for State {
             api_id: String::new(),
             api_hash: String::new(),
             light: false,
+            cache_policy: Default::default(),
             filters: default_filters(),
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupPlaylist {
+    #[default]
+    LastOpened,
+    LastPlayed,
+}
+
 impl State {
+    pub fn startup_chat(&self) -> Option<i64> {
+        let last_played = match self.startup_playlist {
+            StartupPlaylist::LastOpened => None,
+            StartupPlaylist::LastPlayed => self
+                .last_played_chat
+                .or_else(|| self.session.current().map(|track| track.chat)),
+        };
+        last_played
+            .into_iter()
+            .chain(self.last_opened_chat)
+            .chain(self.session.source)
+            .find(|id| self.playlists.iter().any(|playlist| playlist.id == *id))
+    }
+
     pub fn sidebar_chats(&self, searching: bool, query: &str) -> Vec<usize> {
         if searching {
             let query = query.trim().to_lowercase();

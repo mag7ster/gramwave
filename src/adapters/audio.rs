@@ -12,6 +12,7 @@ struct NativePlayer {
     handle: *mut c_void,
     command: Command,
     active_entry: std::cell::Cell<Option<i64>>,
+    waiting_for_entry: std::cell::Cell<bool>,
     started_entry: std::cell::Cell<Option<i64>>,
     ready_entry: std::cell::Cell<Option<i64>>,
     command_errors: std::cell::RefCell<Vec<String>>,
@@ -35,6 +36,7 @@ impl NativePlayer {
             let mut player = Self {
                 handle: std::ptr::null_mut(),
                 active_entry: Default::default(),
+                waiting_for_entry: Default::default(),
                 started_entry: Default::default(),
                 ready_entry: Default::default(),
                 command_errors: Default::default(),
@@ -109,6 +111,7 @@ impl NativePlayer {
         }
         if args.first() == Some(&"stop") {
             self.active_entry.set(None);
+            self.waiting_for_entry.set(false);
         }
         let strings: Vec<_> = args
             .iter()
@@ -132,6 +135,7 @@ impl NativePlayer {
                 )
             };
             self.active_entry.set((code >= 0).then_some(id));
+            self.waiting_for_entry.set(code < 0);
         }
         Ok(())
     }
@@ -166,9 +170,12 @@ impl NativePlayer {
                     _ => {}
                 }
             } else if event.event_id == 6 && !event.data.is_null() {
-                self.started_entry.set(Some(unsafe {
-                    (*event.data.cast::<abi::mpv_event_start_file>()).playlist_entry_id
-                }));
+                let entry =
+                    unsafe { (*event.data.cast::<abi::mpv_event_start_file>()).playlist_entry_id };
+                if self.waiting_for_entry.replace(false) {
+                    self.active_entry.set(Some(entry));
+                }
+                self.started_entry.set(Some(entry));
             } else if event.event_id == 8 && self.started_entry.get() == self.active_entry.get() {
                 events.push(PlaybackEvent::Loaded);
             } else if event.event_id == abi::mpv_event_id_MPV_EVENT_PLAYBACK_RESTART
@@ -254,6 +261,7 @@ struct Request {
 pub struct Player {
     sender: Option<mpsc::Sender<Request>>,
     generation: AtomicU64,
+    active_load: Arc<AtomicU64>,
     events: mpsc::Receiver<(u64, PlaybackEvent)>,
     snapshot: Arc<Mutex<crate::application::ports::PlayerSnapshot>>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -272,6 +280,8 @@ impl Player {
         let (ready, started) = mpsc::sync_channel(1);
         let snapshot = Arc::new(Mutex::new(Default::default()));
         let values = snapshot.clone();
+        let active_load = Arc::new(AtomicU64::new(0));
+        let owner_load = active_load.clone();
         let worker = thread::Builder::new()
             .name("tg-mpv".into())
             .spawn(move || {
@@ -305,6 +315,20 @@ impl Player {
                         Err(mpsc::TryRecvError::Empty) => false,
                     };
                     let events = native.drain();
+                    if native.active_entry.get().is_none()
+                        && !native.waiting_for_entry.get()
+                        && native.flag("idle-active")
+                    {
+                        let pending = owner_load.load(Ordering::Acquire);
+                        if pending <= generation {
+                            let _ = owner_load.compare_exchange(
+                                pending,
+                                0,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            );
+                        }
+                    }
                     let previous = snapshot;
                     snapshot = publish_snapshot(&values, || {
                         let seeking = native.flag("seeking");
@@ -354,6 +378,7 @@ impl Player {
         Ok(Self {
             sender: Some(sender),
             generation: AtomicU64::new(0),
+            active_load,
             events,
             snapshot,
             worker: Some(worker),
@@ -371,15 +396,32 @@ impl Player {
         } else {
             self.generation.load(Ordering::Acquire)
         };
-        self.sender
+        let is_load = args.first() == Some(&"loadfile");
+        if is_load {
+            self.active_load.store(generation, Ordering::Release);
+        }
+        let result = self
+            .sender
             .as_ref()
-            .ok_or("mpv is closed")?
-            .send(Request {
+            .ok_or("mpv is closed".to_owned())
+            .and_then(|sender| {
+                sender
+                    .send(Request {
+                        generation,
+                        args: args.iter().map(|s| (*s).into()).collect(),
+                        start_ms,
+                    })
+                    .map_err(|e| e.to_string())
+            });
+        if result.is_err() && is_load {
+            let _ = self.active_load.compare_exchange(
                 generation,
-                args: args.iter().map(|s| (*s).into()).collect(),
-                start_ms,
-            })
-            .map_err(|e| e.to_string())?;
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        result?;
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
@@ -461,6 +503,9 @@ impl PlayerBackend for Player {
     }
     fn snapshot(&self) -> crate::application::ports::PlayerSnapshot {
         *self.snapshot.lock().unwrap()
+    }
+    fn is_idle(&self) -> bool {
+        self.active_load.load(Ordering::Acquire) == 0
     }
     fn shutdown(&mut self, timeout: Duration) -> Result<(), tg_player_application::AppError> {
         self.shutdown(timeout)

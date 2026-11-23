@@ -34,7 +34,6 @@ pub enum Effect {
     AuthenticationFinished(Result<(), AppError>),
     ParametersRequested,
     Connect,
-    ClearCache,
     Quit,
     RetryRequested,
     SelectPlaylistRow(usize),
@@ -134,7 +133,6 @@ impl AppCore {
                     ]);
                 }
             }
-            AppCommand::ClearCache => effects.push(Effect::ClearCache),
             AppCommand::Quit => effects.push(Effect::Quit),
             AppCommand::Retry => effects.push(Effect::RetryRequested),
             AppCommand::SelectPlaylistRow(index) => effects.push(Effect::SelectPlaylistRow(index)),
@@ -464,7 +462,17 @@ impl AppCore {
                     }
                 }
             }
-            AppEvent::Player(PlaybackEvent::Loaded) => self.playback.state.set_loading(false),
+            AppEvent::Player(PlaybackEvent::Loaded) => {
+                if self.playback.state.loading() {
+                    let chat = self.state.session.current().map(|track| track.chat);
+                    if chat.is_some() && self.state.last_played_chat != chat {
+                        let mut settings = crate::persistence::Settings::from(&self.state);
+                        settings.last_played_chat = chat;
+                        self.handle(CoreCommand::Settings(settings));
+                    }
+                }
+                self.playback.state.set_loading(false);
+            }
             AppEvent::Player(PlaybackEvent::Finished)
                 if self.state.session.current().is_some() && !self.playback.state.loading() =>
             {

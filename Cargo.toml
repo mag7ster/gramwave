@@ -18,7 +18,7 @@ vulkan = ["eframe/wgpu_no_default_features", "dep:wgpu"]
 [dependencies]
 tg-player-domain = { path = "crates/domain" }
 tg-player-application = { path = "crates/application" }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "fs", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "fs", "io-util", "macros", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 http-range-header = "0.4"
@@ -35,9 +35,12 @@ libloading = "0.8"
 qrcode = { version = "0.14", default-features = false }
 fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
+fastframe-emoji = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+flate2 = "1"
+tlottie = { git = "https://github.com/dkaraush/tlottie", rev = "92df98dc209bc39b1e567ec74a8c86a0af5239de" }
 
 fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 fastframe-titlebar = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }

@@ -42,6 +42,7 @@ impl LibraryCore {
             LibraryMutation::MergeChat(playlist) => {
                 if let Some(old) = state.playlists.iter_mut().find(|p| p.id == chat) {
                     old.title = playlist.title;
+                    old.emoji_status = playlist.emoji_status;
                 } else {
                     state.playlists.push(playlist);
                 }

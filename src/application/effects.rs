@@ -222,7 +222,6 @@ impl App {
                     ))
                 }
                 Effect::Connect => self.connect_native(),
-                Effect::ClearCache => self.clear_automatic_cache(),
                 Effect::Quit => self.quitting = true,
                 Effect::RetryRequested => self.retry_error(),
                 Effect::SelectPlaylistRow(index) => self.select_playlist_row(index),
@@ -237,6 +236,7 @@ impl App {
                         server.stop();
                     }
                     self.tg = None;
+                    self.cache = Default::default();
                     self.stream_base.clear();
                     self.server.take();
                 }
@@ -244,13 +244,39 @@ impl App {
                 Effect::Prefetch(track) => {
                     let track = self.media_track(track);
                     if track.file > 0 {
-                        if let Some(tg) = &self.tg {
-                            tg.prefetch(track.file);
+                        if let Some(tg) = self.tg.clone() {
+                            self.async_event(
+                                JobClass::Background,
+                                0,
+                                async move {
+                                    tg.prefetch(track.file).await;
+                                    Event::Noop
+                                },
+                                |_| Event::Noop,
+                            );
                         }
                     }
                 }
                 Effect::Player(command) => {
                     if let Some(player) = &self.player {
+                        if let tg_player_application::ports::PlayerCommand::Load { path, .. } =
+                            &command
+                        {
+                            use super::cache::CachePlayback;
+                            let offline = self
+                                .state
+                                .view()
+                                .session
+                                .current()
+                                .and_then(|entry| self.state.offline().path(entry.id()));
+                            self.cache_playback = if offline == Some(path.as_str()) {
+                                CachePlayback::Offline
+                            } else if std::path::Path::new(path).is_absolute() {
+                                CachePlayback::Local
+                            } else {
+                                CachePlayback::Stream
+                            };
+                        }
                         let result = player.command(command);
                         if let Err(error) = result {
                             self.core_event(AppEvent::Player(
@@ -312,6 +338,10 @@ impl App {
                         async move {
                             let cancel = &operation.cancel;
                             let result = async {
+                                let _cache = match &tg {
+                                    Some(tg) => Some(tg.cache_read(cancel).await?),
+                                    None => None,
+                                };
                                 let mut track = track;
                                 let path = offline
                                     .filter(|p| std::path::Path::new(p).is_file())

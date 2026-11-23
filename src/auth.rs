@@ -90,7 +90,7 @@ impl App {
 ui.heading(tr("Connect your Telegram"));
 ui.label(egui::RichText::new(tr("ONE-TIME SETUP")).small().color(design::GREEN));
 ui.weak(tr("Register an app at my.telegram.org, then paste its credentials below. Your login is saved on this device."));
-ui.horizontal(|ui| {
+ui.horizontal_wrapped(|ui| {
     ui.hyperlink_to(tr("Get application credentials"),"https://my.telegram.org/apps");
     if ui.small_button(tr("Copy link")).clicked(){ui.ctx().copy_text("https://my.telegram.org/apps".into());}
 });
@@ -114,7 +114,7 @@ self.persist();
 ui.heading(tr("Sign in to Telegram"));
 if let Ok(code)=qrcode::QrCode::new(self.qr.as_bytes()){
 if !self.qr.is_empty(){
-let size=240.;
+let size=ui.available_width().min(240.);
 let width=code.width();
 let cell=size/(width+8)as f32;
 let(rect,_)=ui.allocate_exact_size(egui::vec2(size,size),egui::Sense::hover());

@@ -9,7 +9,6 @@ pub enum AppCommand {
     SavePlaylist(i64, [bool; 3]),
     RemoveOffline(tg_player_domain::TrackId, String),
     CancelOffline,
-    ClearCache,
     Settings(crate::persistence::Settings),
     Filters(i64, [bool; 3]),
     Insert(Track, bool),

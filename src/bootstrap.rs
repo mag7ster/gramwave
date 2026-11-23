@@ -95,7 +95,7 @@ pub fn run() -> eframe::Result {
         let viewport = egui::ViewportBuilder::default()
             .with_inner_size(crate::launch::options().window_size())
             .with_decorations(!fastframe_titlebar::enabled())
-            .with_min_inner_size([850., 550.]);
+            .with_min_inner_size(crate::launch::MIN_WINDOW_SIZE);
         #[cfg(target_os = "linux")]
         let viewport = viewport.with_app_id(app_id);
         #[cfg(feature = "vulkan")]
@@ -127,6 +127,7 @@ pub fn run() -> eframe::Result {
                 cc.egui_ctx
                     .set_fonts(fastframe_fonts::FontSetup::default().definitions());
                 egui_extras::install_image_loaders(&cc.egui_ctx);
+                crate::emoji::install(&cc.egui_ctx, crate::launch::options().screenshot.is_some());
                 crate::design::install(&cc.egui_ctx);
                 let app = lease.take(&cc.egui_ctx);
                 #[cfg(target_os = "linux")]

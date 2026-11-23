@@ -1,5 +1,8 @@
 //! Desktop-only row model. Persistent application metadata never contains these file paths.
-use tg_player_application::{media::MediaTrack, model::Track as Metadata};
+use tg_player_application::{
+    media::MediaTrack,
+    model::{Caption, Track as Metadata},
+};
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Track {
     pub library_id: u64,
@@ -9,6 +12,7 @@ pub(crate) struct Track {
     pub message: i64,
     pub title: String,
     pub artist: String,
+    pub caption: Option<Caption>,
     pub duration: u64,
     pub kind: tg_player_domain::MediaKind,
     pub file: i64,
@@ -35,6 +39,7 @@ impl Track {
             message: self.message,
             title: self.title,
             artist: self.artist,
+            caption: self.caption,
             duration: self.duration,
             kind: self.kind,
             file: self.file,
@@ -54,6 +59,7 @@ impl From<MediaTrack> for Track {
             message: t.message,
             title: t.title,
             artist: t.artist,
+            caption: t.caption,
             duration: t.duration,
             kind: t.kind,
             file: t.file,

@@ -6,8 +6,10 @@ channels, groups, private chats and Saved Messages in a dedicated desktop app.
 ## Features
 
 - Browse and search chats, pin favorites, and filter music, audio files and voice messages.
+- Open source chats in the system Telegram client and choose which playlist appears on startup.
 - Edit the playback queue, shuffle tracks and use repeat modes.
-- Save tracks or entire playlists for offline listening.
+- Save tracks or entire playlists for offline listening and manage temporary media by category and chat.
+- Resize down to a mini player and view color emoji and animated Telegram emoji.
 - Control playback with media keys, MPRIS and the system tray.
 - Switch between light and dark themes.
 
@@ -21,6 +23,11 @@ The executable and data directory are named `tg-player`.
 You need a recent stable Rust toolchain and `libmpv.so.2`. The default build
 downloads TDLib automatically; its runtime dependencies are OpenSSL 3, zlib,
 libc++, libc++abi and LLVM libunwind.
+
+Opening a source chat uses GIO (`gio`) and a registered `tg://` handler such as
+Telegram Desktop. Video emoji use FFmpeg with the `libvpx-vp9` decoder for
+transparency. Without that decoder the player shows a thumbnail or the associated
+Unicode emoji.
 
 On Fedora:
 

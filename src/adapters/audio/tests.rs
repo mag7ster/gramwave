@@ -67,6 +67,44 @@ mod playback_tests {
     }
 
     #[test]
+    fn native_seek_works_after_a_cached_file_is_unlinked() {
+        use std::time::Instant;
+        let player = Player::with_audio_output(Some("null"), Default::default()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cache.wav");
+        write_wav(&path, 960_000);
+        player
+            .try_cmd(&["loadfile", path.to_str().unwrap(), "replace"])
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !player.drain().contains(&PlaybackEvent::Loaded) {
+            assert!(Instant::now() < deadline, "mpv did not open the file");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::fs::remove_file(path).unwrap();
+        player.try_cmd(&["seek", "100", "absolute+exact"]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            assert!(player
+                .drain()
+                .iter()
+                .all(|event| !matches!(event, PlaybackEvent::Failed(_))));
+            if player
+                .snapshot()
+                .checkpoint_position
+                .is_some_and(|position| (100.05..101.).contains(&position))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "mpv did not play from the new position"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
     fn native_eof_advances_two_tracks_and_manual_stop_is_distinct() {
         let player = Player::with_audio_output(Some("null"), Default::default())
             .expect("libmpv with null audio output");
@@ -76,7 +114,9 @@ mod playback_tests {
         let filename = path.to_str().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut completed = 0;
+        assert!(player.is_idle());
         player.try_cmd(&["loadfile", filename, "replace"]).unwrap();
+        assert!(!player.is_idle());
         while completed < 2 && std::time::Instant::now() < deadline {
             for event in player.drain() {
                 match event {
@@ -129,6 +169,7 @@ mod playback_tests {
             player.number("pause") > 0.5,
             "mpv did not acknowledge pause"
         );
+        assert!(!player.is_idle());
         assert!(player.number("seeking") < 0.5, "mpv seek did not settle");
         // The null audio clock includes a small buffered offset while paused.
         let paused_at = player.number("time-pos");
@@ -150,7 +191,7 @@ mod playback_tests {
         player.try_cmd(&["stop"]).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         let mut stopped = false;
-        while !stopped && std::time::Instant::now() < deadline {
+        while (!stopped || !player.is_idle()) && std::time::Instant::now() < deadline {
             for event in player.drain() {
                 assert_ne!(
                     event,
@@ -162,6 +203,7 @@ mod playback_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(stopped);
+        assert!(player.is_idle());
         std::fs::remove_file(path).unwrap();
     }
 }
@@ -214,6 +256,7 @@ fn player_port_reports_invalid_commands_and_a_closed_worker() {
     let mut player = Player {
         sender: Some(sender),
         generation: AtomicU64::new(0),
+        active_load: Default::default(),
         events,
         snapshot: Arc::new(Mutex::new(Default::default())),
         worker: None,

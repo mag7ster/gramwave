@@ -8,6 +8,77 @@ fn track(message: i64) -> Track {
         ..Default::default()
     }
 }
+
+#[test]
+fn startup_uses_the_loaded_track_chat_even_after_stopping() {
+    use crate::{
+        model::{Playlist, StartupPlaylist},
+        persistence::Settings,
+    };
+
+    let mut first = track(1);
+    first.chat = 1;
+    let mut mixed = track(2);
+    mixed.chat = 2;
+    let legacy = r#"{"last_opened_chat":3}"#;
+    let settings: Settings = serde_json::from_str(legacy).unwrap();
+    assert_eq!(settings.startup_playlist, StartupPlaylist::LastOpened);
+    let mut state = State {
+        playlists: (1..=3)
+            .map(|id| Playlist {
+                id,
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    settings.apply(&mut state);
+    state.session.start(&[first, mixed.clone()], 0, false);
+    assert_eq!(state.startup_chat(), Some(3));
+    state.startup_playlist = StartupPlaylist::LastPlayed;
+    assert_eq!(state.startup_chat(), Some(1));
+
+    let mut core = AppCore::new(state);
+    let effects = core.command(AppCommand::Next);
+    let (request, revision) = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::PreparePlayback {
+                operation,
+                revision,
+                ..
+            } => Some((operation.key(), revision)),
+            _ => None,
+        })
+        .unwrap();
+    core.event(AppEvent::PlaybackPrepared {
+        request,
+        revision,
+        result: Ok(PreparedPlayback {
+            track: mixed.into(),
+            path: Some("test.ogg".into()),
+        }),
+    });
+    let effects = core.event(AppEvent::Player(PlaybackEvent::Loaded));
+    let saved = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Persist(changes) => changes.settings,
+            _ => None,
+        })
+        .unwrap();
+    core.command(AppCommand::Stop);
+
+    let mut reopened = core.view().clone();
+    serde_json::from_str::<Settings>(&serde_json::to_string(&saved).unwrap())
+        .unwrap()
+        .apply(&mut reopened);
+    assert!(reopened.session.current().is_none());
+    assert_eq!(reopened.startup_chat(), Some(2));
+    reopened.playlists.retain(|playlist| playlist.id != 2);
+    assert_eq!(reopened.startup_chat(), Some(3));
+}
+
 fn download(core: &mut AppCore, id: tg_player_domain::TrackId) -> RequestId {
     core.pump(Instant::now(), true)
         .into_iter()

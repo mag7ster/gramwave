@@ -147,6 +147,7 @@ pub(super) fn chat_metadata(c: &Value, filters: [bool; 3]) -> Option<MediaPlayli
     Some(MediaPlaylist {
         id: c["id"].as_i64()?,
         title: c["title"].as_str()?.into(),
+        emoji_status: super::telegram_mapping::emoji_status(&c["emoji_status"]),
         filters,
         image_file: c["photo"]["small"]["id"].as_i64().unwrap_or(0),
         ..Default::default()

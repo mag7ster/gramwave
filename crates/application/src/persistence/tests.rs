@@ -93,3 +93,28 @@ fn newer_cancellation_and_settings_supersede_rejected_values() {
     assert_eq!(retry.settings.unwrap().volume, 34.);
     assert!(core.take_changes().is_empty());
 }
+#[test]
+fn older_settings_receive_cache_defaults_and_custom_values_round_trip() {
+    use crate::persistence::{CachePolicy, Settings};
+
+    let old: Settings = serde_json::from_str("{}").unwrap();
+    assert_eq!(
+        old.cache_policy,
+        CachePolicy {
+            days: 7,
+            size_mib: 1024
+        }
+    );
+    let edited = Settings {
+        cache_policy: CachePolicy {
+            days: 14,
+            size_mib: 2048,
+        },
+        ..old
+    };
+    let restored: Settings =
+        serde_json::from_str(&serde_json::to_string(&edited).unwrap()).unwrap();
+    let mut state = crate::model::State::default();
+    restored.apply(&mut state);
+    assert_eq!(Settings::from(&state).cache_policy, edited.cache_policy);
+}

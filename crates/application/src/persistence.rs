@@ -1,13 +1,38 @@
 //! Explicit persistence contracts. Runtime media never enters a settings record.
-use crate::model::{Playlist, State, Track};
+use crate::model::{Playlist, StartupPlaylist, State, Track};
 use serde::{Deserialize, Serialize};
 use tg_player_domain::{RepeatMode, Session};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CachePolicy {
+    pub days: u32,
+    pub size_mib: u32,
+}
+impl Default for CachePolicy {
+    fn default() -> Self {
+        Self {
+            days: 7,
+            size_mib: 1024,
+        }
+    }
+}
+impl CachePolicy {
+    pub fn normalized(self) -> Self {
+        Self {
+            days: self.days.clamp(1, 365),
+            size_mib: self.size_mib.clamp(64, 16384),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub chat_pins: Vec<i64>,
     pub last_opened_chat: Option<i64>,
+    pub startup_playlist: StartupPlaylist,
+    pub last_played_chat: Option<i64>,
     pub repeat: RepeatMode,
     pub shuffle: bool,
     pub volume: f32,
@@ -15,6 +40,7 @@ pub struct Settings {
     pub api_id: String,
     pub api_hash: String,
     pub light: bool,
+    pub cache_policy: CachePolicy,
     pub filters: [bool; 3],
 }
 impl Default for Settings {
@@ -27,6 +53,8 @@ impl From<&State> for Settings {
         Self {
             chat_pins: s.chat_pins.clone(),
             last_opened_chat: s.last_opened_chat,
+            startup_playlist: s.startup_playlist,
+            last_played_chat: s.last_played_chat,
             repeat: s.repeat,
             shuffle: s.shuffle,
             volume: s.volume,
@@ -34,6 +62,7 @@ impl From<&State> for Settings {
             api_id: s.api_id.clone(),
             api_hash: s.api_hash.clone(),
             light: s.light,
+            cache_policy: s.cache_policy,
             filters: s.filters,
         }
     }
@@ -42,6 +71,8 @@ impl Settings {
     pub fn apply(self, s: &mut State) {
         s.chat_pins = self.chat_pins;
         s.last_opened_chat = self.last_opened_chat;
+        s.startup_playlist = self.startup_playlist;
+        s.last_played_chat = self.last_played_chat;
         s.repeat = self.repeat;
         s.shuffle = self.shuffle;
         s.volume = self.volume;
@@ -49,6 +80,7 @@ impl Settings {
         s.api_id = self.api_id;
         s.api_hash = self.api_hash;
         s.light = self.light;
+        s.cache_policy = self.cache_policy.normalized();
         s.filters = self.filters;
     }
 }
@@ -57,6 +89,8 @@ pub struct PlaylistHeader {
     pub entry_serial: u64,
     pub id: i64,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji_status: Option<crate::model::EmojiStatus>,
     pub url: String,
     pub filters: [bool; 3],
     pub pinned: bool,
@@ -69,6 +103,7 @@ impl From<&Playlist> for PlaylistHeader {
             entry_serial: p.entry_serial,
             id: p.id,
             title: p.title.clone(),
+            emoji_status: p.emoji_status,
             url: p.url.clone(),
             filters: p.filters,
             pinned: p.pinned,

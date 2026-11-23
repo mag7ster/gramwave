@@ -149,7 +149,11 @@ impl AppCore {
             }
             LibraryCommand::MergeChat(playlist) => self.merge_library_chat(playlist),
             LibraryCommand::Source(update) => match update {
-                TelegramUpdate::File(file) => self.library.update_file(file),
+                TelegramUpdate::File(file) => {
+                    if let Some(path) = self.library.update_file(file) {
+                        effects.push(Effect::Library(LibraryEffect::ForgetArtwork(path)));
+                    }
+                }
                 TelegramUpdate::Chat(mut playlist) => {
                     playlist.filters = self.state.filters;
                     self.merge_library_chat(playlist);
@@ -158,6 +162,13 @@ impl AppCore {
                     if let Some(playlist) = self.state.playlists.iter().find(|p| p.id == chat) {
                         let mut playlist = playlist.clone();
                         playlist.title = title;
+                        self.handle(CoreCommand::MergeChat(playlist));
+                    }
+                }
+                TelegramUpdate::ChatEmojiStatus(chat, emoji_status) => {
+                    if let Some(playlist) = self.state.playlists.iter().find(|p| p.id == chat) {
+                        let mut playlist = playlist.clone();
+                        playlist.emoji_status = emoji_status;
                         self.handle(CoreCommand::MergeChat(playlist));
                     }
                 }
@@ -737,6 +748,15 @@ mod tests {
         )));
         assert!(effects.is_empty());
         assert_eq!(core.media_track(track(7)).cached.as_deref(), Some("cached"));
+        let evicted = core.library_command(LibraryCommand::Source(TelegramUpdate::File(
+            crate::telegram::TelegramFile {
+                id: 99,
+                ..Default::default()
+            },
+        )));
+        assert!(core.media_track(track(7)).cached.is_none());
+        assert!(core.library.artwork_path(99).is_none());
+        assert!(evicted.iter().any(|effect| matches!(effect, Effect::Library(LibraryEffect::ForgetArtwork(path)) if path == "cached")));
         assert!(core.state.playlists[0]
             .tracks
             .iter()

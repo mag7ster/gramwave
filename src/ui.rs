@@ -1,6 +1,6 @@
 use crate::adapters::tray::{Event as TrayEvent, Tray};
 use crate::application::commands::AppCommand;
-use crate::{design, tr, App, Event, RepeatMode};
+use crate::{design, tr, App, RepeatMode};
 use eframe::egui;
 use std::time::{Duration, Instant};
 
@@ -73,35 +73,44 @@ impl App {
             return;
         }
         let p = design::palette(self.state.view().light);
-        let width = (ctx.content_rect().width() - 80.).clamp(280., 520.);
+        let viewport = ctx.content_rect();
+        let compact = viewport.height() < 300. || viewport.width() < 400.;
+        let margin = if compact { 8. } else { 24. };
+        let width = (viewport.width() - margin * 2. - 16.).clamp(100., 520.);
+        let height = (viewport.height() - margin * 2. - 12.).clamp(54., 720.);
         let mut close = false;
         let mut changed = false;
         let mut light = self.state.view().light;
         let mut filters = self.state.view().filters;
+        let mut cache_policy = self.state.view().cache_policy;
         let mut remove = None;
         let response = egui::Modal::new(egui::Id::new("player-settings"))
             .frame(
                 egui::Frame::new()
                     .fill(p.panel)
                     .corner_radius(16)
-                    .inner_margin(24.),
+                    .inner_margin(margin),
             )
             .show(ctx, |ui| {
                 ui.set_width(width);
-                ui.set_height((ctx.content_rect().height() - 112.).clamp(200., 720.));
+                ui.set_height(height);
                 ui.spacing_mut().scroll.floating = false;
                 ui.spacing_mut().scroll.bar_width = 4.;
                 ui.horizontal(|ui| {
-                    ui.heading(egui::RichText::new(tr("Settings")).size(26.).strong());
+                    ui.heading(
+                        egui::RichText::new(tr("Settings"))
+                            .size(if compact { 18. } else { 26. })
+                            .strong(),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         close = design::button(ui, design::Icon::Close, "Close settings");
                     });
                 });
-                ui.add_space(12.);
+                ui.add_space(if compact { 2. } else { 12. });
                 egui::ScrollArea::vertical()
                     .id_salt("settings-content")
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-                    .max_height((ctx.content_rect().height() - 160.).max(140.))
+                    .max_height(ui.available_height().max(24.))
                     .show(ui, |ui| {
                         design::settings_section(ui, tr("Appearance"), |ui| {
                             ui.weak(tr("Choose the player’s color scheme."));
@@ -116,6 +125,7 @@ impl App {
                                 }
                             });
                         });
+                        self.startup_settings_ui(ui);
                         design::settings_section(ui, tr("Playback"), |ui| {
                             ui.label(tr("Shuffle"));
                             ui.horizontal(|ui| {
@@ -162,14 +172,13 @@ impl App {
                                 changed = true;
                             }
                         });
+                        if self.cache_settings_ui(ui, &mut cache_policy) {
+                            changed = true;
+                            self.cache_policy_changed();
+                        }
                         design::settings_section(ui, tr("Offline storage"), |ui| {
                             if let Some(notice) = self.inline_notice(ctx, true) {
                                 ui.weak(notice);
-                            }
-                            ui.label(tr("Automatic cache · 2 GiB"));
-                            ui.weak(tr("Saved offline tracks are kept separately."));
-                            if ui.button(tr("Clear automatic cache")).clicked() {
-                                self.execute(AppCommand::ClearCache);
                             }
                             if !self.state.offline().pending.is_empty() {
                                 ui.weak(tr("Downloading offline tracks…"));
@@ -179,22 +188,52 @@ impl App {
                                 }
                             }
                             let mut any = false;
+                            let offline_total = self
+                                .state
+                                .offline()
+                                .copies
+                                .values()
+                                .filter_map(|copy| self.cache.offline_sizes.get(&copy.path))
+                                .copied()
+                                .reduce(u64::saturating_add);
                             for copy in self.state.offline().copies.values() {
                                 let t = &copy.track;
                                 {
                                     let path = &copy.path;
                                     if !any {
                                         ui.add_space(8.);
-                                        ui.strong(tr("Saved tracks"));
+                                        ui.strong(offline_total.map_or_else(
+                                            || tr("Saved tracks"),
+                                            |bytes| {
+                                                tr("Saved tracks · {size}").replace(
+                                                    "{size}",
+                                                    &crate::application::cache::cache_size(bytes),
+                                                )
+                                            },
+                                        ));
                                     }
                                     any = true;
                                     ui.horizontal(|ui| {
+                                        let size = self
+                                            .cache
+                                            .offline_sizes
+                                            .get(path)
+                                            .copied()
+                                            .map(crate::application::cache::cache_size);
                                         ui.add_sized(
-                                            [ui.available_width() - 44., 36.],
+                                            [
+                                                (ui.available_width()
+                                                    - if size.is_some() { 112. } else { 44. })
+                                                .max(24.),
+                                                36.,
+                                            ],
                                             egui::Label::new(&t.title)
                                                 .truncate()
                                                 .show_tooltip_when_elided(false),
                                         );
+                                        if let Some(size) = size {
+                                            ui.weak(size);
+                                        }
                                         if design::button(
                                             ui,
                                             design::Icon::Close,
@@ -229,26 +268,13 @@ impl App {
                 tg_player_application::persistence::Settings::from(self.state.view());
             settings.light = light;
             settings.filters = filters;
+            settings.cache_policy = cache_policy;
             self.execute(AppCommand::Settings(settings));
             self.persist();
         }
         if close || response.should_close() {
             self.settings_open = false;
-        }
-    }
-    pub(crate) fn clear_automatic_cache(&self) {
-        if let Some(tg) = self.tg.clone() {
-            self.async_event(
-                tg_player_application::tasks::JobClass::Background,
-                0,
-                async move {
-                    match tg.clear_cache(&Default::default()).await {
-                        Ok(()) => Event::Noop,
-                        Err(e) => Event::Error(e),
-                    }
-                },
-                Event::Error,
-            );
+            self.cache_settings_closed();
         }
     }
 }
@@ -396,6 +422,7 @@ impl App {
         self.process(ctx);
         self.process_control();
         let now = std::time::Instant::now();
+        let cache = self.maintain_cache(now);
         let offline = self.pump_offline(now);
 
         if window_present
@@ -560,6 +587,7 @@ impl App {
 
         offline
             .into_iter()
+            .chain(cache)
             .chain(smoke)
             .chain(mpris)
             .chain(self.settle_tray_focus(ctx, window_present))

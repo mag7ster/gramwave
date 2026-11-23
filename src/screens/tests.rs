@@ -73,6 +73,52 @@ mod regression {
         }
         assert!(egui::Popup::is_any_open(&ctx));
     }
+
+    #[test]
+    fn header_drags_again_when_the_compositor_keeps_the_release() {
+        let ctx = egui::Context::default();
+        design::install(&ctx);
+        design::style(&ctx, false);
+        let mut time = 0.;
+        let mut frame = |events| {
+            time += 0.02;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(850., 550.),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                window_header(ui, Some("Track"), true);
+            });
+            output.textures_delta.clear();
+            output
+                .viewport_output
+                .remove(&egui::ViewportId::ROOT)
+                .unwrap()
+                .commands
+        };
+        let start = egui::pos2(220., 22.);
+        frame(vec![egui::Event::PointerMoved(start)]);
+        for _ in 0..2 {
+            let begin = frame(vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            assert!(!begin.contains(&egui::ViewportCommand::StartDrag));
+            let moved = frame(vec![egui::Event::PointerMoved(start + egui::vec2(16., 0.))]);
+            assert!(moved.contains(&egui::ViewportCommand::StartDrag));
+            frame(vec![egui::Event::PointerGone]);
+        }
+    }
     #[test]
     fn long_metadata_fits_virtual_list_row_height() {
         let ctx = egui::Context::default();
@@ -209,24 +255,53 @@ mod interaction_tests {
     }
 
     #[test]
-    fn compact_queue_resizes_from_its_left_edge() {
+    fn compact_tabs_show_one_view_and_opening_a_chat_reveals_its_tracks() {
         let mut h = Harness::new();
         h.app.queue_open = true;
-        for _ in 0..8 {
-            h.frame(vec![]);
-        }
-        let queue = |ctx: &egui::Context| ctx.memory(|m| m.area_rect("compact-queue").unwrap());
-        let before = queue(&h.ctx);
-        let from = before.left_center();
-        let to = from - egui::vec2(65., 0.);
-        h.pointer(from, true);
-        h.frame(vec![egui::Event::PointerMoved(to)]);
-        h.pointer(to, false);
+        let tab = |h: &Harness, pane| -> egui::Rect {
+            h.ctx
+                .data(|d| d.get_temp(egui::Id::new(("test-pane", pane))))
+                .unwrap()
+        };
+        h.click(tab(&h, WorkspacePane::Queue).center());
+        assert_eq!(h.app.pane, WorkspacePane::Queue);
+        assert!(h.ctx.memory(|m| m.area_rect("compact-queue").is_none()));
         h.frame(vec![]);
-        let after = queue(&h.ctx);
-        assert!((after.right() - before.right()).abs() < 1.);
-        assert!((after.width() - before.width() - 65.).abs() < 2.);
+        assert!(h.ctx.read_response(egui::Id::new("track-search")).is_none());
+        h.click(tab(&h, WorkspacePane::Library).center());
+        assert_eq!(h.app.pane, WorkspacePane::Library);
+        h.frame(vec![]);
+        let search = h
+            .ctx
+            .read_response(egui::Id::new("chat-search"))
+            .unwrap()
+            .rect;
+        h.click(egui::pos2(search.left() + 22., search.bottom() + 36.));
+        assert_eq!(h.app.pane, WorkspacePane::Playlist);
+        h.frame(vec![]);
+        assert!(h.ctx.read_response(egui::Id::new("track-search")).is_some());
         h.app.shutdown_core().unwrap();
+    }
+
+    #[test]
+    fn short_workspace_keeps_a_full_track_row_above_the_player() {
+        let mut h = Harness::new();
+        h.size = egui::vec2(650., 260.);
+        h.app.test_rows.clear();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, h.size)),
+                ..Default::default()
+            };
+            let mut output = h.ctx.run_ui(input, |ui| {
+                window_header(ui, None, true);
+                h.app.render(ui);
+            });
+            output.textures_delta.clear();
+        }
+        let track = h.app.test_rows[&0].0;
+        let transport = egui::panel::PanelState::load(&h.ctx, egui::Id::new("transport")).unwrap();
+        assert!(track.bottom() <= transport.outer_rect.top(), "{track:?}");
     }
 
     #[test]
@@ -261,19 +336,25 @@ mod interaction_tests {
         let mut h = queue_harness(24);
         for width in [1240., 900.] {
             h.size.x = width;
+            h.app.pane = WorkspacePane::Playlist;
+            h.app.test_rows.clear();
             for _ in 0..10 {
                 h.frame(vec![]);
             }
-            let bar = |key| {
-                let scroll: egui::Id = h.ctx.data(|d| d.get_temp(egui::Id::new(key))).unwrap();
-                h.ctx.read_response(scroll.with(1)).unwrap().rect
+            let bar = |ctx: &egui::Context, key| {
+                let scroll: egui::Id = ctx.data(|d| d.get_temp(egui::Id::new(key))).unwrap();
+                ctx.read_response(scroll.with(1)).unwrap().rect
             };
-            let playlist = bar("test-playlist-scroll");
-            let queue = bar("test-queue-scroll");
+            let playlist = bar(&h.ctx, "test-playlist-scroll");
             for (row, menu) in h.app.test_rows.values() {
                 assert!(row.right() <= playlist.left() && menu.right() <= playlist.left());
                 assert!((row.right() - menu.right() - TRACK_ROW_PADDING).abs() < 1.);
             }
+            h.app.pane = WorkspacePane::Queue;
+            for _ in 0..10 {
+                h.frame(vec![]);
+            }
+            let queue = bar(&h.ctx, "test-queue-scroll");
             for (row, menu, _) in h.app.test_queue_rows.values() {
                 assert!(row.right() <= queue.left() && menu.right() <= queue.left());
             }
@@ -283,6 +364,7 @@ mod interaction_tests {
     #[test]
     fn playlist_heading_wraps_at_word_boundaries() {
         let mut h = Harness::new();
+        h.size = egui::vec2(720., 620.);
         let title = "Evening piano improvisations from the mountain studio";
         let mut state = h.app.state.view().clone();
         state.playlists[0].title = title.into();
@@ -320,12 +402,74 @@ mod interaction_tests {
     }
 
     #[test]
+    fn playlist_status_follows_the_last_visible_title_row() {
+        let mut h = Harness::new();
+        h.size = egui::vec2(720., 620.);
+        h.app.custom_emoji.set_demo();
+        let wrapped = "Evening piano improvisations from the mountain studio";
+        for (title, rows, elided) in [
+            ("Quiet evening".into(), 1, false),
+            (wrapped.into(), 2, false),
+            (wrapped.repeat(4), 2, true),
+        ] {
+            let mut state = h.app.state.view().clone();
+            state.playlists[0].title = title.clone();
+            state.playlists[0].emoji_status = Some(tg_player_application::model::EmojiStatus {
+                id: crate::adapters::emoji::DEMO_ID,
+                expires_at: 0,
+            });
+            h.app.state = tg_player_application::AppCore::new(state);
+            h.time += 0.1;
+            let output = h.ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, h.size)),
+                    time: Some(h.time),
+                    ..Default::default()
+                },
+                |ui| h.app.render(ui),
+            );
+            let heading = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == title => Some(text),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(heading.galley.rows.len(), rows);
+            assert_eq!(heading.galley.elided, elided);
+            let line = heading
+                .galley
+                .rows
+                .last()
+                .unwrap()
+                .rect()
+                .translate(heading.pos.to_vec2());
+            let badge = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Mesh(mesh) => {
+                        let bounds = mesh.calc_bounds();
+                        (bounds.size() == egui::Vec2::splat(24.)).then_some(bounds)
+                    }
+                    _ => None,
+                })
+                .expect("animated status texture");
+            assert!((badge.left() - line.right() - 8.).abs() < 1.);
+            assert!((badge.center().y - line.center().y).abs() < 1.);
+            assert!(badge.right() <= h.size.x - 24.);
+        }
+    }
+
+    #[test]
     fn playlist_feedback_is_inline_and_elided_titles_have_no_tooltip() {
         let mut h = Harness::new();
+        h.app.set_inline_notice("Link copied".into(), false);
+        h.frame(vec![]);
         let row = h.app.test_rows[&0].0;
         let title = h.app.playlist_tracks(0)[0].title.clone();
         let pointer = egui::pos2(row.left() + 110., row.top() + 18.);
-        h.app.set_inline_notice("Link copied".into(), false);
         h.frame(vec![egui::Event::PointerMoved(pointer)]);
         let mut output = h.ctx.run_ui(
             egui::RawInput {
@@ -355,6 +499,9 @@ mod interaction_tests {
     #[test]
     fn sidebar_search_keeps_its_width_and_escape_clears_the_query() {
         let mut h = Harness::new();
+        h.app.pane = WorkspacePane::Library;
+        h.frame(vec![]);
+        h.frame(vec![]);
         let id = egui::Id::new("chat-search");
         let initial = h.ctx.read_response(id).unwrap().rect;
         h.click(initial.center());
@@ -368,8 +515,87 @@ mod interaction_tests {
     }
 
     #[test]
+    fn track_search_keeps_its_width_and_escape_clears_the_query() {
+        let mut h = Harness::new();
+        let id = egui::Id::new("track-search");
+        let field = h.ctx.read_response(id).unwrap().rect;
+        h.click(field.center());
+        h.frame(vec![egui::Event::Text("Afterglow".into())]);
+        assert_eq!(h.app.search, "Afterglow");
+        assert_eq!(h.ctx.read_response(id).unwrap().rect, field);
+        h.key(egui::Key::Escape);
+        assert!(h.app.search.is_empty());
+    }
+
+    #[test]
+    fn smallest_player_keeps_basic_playback_controls() {
+        let mut h = queue_harness(3);
+        h.size = egui::Vec2::from(crate::launch::MIN_WINDOW_SIZE);
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let first = h.app.state.view().session.current().unwrap().entry_id;
+        let center = h.size.to_pos2() / 2.;
+        h.click(center + egui::vec2(48., 0.));
+        assert_ne!(
+            h.app.state.view().session.current().unwrap().entry_id,
+            first
+        );
+        h.click(center - egui::vec2(48., 0.));
+        assert_eq!(
+            h.app.state.view().session.current().unwrap().entry_id,
+            first
+        );
+        assert!(h.ctx.read_response(egui::Id::new("track-search")).is_none());
+    }
+
+    #[test]
+    fn compact_transport_volume_supports_drag_keyboard_and_mute() {
+        let volume_id = egui::Id::new("test-volume");
+        for (width, height) in [(760., 190.), (820., 320.), (1200., 190.)] {
+            let mut h = Harness::new();
+            h.size = egui::vec2(width, height);
+            h.frame(vec![]);
+            h.frame(vec![]);
+            let (slider, id): (egui::Rect, egui::Id) =
+                h.ctx.data(|data| data.get_temp(volume_id)).unwrap();
+            assert!(slider.right() <= width / 2. + 190.);
+            assert!(slider.bottom() <= height);
+            h.pointer(slider.center(), true);
+            let lower = slider.center() - egui::vec2(22., 0.);
+            h.frame(vec![egui::Event::PointerMoved(lower)]);
+            h.pointer(lower, false);
+            let volume = h.app.state.view().volume;
+            assert!((25. ..30.).contains(&volume));
+            assert!(h.ctx.memory(|memory| memory.has_focus(id)));
+            h.key(egui::Key::ArrowRight);
+            assert_eq!(h.app.state.view().volume, volume + 1.);
+            let mute = egui::pos2(slider.left() - 26., slider.center().y);
+            h.click(mute);
+            assert_eq!(h.app.state.view().volume, 0.);
+            h.click(mute);
+            assert_eq!(h.app.state.view().volume, volume + 1.);
+        }
+
+        let mut h = Harness::new();
+        for size in [
+            egui::vec2(320., 190.),
+            crate::launch::MIN_WINDOW_SIZE.into(),
+        ] {
+            h.size = size;
+            h.ctx
+                .data_mut(|data| data.remove::<(egui::Rect, egui::Id)>(volume_id));
+            h.frame(vec![]);
+            assert!(h
+                .ctx
+                .data(|data| data.get_temp::<(egui::Rect, egui::Id)>(volume_id))
+                .is_none());
+        }
+    }
+
+    #[test]
     fn play_all_starts_the_playlist_when_the_search_has_no_results() {
         let mut h = Harness::new();
+        h.size.y = 620.;
         let count = h.app.playlist_tracks(0).len();
         h.app.search = "nothing matches this".into();
         h.frame(vec![]);
@@ -382,6 +608,53 @@ mod interaction_tests {
         let session = &h.app.state.view().session;
         assert_eq!(session.current().unwrap().message, 0);
         assert_eq!(session.snapshot().len(), count);
+    }
+
+    #[test]
+    fn playlist_pin_is_last_in_the_menu_after_the_sort_control() {
+        let mut h = Harness::new();
+        h.size.y = 620.;
+        let render = |h: &mut Harness| {
+            h.time += 0.02;
+            let mut output = h.ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, h.size)),
+                    time: Some(h.time),
+                    ..Default::default()
+                },
+                |ui| h.app.render(ui),
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .into_iter()
+                .filter_map(|shape| match shape.shape {
+                    egui::Shape::Text(text) => Some((
+                        text.galley.text().to_owned(),
+                        text.visual_bounding_rect().center(),
+                    )),
+                    _ => None,
+                })
+                .fold(
+                    std::collections::HashMap::new(),
+                    |mut positions, (label, center)| {
+                        positions.entry(label).or_insert(center);
+                        positions
+                    },
+                )
+        };
+        let toolbar = render(&mut h);
+        assert!(!toolbar.contains_key("Unpin chat"));
+        let menu = toolbar["…"];
+        assert!(toolbar["Newest first"].x < menu.x);
+        h.click(menu);
+        let actions = render(&mut h);
+        let unpin = actions["Unpin chat"];
+        assert!(unpin.y > actions["Refresh library"].y);
+        h.click(unpin);
+        assert!(!h.app.state.view().chat_pins.contains(&0));
+        h.click(menu);
+        assert!(render(&mut h).contains_key("Pin chat"));
     }
 
     #[test]
@@ -860,7 +1133,7 @@ mod interaction_tests {
         h.click(rect.center());
         assert_eq!(h.app.test_seeks.len(), before);
         // Space is text while a search field owns focus.
-        let search = egui::Id::new("chat-search");
+        let search = egui::Id::new("track-search");
         h.ctx.memory_mut(|m| m.request_focus(search));
         h.frame(vec![]);
         let paused = h.app.state.playback().state().paused();

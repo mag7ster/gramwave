@@ -9,6 +9,7 @@ mod artwork_tests;
 mod auth;
 mod bootstrap;
 mod design;
+mod emoji;
 mod i18n;
 mod screens;
 mod ui;
