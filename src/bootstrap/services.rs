@@ -46,7 +46,8 @@ impl Services {
             }
             let (store, state) =
                 storage::Store::open_with_wake(&root.join("library.sqlite"), wake.clone())?;
-            let offline = store.offline();
+            let mut offline = store.offline();
+            crate::adapters::offline::recover_metadata(&root.join("offline"), &mut offline);
             (Some(Box::new(store) as Box<dyn Repository>), state, offline)
         };
         let (player, player_error) = if demo {

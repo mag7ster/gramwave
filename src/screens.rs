@@ -375,6 +375,7 @@ impl App {
         });
         self.animated_transport(root, viewport, transport_rect, player, dock);
         self.settings_ui(&ctx);
+        self.offline_confirmation_ui(&ctx);
         self.error_ui(&ctx);
         self.poll_chat_search(&ctx);
         self.request_visible_media(&ctx);
@@ -1252,6 +1253,15 @@ impl App {
 
         let emoji_status = p.emoji_status;
         let before_filters = p.filters;
+        let has_saved = self
+            .state
+            .offline()
+            .copies
+            .values()
+            .any(|copy| !copy.cached && copy.track.chat == chat_id);
+        let fully_saved = has_saved && self.state.offline().playlist_complete(p);
+        let can_download = before_filters.into_iter().any(|enabled| enabled);
+        let mut remove_downloads = false;
         let mut filters = before_filters;
         let filter_labels = [tr("Music"), tr("Audio files"), tr("Voice messages")];
         let mut play_all = false;
@@ -1294,7 +1304,16 @@ impl App {
                     ui.ctx().data_mut(|data| {
                         data.insert_temp(egui::Id::new("test-play-all"), play.response.rect)
                     });
-                    pin_all = button(ui, Icon::Download, "Save playlist offline");
+                    if !fully_saved {
+                        pin_all = ui
+                            .add_enabled_ui(can_download, |ui| {
+                                button(ui, Icon::Download, "Save playlist offline")
+                            })
+                            .inner;
+                    }
+                    if has_saved {
+                        remove_downloads = button(ui, Icon::Trash, "Remove downloads");
+                    }
                     self.sort_playlist(ui);
                     ui.menu_button("…", |ui| {
                         self.playlist_menu(ui, selected, chat_id, &url);
@@ -1403,8 +1422,18 @@ impl App {
                     play_all = ui
                         .add_enabled(can_play, egui::Button::new(tr("Play all")))
                         .clicked();
-                    pin_all = ui.button(tr("Save playlist offline")).clicked();
-                    if play_all || pin_all {
+                    if !fully_saved {
+                        pin_all = ui
+                            .add_enabled(
+                                can_download,
+                                egui::Button::new(tr("Save playlist offline")),
+                            )
+                            .clicked();
+                    }
+                    if has_saved {
+                        remove_downloads = ui.button(tr("Remove downloads")).clicked();
+                    }
+                    if play_all || pin_all || remove_downloads {
                         ui.close();
                     }
                     self.playlist_menu(ui, selected, chat_id, &url);
@@ -1434,6 +1463,9 @@ impl App {
         let tracks = self.playlist_tracks(selected);
         if play_all {
             self.play_playlist_from(selected, None);
+        }
+        if remove_downloads {
+            self.offline_confirm = Some(vec![chat_id]);
         }
         if pin_all {
             self.execute(AppCommand::SavePlaylist(
@@ -1489,8 +1521,11 @@ impl App {
         let scroll = track_scroll_area(list_ui)
             .id_salt(("playlist-tracks", chat_id))
             .show_rows(list_ui, design::ROW_HEIGHT, tracks.len(), |ui, range| {
+                self.note_playlist_view(selected, tracks.clone(), range.clone());
                 for i in range {
-                    let t = &tracks[i];
+                    let mut view = self.media_track(tracks[i].metadata());
+                    view.playlist_number = tracks[i].playlist_number;
+                    let t = &view;
                     self.image_wanted.push(t.image_file);
                     if t.file == 0 {
                         self.track_wanted.push(t.clone());
@@ -1566,7 +1601,7 @@ impl App {
                                 })),
                             );
                             let cover_left = ui.next_widget_position().x;
-                            art(ui, &t.title, t.image_path.as_deref(), 44.);
+                            art(ui, &t.title, t.image_path.as_deref(), TRACK_ARTWORK_SIZE);
                             let offline = if t.pinned.is_some() {
                                 Some("✓")
                             } else if self
@@ -1625,7 +1660,14 @@ impl App {
                                         (0, tr("Play")),
                                         (1, tr("Play next")),
                                         (2, tr("Add to queue")),
-                                        (3, tr("Save offline")),
+                                        (
+                                            3,
+                                            if t.pinned.is_some() {
+                                                tr("Remove offline download")
+                                            } else {
+                                                tr("Save offline")
+                                            },
+                                        ),
                                         (4, tr("Copy message link")),
                                         (5, tr("Copy title")),
                                     ] {
@@ -1708,7 +1750,13 @@ impl App {
                 5 => ui.ctx().copy_text(tracks[i].title.clone()),
                 1 => self.execute(AppCommand::Insert(tracks[i].metadata(), true)),
                 2 => self.execute(AppCommand::Insert(tracks[i].metadata(), false)),
-                3 => self.execute(AppCommand::SaveTrack(tracks[i].metadata())),
+                3 => {
+                    if let Some(path) = self.state.offline().path(tracks[i].id()) {
+                        self.execute(AppCommand::RemoveOffline(tracks[i].id(), path.to_owned()));
+                    } else {
+                        self.execute(AppCommand::SaveTrack(tracks[i].metadata()));
+                    }
+                }
                 _ => self.link(&tracks[i]),
             }
             self.persist();
@@ -1996,11 +2044,17 @@ fn cover(ui: &mut egui::Ui, title: &str, size: f32) {
     );
 }
 
+pub(crate) const TRACK_ARTWORK_SIZE: f32 = 44.;
+
+pub(crate) fn artwork_image(path: &str, size: f32) -> egui::Image<'static> {
+    egui::Image::new(format!("file://{path}"))
+        .fit_to_exact_size(egui::Vec2::splat(size))
+        .corner_radius(6)
+}
+
 fn art(ui: &mut egui::Ui, title: &str, path: Option<&str>, size: f32) {
     if let Some(path) = path {
-        let image = egui::Image::new(format!("file://{path}"))
-            .fit_to_exact_size(egui::vec2(size, size))
-            .corner_radius(6);
+        let image = artwork_image(path, size);
         if matches!(
             image.load_for_size(ui.ctx(), egui::vec2(size, size)),
             Ok(egui::load::TexturePoll::Ready { .. })

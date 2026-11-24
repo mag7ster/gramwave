@@ -39,6 +39,9 @@ pub trait PlayerBackend {
 pub trait Repository {
     fn apply(&self, changes: crate::persistence::ChangeSet) -> Result<(), crate::AppError>;
     fn flush(&self, timeout: std::time::Duration) -> Result<(), crate::AppError>;
+    fn commit_barrier(
+        &self,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(), crate::AppError>>, crate::AppError>;
     fn shutdown(&mut self, timeout: std::time::Duration) -> Result<(), crate::AppError>;
     fn error(&self) -> Option<crate::AppError>;
 }

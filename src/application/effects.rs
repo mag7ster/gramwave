@@ -6,7 +6,19 @@ use tg_player_application::{
 };
 impl App {
     pub(crate) fn core_event(&mut self, event: AppEvent) {
+        let removed = match &event {
+            AppEvent::OfflineRemoved {
+                path,
+                result: Ok(()),
+                ..
+            } if self.state.offline().removing.contains_key(path) => Some(path.clone()),
+            _ => None,
+        };
         let effects = self.state.event(event);
+        if let Some(path) = removed.filter(|path| !self.state.offline().removing.contains_key(path))
+        {
+            self.cache_file_removed(&path);
+        }
         self.run_effects(effects);
     }
     pub(crate) fn core_command(&mut self, command: tg_player_application::commands::AppCommand) {
@@ -114,14 +126,27 @@ impl App {
                     let request = operation.key();
                     let failed_path = path.clone();
                     let root = self.root.join("offline");
+                    let barrier = self.db.as_ref().map(|db| db.commit_barrier());
+                    let demo = self.demo;
                     self.operation_event(
                         JobClass::Background,
                         operation.clone(),
                         async move {
                             use tg_player_application::ports::OfflineStorage;
-                            let result = crate::adapters::offline::FileStorage::new(root)
-                                .remove(&path)
-                                .await;
+                            let result = async {
+                                if let Some(barrier) = barrier {
+                                    barrier?
+                                        .await
+                                        .map_err(|e| AppError::Storage(e.to_string()))??;
+                                }
+                                if demo {
+                                    return Ok(());
+                                }
+                                crate::adapters::offline::FileStorage::new(root)
+                                    .remove(&path)
+                                    .await
+                            }
+                            .await;
                             Event::Application(AppEvent::OfflineRemoved {
                                 request,
                                 path,
@@ -242,6 +267,20 @@ impl App {
                 }
 
                 Effect::Prefetch(track) => {
+                    if self
+                        .state
+                        .offline()
+                        .local_path(
+                            track.id(),
+                            tg_player_application::offline::unix_seconds(
+                                std::time::SystemTime::now(),
+                            ),
+                            self.state.view().cache_policy.days,
+                        )
+                        .is_some()
+                    {
+                        continue;
+                    }
                     let track = self.media_track(track);
                     if track.file > 0 {
                         if let Some(tg) = self.tg.clone() {
@@ -268,14 +307,22 @@ impl App {
                                 .view()
                                 .session
                                 .current()
-                                .and_then(|entry| self.state.offline().path(entry.id()));
-                            self.cache_playback = if offline == Some(path.as_str()) {
+                                .filter(|entry| {
+                                    self.state
+                                        .offline()
+                                        .copies
+                                        .get(&entry.id())
+                                        .is_some_and(|copy| copy.path == *path)
+                                })
+                                .map(|entry| (entry.id(), path.clone()));
+                            self.cache_playback = if offline.is_some() {
                                 CachePlayback::Offline
                             } else if std::path::Path::new(path).is_absolute() {
                                 CachePlayback::Local
                             } else {
                                 CachePlayback::Stream
                             };
+                            self.local_playback = offline;
                         }
                         let result = player.command(command);
                         if let Err(error) = result {
@@ -338,19 +385,25 @@ impl App {
                         async move {
                             let cancel = &operation.cancel;
                             let result = async {
+                                let mut track = track;
+                                if let Some(path) =
+                                    offline.filter(|p| std::path::Path::new(p).is_file())
+                                {
+                                    return Ok(PreparedPlayback {
+                                        track,
+                                        path: Some(path),
+                                    });
+                                }
                                 let _cache = match &tg {
                                     Some(tg) => Some(tg.cache_read(cancel).await?),
                                     None => None,
                                 };
-                                let mut track = track;
-                                let path = offline
-                                    .filter(|p| std::path::Path::new(p).is_file())
-                                    .or_else(|| {
-                                        track
-                                            .cached
-                                            .clone()
-                                            .filter(|p| std::path::Path::new(p).is_file())
-                                    });
+                                let path = {
+                                    track
+                                        .cached
+                                        .clone()
+                                        .filter(|p| std::path::Path::new(p).is_file())
+                                };
                                 let path = if let Some(path) = path {
                                     path
                                 } else {

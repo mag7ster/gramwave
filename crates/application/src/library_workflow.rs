@@ -126,7 +126,7 @@ impl AppCore {
                 }
             }
             LibraryCommand::RequestArtwork { id, now, force } => {
-                if id != 0
+                if id > 0
                     && self.library.connected()
                     && self.library.artwork_requests.len() < 4
                     && !self.library.artwork_requests.contains_key(&id)
@@ -139,6 +139,11 @@ impl AppCore {
                 {
                     let operation = self.library.operation();
                     let connection = self.library.connection();
+                    if force {
+                        if let Some(path) = self.library.forget_artwork(id) {
+                            effects.push(Effect::Library(LibraryEffect::ForgetArtwork(path)));
+                        }
+                    }
                     self.library.artwork_requests.insert(id, operation.clone());
                     effects.push(Effect::Library(LibraryEffect::Artwork {
                         operation,
@@ -354,8 +359,9 @@ impl AppCore {
                 match result {
                     Ok(path) => {
                         self.library.artwork_retry.remove(&id);
-                        self.library.cache_artwork(id, path.clone());
-                        effects.push(Effect::Library(LibraryEffect::ForgetArtwork(path)));
+                        if let Some(previous) = self.library.cache_artwork(id, path) {
+                            effects.push(Effect::Library(LibraryEffect::ForgetArtwork(previous)));
+                        }
                     }
                     Err(_) => {
                         self.library
@@ -917,7 +923,8 @@ mod tests {
             id: 1,
             result: Ok("cached".into()),
         });
-        assert!(effects.iter().any(|effect|matches!(effect,Effect::Library(LibraryEffect::ForgetArtwork(path)) if path=="cached")));
+        assert!(effects.is_empty());
+        assert_eq!(core.library.artwork_path(1), Some("cached"));
         assert!(core
             .library_command(LibraryCommand::RequestArtwork {
                 id: 1,
@@ -939,6 +946,56 @@ mod tests {
         });
         assert!(core.library.artwork_path(1).is_none());
     }
+    #[test]
+    fn completion_and_file_update_keep_the_same_artwork_in_both_orders() {
+        for update_first in [true, false] {
+            let mut core = core();
+            let now = Instant::now();
+            let request = artwork(&mut core, 7, now, false);
+            let update =
+                LibraryCommand::Source(TelegramUpdate::File(crate::telegram::TelegramFile {
+                    id: 7,
+                    path: Some("cover".into()),
+                    complete: true,
+                    ..Default::default()
+                }));
+            let completed = LibraryEvent::Artwork {
+                request,
+                now,
+                connection: 1,
+                id: 7,
+                result: Ok("cover".into()),
+            };
+            if update_first {
+                assert!(core.library_command(update).is_empty());
+                assert!(core.library_event(completed).is_empty());
+            } else {
+                assert!(core.library_event(completed).is_empty());
+                assert!(core.library_command(update).is_empty());
+            }
+
+            let effects = core.library_command(LibraryCommand::RequestArtwork {
+                id: 7,
+                now,
+                force: true,
+            });
+            assert!(
+                matches!(&effects[0], Effect::Library(LibraryEffect::ForgetArtwork(path)) if path == "cover")
+            );
+            assert!(core.library.artwork_path(7).is_none());
+            assert!(core
+                .library_command(LibraryCommand::Source(TelegramUpdate::File(
+                    crate::telegram::TelegramFile {
+                        id: 7,
+                        path: Some("cover".into()),
+                        complete: true,
+                        ..Default::default()
+                    },
+                )))
+                .is_empty());
+        }
+    }
+
     #[test]
     fn metadata_pages_keep_connection_artwork_and_persistence_contains_no_runtime_fields() {
         let mut core = core();

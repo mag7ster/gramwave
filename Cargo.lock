@@ -4343,6 +4343,7 @@ dependencies = [
  "tlottie",
  "tokio",
  "tokio-util",
+ "url",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",

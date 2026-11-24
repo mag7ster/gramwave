@@ -82,8 +82,10 @@ The ready background queue is bounded at 64; the download backlog stays in SQLit
 Operation IDs, generations and cancellation tokens originate in the core and pass
 unchanged through the scheduler. Panics, cancellation and overload produce addressed terminal outcomes;
 terminal delivery is tracked through shutdown. Progress uses a replaceable slot.
-The UI processes bounded batches and caches filtered/sorted playlist views by
-library, media and offline versions plus search and sort parameters.
+The UI processes bounded batches and caches filtered/sorted playlist metadata by
+library version, filters, search and sort parameters. Visible rows resolve
+current media and offline state when drawn. The open playlist prefetches
+thumbnail files in bounded batches and prepares textures near the viewport.
 Producers publish before waking the desktop shell. The main loop waits for
 events or the next deadline for playback position, search, retries or visible
 timed UI. On Linux the same waker interrupts the shell's wait in the tray.
@@ -122,7 +124,9 @@ The desktop serializes cleanup with statistics reads. Audio and artwork use
 separate cache leases. Manual cleanup runs available categories and retains the
 rest until their leases and any active Telegram stream release access. mpv keeps
 an opened local file usable while its cache path is removed. SQLite,
-authorization data and published offline copies are outside the cleanup scope.
+authorization data and published offline copies are outside the cleanup scope. An unpinned file can remain in the
+automatic audio cache at the same path. Gramwave accounts for these files by
+chat and reserves their size before applying the remaining limit to TDLib.
 Custom emoji use the same temporary media cache.
 Caption entities and chat status IDs are persisted alongside library metadata.
 The desktop decodes emoji off the UI thread and repaints visible animations.
@@ -153,8 +157,14 @@ syncs a temporary file inside offline storage and publishes a unique final name.
 Each attempt has its own cancellation identity. Old results cannot publish over,
 remove or satisfy newer attempts. Removing a copy records an automatic-download
 exclusion. Explicit track/playlist saving clears the corresponding exclusion.
+Removing playlist downloads cancels that chat's scan and downloads and clears
+its policy. A recent file changes to cached status in its existing record.
+Retention uses the last successful download or playback load, and promoting a
+cached file back to saved status uses its existing bytes. Once the publication
+and its record are durable, a background handoff releases matching temporary
+bytes through TDLib's local file cache API after active readers finish.
 Cancellation stops scans and pending downloads, disables policies and keeps ready
-copies. Deletion removes a copy from the registry immediately and persists its
+copies. Purging removes the copy from the registry immediately and persists its
 file removal job; a late deletion result cannot remove a newer copy. Network/storage
 failures retain jobs for retry. Successful publications from superseded attempts
 also enter the durable removal queue; failed cleanup is retried after restart.

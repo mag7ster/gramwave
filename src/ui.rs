@@ -46,6 +46,13 @@ impl App {
     fn process_player_events(&mut self) {
         let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
         for event in events {
+            if event == tg_player_application::ports::PlaybackEvent::Loaded {
+                if let Some((id, path)) = self.local_playback.take() {
+                    self.core_event(
+                        tg_player_application::workflow::AppEvent::LocalPlaybackUsed { id, path },
+                    );
+                }
+            }
             self.core_event(tg_player_application::workflow::AppEvent::Player(event));
         }
     }
@@ -83,7 +90,6 @@ impl App {
         let mut light = self.state.view().light;
         let mut filters = self.state.view().filters;
         let mut cache_policy = self.state.view().cache_policy;
-        let mut remove = None;
         let response = egui::Modal::new(egui::Id::new("player-settings"))
             .frame(
                 egui::Frame::new()
@@ -177,78 +183,7 @@ impl App {
                             changed = true;
                             self.cache_policy_changed();
                         }
-                        design::settings_section(ui, tr("Offline storage"), |ui| {
-                            if let Some(notice) = self.inline_notice(ctx, true) {
-                                ui.weak(notice);
-                            }
-                            if !self.state.offline().pending.is_empty() {
-                                ui.weak(tr("Downloading offline tracks…"));
-                                if ui.button(tr("Cancel offline downloads")).clicked() {
-                                    self.execute(AppCommand::CancelOffline);
-                                    changed = true;
-                                }
-                            }
-                            let mut any = false;
-                            let offline_total = self
-                                .state
-                                .offline()
-                                .copies
-                                .values()
-                                .filter_map(|copy| self.cache.offline_sizes.get(&copy.path))
-                                .copied()
-                                .reduce(u64::saturating_add);
-                            for copy in self.state.offline().copies.values() {
-                                let t = &copy.track;
-                                {
-                                    let path = &copy.path;
-                                    if !any {
-                                        ui.add_space(8.);
-                                        ui.strong(offline_total.map_or_else(
-                                            || tr("Saved tracks"),
-                                            |bytes| {
-                                                tr("Saved tracks · {size}").replace(
-                                                    "{size}",
-                                                    &crate::application::cache::cache_size(bytes),
-                                                )
-                                            },
-                                        ));
-                                    }
-                                    any = true;
-                                    ui.horizontal(|ui| {
-                                        let size = self
-                                            .cache
-                                            .offline_sizes
-                                            .get(path)
-                                            .copied()
-                                            .map(crate::application::cache::cache_size);
-                                        ui.add_sized(
-                                            [
-                                                (ui.available_width()
-                                                    - if size.is_some() { 112. } else { 44. })
-                                                .max(24.),
-                                                36.,
-                                            ],
-                                            egui::Label::new(&t.title)
-                                                .truncate()
-                                                .show_tooltip_when_elided(false),
-                                        );
-                                        if let Some(size) = size {
-                                            ui.weak(size);
-                                        }
-                                        if design::button(
-                                            ui,
-                                            design::Icon::Close,
-                                            "Remove offline copy",
-                                        ) {
-                                            remove = Some((t.chat, t.message, path.clone()));
-                                        }
-                                    });
-                                }
-                            }
-                            if !any {
-                                ui.weak(tr("No offline tracks saved yet."));
-                            }
-                        });
+                        self.offline_settings_ui(ui);
                         ui.add_space(4.);
                         ui.small(
                             egui::RichText::new(tr(
@@ -258,12 +193,6 @@ impl App {
                         );
                     });
             });
-        if let Some((chat, message, path)) = remove {
-            self.execute(AppCommand::RemoveOffline(
-                crate::domain::TrackId { chat, message },
-                path,
-            ));
-        }
         if changed {
             let mut settings =
                 tg_player_application::persistence::Settings::from(self.state.view());
@@ -273,9 +202,178 @@ impl App {
             self.execute(AppCommand::Settings(settings));
             self.persist();
         }
-        if close || response.should_close() {
+        if self.offline_confirm.is_none() && (close || response.should_close()) {
             self.settings_open = false;
             self.cache_settings_closed();
+            self.offline_selected.clear();
+        }
+    }
+
+    fn offline_settings_ui(&mut self, ui: &mut egui::Ui) {
+        let offline = self.state.offline();
+        let mut playlists = std::collections::BTreeMap::<i64, (usize, u64, bool)>::new();
+        for copy in offline.copies.values().filter(|copy| !copy.cached) {
+            let usage = playlists.entry(copy.track.chat).or_default();
+            usage.0 += 1;
+            usage.1 += copy.size.max(
+                self.cache
+                    .offline_sizes
+                    .get(&copy.path)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        }
+        for track in offline.pending.values() {
+            playlists.entry(track.chat).or_default().2 = true;
+        }
+        for policy in offline
+            .policies
+            .values()
+            .filter(|p| p.enabled && p.filters.iter().any(|f| *f))
+        {
+            playlists.entry(policy.chat).or_default().2 |= policy
+                .done
+                .iter()
+                .zip(&policy.head)
+                .any(|(done, head)| !done || head.active);
+        }
+        self.offline_selected
+            .retain(|chat| playlists.contains_key(chat));
+        design::settings_section(ui, tr("Offline storage"), |ui| {
+            if self.options.scenario.as_deref() == Some("offline-storage")
+                && self.options.screenshot.is_some()
+                && !self.preview_captured
+            {
+                ui.scroll_to_cursor(Some(egui::Align::Min));
+            }
+            if let Some(notice) = self.inline_notice(ui.ctx(), true) {
+                ui.weak(notice);
+            }
+            if playlists.is_empty() {
+                ui.weak(tr("No offline tracks saved yet."));
+                return;
+            }
+            if playlists.values().any(|(_, _, downloading)| *downloading)
+                && ui.button(tr("Cancel offline downloads")).clicked()
+            {
+                self.execute(AppCommand::CancelOffline);
+            }
+            for (&chat, &(count, size, downloading)) in &playlists {
+                let title = self.offline_playlist_title(chat);
+                ui.push_id(chat, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut selected = self.offline_selected.contains(&chat);
+                        let checkbox = ui
+                            .scope(|ui| {
+                                let colors = design::colors(ui);
+                                let widgets = &mut ui.visuals_mut().widgets;
+                                widgets.inactive.bg_stroke = egui::Stroke::new(1., colors.muted);
+                                widgets.inactive.bg_fill = colors.panel;
+                                widgets.inactive.corner_radius = 4.into();
+                                widgets.hovered.corner_radius = 4.into();
+                                widgets.active.corner_radius = 4.into();
+                                ui.checkbox(&mut selected, "")
+                            })
+                            .inner;
+                        checkbox.labelled_by(
+                            ui.vertical(|ui| {
+                                let title_response = ui
+                                    .add(egui::Label::new(&title).truncate())
+                                    .on_hover_text(&title);
+                                let mut status = crate::i18n::ngettext(
+                                    "{count} saved track",
+                                    "{count} saved tracks",
+                                    count.try_into().unwrap_or(u32::MAX),
+                                )
+                                .replace("{count}", &count.to_string());
+                                if size != 0 {
+                                    status.push_str(&format!(
+                                        " · {}",
+                                        crate::application::cache::cache_size(size)
+                                    ));
+                                }
+                                if downloading {
+                                    status.push_str(&format!(" · {}", tr("Downloading…")));
+                                }
+                                ui.small(status);
+                                title_response.id
+                            })
+                            .inner,
+                        );
+                        if selected {
+                            self.offline_selected.insert(chat);
+                        } else {
+                            self.offline_selected.remove(&chat);
+                        }
+                    });
+                });
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.offline_selected.is_empty(),
+                        egui::Button::new(tr("Remove selected downloads")),
+                    )
+                    .clicked()
+                {
+                    self.offline_confirm = Some(self.offline_selected.iter().copied().collect());
+                }
+                if ui.button(tr("Remove all downloads")).clicked() {
+                    self.offline_confirm = Some(playlists.keys().copied().collect());
+                }
+            });
+        });
+    }
+
+    fn offline_playlist_title(&self, chat: i64) -> String {
+        self.state
+            .view()
+            .playlists
+            .iter()
+            .find(|playlist| playlist.id == chat)
+            .map(|playlist| playlist.title.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| tr("Chat {id}").replace("{id}", &chat.to_string()))
+    }
+
+    pub(crate) fn offline_confirmation_ui(&mut self, ctx: &egui::Context) {
+        let Some(chats) = self.offline_confirm.as_ref() else {
+            return;
+        };
+        let message = if let [chat] = chats.as_slice() {
+            tr("Remove downloads for “{playlist}”?")
+                .replace("{playlist}", &self.offline_playlist_title(*chat))
+        } else {
+            tr("Remove downloads for {count} playlists?")
+                .replace("{count}", &chats.len().to_string())
+        };
+        let result = egui::Modal::new(egui::Id::new("confirm-offline-removal")).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 32.).clamp(100., 360.));
+            ui.heading(tr("Remove offline downloads?"));
+            ui.label(message);
+            ui.weak(tr("Recent tracks may stay in the automatic cache."));
+            ui.horizontal_wrapped(|ui| {
+                let cancel = ui.button(tr("Cancel"));
+                if ctx.data_mut(|data| data.get_temp::<bool>(ui.id().with("focused")).is_none()) {
+                    cancel.request_focus();
+                    ctx.data_mut(|data| data.insert_temp(ui.id().with("focused"), true));
+                }
+                (
+                    cancel.clicked(),
+                    ui.button(tr("Remove downloads")).clicked(),
+                    ui.id().with("focused"),
+                )
+            })
+            .inner
+        });
+        let (cancel, remove, focus) = result.inner;
+        if remove || cancel || result.should_close() {
+            ctx.data_mut(|data| data.remove::<bool>(focus));
+            let chats = self.offline_confirm.take().unwrap_or_default();
+            if remove {
+                self.offline_selected.retain(|chat| !chats.contains(chat));
+                self.execute(AppCommand::RemoveOfflinePlaylists(chats));
+            }
         }
     }
 }

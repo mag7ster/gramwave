@@ -187,6 +187,9 @@ impl LibraryCore {
     pub fn media_retry_at(&self, id: TrackId) -> Option<Instant> {
         self.media_retry.get(&id).copied()
     }
+    pub fn media_requests_in_flight(&self) -> usize {
+        self.media_requests.len() + self.artwork_requests.len()
+    }
     pub fn artwork_retry_at(&self, id: i64) -> Option<Instant> {
         self.artwork_retry.get(&id).copied()
     }
@@ -222,7 +225,9 @@ impl LibraryCore {
         art
     }
     pub(crate) fn cache_playlist_artwork(&mut self, playlist: &MediaPlaylist) {
-        self.chat_artwork.insert(playlist.id, playlist.artwork());
+        let mut artwork = playlist.artwork();
+        self.register_local_artwork(artwork.file, &mut artwork.path);
+        self.chat_artwork.insert(playlist.id, artwork);
         self.media_version = self.media_version.wrapping_add(1);
     }
     pub(crate) fn changed(&mut self) {
@@ -308,33 +313,43 @@ impl LibraryCore {
         {
             return;
         }
-        self.runtime.insert(track.id(), track.runtime());
+        let mut media = track.runtime();
+        self.register_local_artwork(media.image_file, &mut media.image_path);
+        self.runtime.insert(track.id(), media);
         self.media_version = self.media_version.wrapping_add(1);
     }
-    pub(crate) fn cache_artwork(&mut self, id: i64, path: String) {
-        if self.artwork.get(&id) == Some(&path) {
-            return;
+    fn register_local_artwork(&mut self, id: i64, path: &mut Option<String>) {
+        if id > 0 {
+            if let Some(path) = path
+                .take()
+                .filter(|_| !self.artwork_requests.contains_key(&id))
+            {
+                self.artwork.entry(id).or_insert(path);
+            }
         }
-        self.artwork.insert(id, path);
+    }
+    pub(crate) fn forget_artwork(&mut self, id: i64) -> Option<String> {
+        let path = self.artwork.remove(&id)?;
         self.media_version = self.media_version.wrapping_add(1);
+        Some(path)
+    }
+    pub(crate) fn cache_artwork(&mut self, id: i64, path: String) -> Option<String> {
+        if self.artwork.get(&id) == Some(&path) {
+            return None;
+        }
+        self.media_version = self.media_version.wrapping_add(1);
+        self.artwork.insert(id, path)
     }
     pub(crate) fn update_file(&mut self, file: TelegramFile) -> Option<String> {
         let evicted = !file.complete && file.path.is_none();
         let mut forgotten = None;
         if file.complete {
             if let Some(path) = &file.path {
-                self.cache_artwork(file.id, path.clone());
+                forgotten = self.cache_artwork(file.id, path.clone());
             }
         } else if evicted {
-            forgotten = self.artwork.remove(&file.id);
+            forgotten = self.forget_artwork(file.id);
             self.artwork_retry.remove(&file.id);
-            for artwork in self
-                .chat_artwork
-                .values_mut()
-                .filter(|artwork| artwork.file == file.id)
-            {
-                forgotten = artwork.path.take().or(forgotten);
-            }
         }
         let mut changed = false;
         for media in self.runtime.values_mut() {
@@ -349,11 +364,8 @@ impl LibraryCore {
                     changed = true;
                 }
             }
-            if evicted && media.image_file == file.id {
-                forgotten = media.image_path.take().or(forgotten);
-            }
         }
-        if changed || forgotten.is_some() {
+        if changed {
             self.media_version = self.media_version.wrapping_add(1);
         }
         forgotten

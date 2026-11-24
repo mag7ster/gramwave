@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tg_player_application::{
-    model::{Caption, EmojiStatus},
+    model::{Caption, CaptionLink, EmojiStatus},
     tasks::{JobClass, Operation, RequestId},
 };
 
@@ -237,6 +237,80 @@ impl Visible {
     }
 }
 
+fn caption_links(caption: &Caption) -> Vec<(CaptionLink, url::Url)> {
+    let web_url = |value: &str| {
+        let absolute = if value.contains("://") {
+            value.to_owned()
+        } else if !value.contains(':')
+            && value
+                .split('/')
+                .next()
+                .is_some_and(|host| host.contains('.'))
+        {
+            format!("https://{value}")
+        } else {
+            return None;
+        };
+        let url = url::Url::parse(&absolute).ok()?;
+        (matches!(url.scheme(), "http" | "https" | "tg")
+            && url.has_host()
+            && !value.chars().any(char::is_whitespace))
+        .then_some(url)
+    };
+    let mut links: Vec<_> = caption
+        .links
+        .iter()
+        .filter_map(|link| {
+            caption
+                .text
+                .get(link.bytes.clone())
+                .filter(|label| !label.is_empty())?;
+            Some((link.clone(), web_url(&link.url)?))
+        })
+        .collect();
+    // Older records only stored visible text and custom emoji.
+    for token in caption.text.split_whitespace() {
+        let value = token
+            .trim_start_matches(['(', '[', '{', '<', '"', '“', '«'])
+            .trim_end_matches(['.', ',', '!', '?', ')', ']', '}', '>', '"', '”', '»']);
+        let lower = value.to_ascii_lowercase();
+        if !["https://", "http://", "www.", "tg://"]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+        {
+            continue;
+        }
+        let start = value.as_ptr() as usize - caption.text.as_ptr() as usize;
+        let bytes = start..start + value.len();
+        if caption
+            .links
+            .iter()
+            .any(|link| link.bytes.start < bytes.end && link.bytes.end > bytes.start)
+        {
+            continue;
+        }
+        if let Some(url) = web_url(value) {
+            links.push((
+                CaptionLink {
+                    bytes,
+                    url: value.into(),
+                },
+                url,
+            ));
+        }
+    }
+    links.sort_by_key(|(link, _)| link.bytes.start);
+    let mut end = 0;
+    links.retain(|(link, _)| {
+        if link.bytes.start < end {
+            return false;
+        }
+        end = link.bytes.end;
+        true
+    });
+    links
+}
+
 impl App {
     pub(crate) fn chat_emoji(
         &self,
@@ -285,36 +359,136 @@ impl App {
 
     fn caption_contents(&self, ui: &mut egui::Ui, caption: &Caption) {
         ui.set_max_width(ui.available_width().min(280.));
-        if caption.emoji.is_empty() {
+        let links = caption_links(caption);
+        if caption.emoji.is_empty() && links.is_empty() {
             ui.label(&caption.text);
             return;
         }
         let color = ui.visuals().text_color();
         let format = egui::TextFormat::simple(egui::TextStyle::Body.resolve(ui.style()), color);
+        let mut link_format = format.clone();
+        link_format.color = ui.visuals().hyperlink_color;
+        link_format.underline = egui::Stroke::new(1., link_format.color);
         let mut hidden = format.clone();
         hidden.color = Color32::TRANSPARENT;
         let mut job = LayoutJob::default();
         job.wrap.max_width = ui.available_width();
-        let mut end = 0;
         let mut placements = Vec::new();
-        for entity in &caption.emoji {
-            if let (Some(prefix), Some(fallback)) = (
-                caption.text.get(end..entity.bytes.start),
-                caption.text.get(entity.bytes.clone()),
-            ) {
-                job.append(prefix, 0., format.clone());
-                placements.push((job.text.chars().count(), entity.id, fallback));
+        let mut bounds = vec![None::<std::ops::Range<usize>>; links.len()];
+        let mut boundaries = vec![0, caption.text.len()];
+        let emoji: Vec<_> = caption
+            .emoji
+            .iter()
+            .filter(|entity| {
+                entity.bytes.start < entity.bytes.end
+                    && caption.text.get(entity.bytes.clone()).is_some()
+            })
+            .collect();
+        for range in links
+            .iter()
+            .map(|(link, _)| &link.bytes)
+            .chain(emoji.iter().map(|e| &e.bytes))
+        {
+            boundaries.extend([range.start, range.end]);
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let mut through = 0;
+        let mut index = 0;
+        for segment in boundaries.windows(2) {
+            let start = segment[0];
+            if start < through {
+                continue;
+            }
+            let custom = emoji.iter().find(|entity| entity.bytes.start == start);
+            through = custom.map_or(segment[1], |entity| entity.bytes.end);
+            let link = links
+                .iter()
+                .position(|(link, _)| link.bytes.start < through && link.bytes.end > start);
+            let part = &caption.text[start..through];
+            let before = index;
+            if let Some(entity) = custom {
+                placements.push((index, entity.id, part));
                 job.append("⬛", 0., hidden.clone());
-                end = entity.bytes.end;
+                index += 1;
+            } else {
+                job.append(
+                    part,
+                    0.,
+                    if link.is_some() {
+                        link_format.clone()
+                    } else {
+                        format.clone()
+                    },
+                );
+                index += part.chars().count();
+            }
+            if let Some(link) = link {
+                bounds[link].get_or_insert(before..index).end = index;
             }
         }
-        job.append(&caption.text[end..], 0., format);
         let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
         let (rect, response) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), &caption.text)
         });
         ui.painter().galley(rect.min, galley.clone(), color);
+        let mut start = 0;
+        let mut focusable = vec![true; links.len()];
+        for (row_index, row) in galley.rows.iter().enumerate() {
+            let end = start + row.glyphs.len();
+            for (link_index, ((link, url), range)) in links.iter().zip(&bounds).enumerate() {
+                let Some(range) = range else { continue };
+                let from = range.start.max(start);
+                let to = range.end.min(end);
+                if from >= to {
+                    continue;
+                }
+                let row_rect = row.rect().translate(rect.min.to_vec2());
+                let area = row_rect
+                    .with_min_x(row_rect.left() + row.x_offset((from - start).into()))
+                    .with_max_x(row_rect.left() + row.x_offset((to - start).into()));
+                let first = std::mem::take(&mut focusable[link_index]);
+                let response = ui.interact(
+                    area,
+                    response.id.with((link_index, row_index)),
+                    if first {
+                        egui::Sense::click()
+                    } else {
+                        egui::Sense::CLICK
+                    },
+                );
+                if first {
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Link,
+                            ui.is_enabled(),
+                            &caption.text[link.bytes.clone()],
+                        )
+                    });
+                }
+                if response.clicked() {
+                    if url.scheme() == "tg" {
+                        let uri = url.to_string();
+                        self.async_event(JobClass::Interactive, 0, async move {
+                            if crate::adapters::source_chat::open(&uri).await {
+                                Event::Noop
+                            } else {
+                                Event::SourceChatError(crate::tr("Could not open Telegram. Check that a Telegram desktop app is installed."))
+                            }
+                        }, |_| Event::Noop);
+                    } else {
+                        ui.open_url(egui::OpenUrl::new_tab(url.as_str()));
+                    }
+                    ui.close();
+                }
+                response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(url.as_str());
+            }
+            start += row.char_count_including_newline().0;
+        }
+
         for (index, id, fallback) in placements {
             let before = galley.pos_from_cursor(CCursor {
                 index: index.into(),
@@ -425,6 +599,7 @@ mod tests {
                 bytes: 1..4,
                 id: emoji::DEMO_ID,
             }],
+            links: vec![],
         };
         let ctx = egui::Context::default();
         ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -435,6 +610,71 @@ mod tests {
         let state = app.custom_emoji.0.borrow();
         assert_eq!(state.requested, vec![emoji::DEMO_ID]);
         assert!(state.loaded[&emoji::DEMO_ID].texture.is_some());
+    }
+
+    #[test]
+    fn clicking_a_wrapped_caption_link_opens_its_destination() {
+        let app = App::new_at(Default::default(), true);
+        let text = "Read the complete programme and guest list";
+        let caption = Caption {
+            text: text.into(),
+            emoji: vec![],
+            links: vec![CaptionLink {
+                bytes: 0..text.len(),
+                url: "https://example.com/programme".into(),
+            }],
+        };
+        let ctx = egui::Context::default();
+        let frame = |events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_width(125.);
+                    app.caption_contents(ui, &caption);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let first = frame(vec![]);
+        let click = first
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(label) if label.galley.text() == text => {
+                    Some(label.galley.rows[1].rect().center() + label.pos.to_vec2())
+                }
+                _ => None,
+            })
+            .unwrap();
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos: click,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(click), pointer(true)]);
+        let output = frame(vec![pointer(false)]);
+        assert!(output
+            .platform_output
+            .commands
+            .iter()
+            .any(|command| matches!(command,
+                egui::OutputCommand::OpenUrl(url) if url.url == "https://example.com/programme"
+            )));
+    }
+
+    #[test]
+    fn legacy_caption_recognizes_visible_web_urls_without_guessing_hidden_targets() {
+        let caption: Caption =
+            serde_json::from_str(r#"{"text":"(www.example.com). javascript:alert(1)","emoji":[]}"#)
+                .unwrap();
+        let links = caption_links(&caption);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].1.as_str(), "https://www.example.com/");
     }
 
     #[test]

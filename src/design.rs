@@ -1,7 +1,7 @@
 use eframe::egui;
 fastframe_icons::icons! {
  pub enum Icon {
-prefix:"tgplayer-",directory:"../assets/",Play=>lucide "play",Pause=>lucide "pause",Next => "next",Previous => "previous",More=>lucide "ellipsis",Download => "download",Queue => "queue",Settings=>lucide "settings",Search=>lucide "search",Close=>lucide "x",Shuffle => "shuffle",Repeat => "repeat",Volume=>lucide "volume-2",Muted=>lucide "volume-x",Minimize=>lucide "minus",Maximize=>lucide "square",Restore=>lucide "copy"}
+prefix:"tgplayer-",directory:"../assets/",Play=>lucide "play",Pause=>lucide "pause",Next => "next",Previous => "previous",More=>lucide "ellipsis",Download => "download",Trash=>lucide "trash-2",Queue => "queue",Settings=>lucide "settings",Search=>lucide "search",Close=>lucide "x",Shuffle => "shuffle",Repeat => "repeat",Volume=>lucide "volume-2",Muted=>lucide "volume-x",Minimize=>lucide "minus",Maximize=>lucide "square",Restore=>lucide "copy"}
 }
 pub const ROW_HEIGHT: f32 = 60.;
 pub const HEADER_HEIGHT: f32 = 44.;

@@ -25,6 +25,14 @@ pub struct CaptionEmoji {
 pub struct Caption {
     pub text: String,
     pub emoji: Vec<CaptionEmoji>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<CaptionLink>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptionLink {
+    pub bytes: std::ops::Range<usize>,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

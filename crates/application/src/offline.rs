@@ -6,6 +6,48 @@ use tg_player_domain::TrackId;
 pub struct OfflineCopy {
     pub track: Track,
     pub path: String,
+    #[serde(default)]
+    pub cached: bool,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub last_used: u64,
+    #[serde(default = "pending_handoff")]
+    pub handoff_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
+}
+
+fn pending_handoff() -> bool {
+    true
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct PublishedFile {
+    pub path: String,
+    pub size: u64,
+    pub remote_id: Option<String>,
+}
+impl From<&str> for PublishedFile {
+    fn from(path: &str) -> Self {
+        Self {
+            path: path.into(),
+            size: 0,
+            remote_id: None,
+        }
+    }
+}
+
+pub fn unix_seconds(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+impl OfflineCopy {
+    pub fn fresh(&self, now: u64, days: u32) -> bool {
+        self.last_used != 0 && now.saturating_sub(self.last_used) < u64::from(days) * 86_400
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DownloadPolicy {
@@ -30,7 +72,7 @@ impl OfflineData {
     pub fn path(&self, id: TrackId) -> Option<&str> {
         self.copies
             .iter()
-            .find(|c| c.track.id() == id)
+            .find(|c| !c.cached && c.track.id() == id)
             .map(|c| c.path.as_str())
     }
 }
@@ -150,7 +192,96 @@ impl OfflineCore {
         }
     }
     pub fn path(&self, id: TrackId) -> Option<&str> {
-        self.data.copies.get(&id).map(|c| c.path.as_str())
+        self.data
+            .copies
+            .get(&id)
+            .filter(|c| !c.cached)
+            .map(|c| c.path.as_str())
+    }
+    pub fn local_path(&self, id: TrackId, now: u64, days: u32) -> Option<&str> {
+        self.data
+            .copies
+            .get(&id)
+            .filter(|c| !c.cached || c.fresh(now, days))
+            .map(|c| c.path.as_str())
+    }
+    pub fn playlist_complete(&self, playlist: &crate::model::Playlist) -> bool {
+        let chat = playlist.id;
+        let enabled = |track: &Track| playlist.filters[usize::from(track.kind)];
+        self.data
+            .copies
+            .values()
+            .any(|c| !c.cached && c.track.chat == chat && enabled(&c.track))
+            && playlist.filters.iter().enumerate().all(|(kind, enabled)| {
+                !enabled
+                    || playlist.done[kind]
+                    || self.data.policies.get(&chat).is_some_and(|p| {
+                        p.enabled && p.filters[kind] && p.done[kind] && !p.head[kind].active
+                    })
+            })
+            && !self
+                .data
+                .pending
+                .values()
+                .any(|t| t.chat == chat && enabled(t))
+            && !self.data.excluded.iter().any(|id| {
+                id.chat == chat
+                    && playlist
+                        .tracks
+                        .iter()
+                        .find(|t| t.id() == *id)
+                        .is_none_or(enabled)
+            })
+            && playlist
+                .tracks
+                .iter()
+                .filter(|t| enabled(t))
+                .all(|t| self.path(t.id()).is_some())
+    }
+    pub(crate) fn mark_used(&mut self, id: TrackId, path: &str, now: u64) {
+        if let Some(copy) = self.data.copies.get_mut(&id).filter(|c| c.path == path) {
+            copy.last_used = now;
+            self.changes.copies.insert(id, Some(copy.clone()));
+        }
+    }
+    pub(crate) fn finish_handoff(&mut self, id: TrackId, path: &str) {
+        if let Some(copy) = self.data.copies.get_mut(&id).filter(|c| c.path == path) {
+            copy.handoff_pending = false;
+            copy.remote_id = None;
+            self.changes.copies.insert(id, Some(copy.clone()));
+        }
+    }
+    pub(crate) fn prune_cache(&mut self, now: u64, policy: crate::persistence::CachePolicy) {
+        let mut cached: Vec<_> = self.data.copies.values().filter(|c| c.cached).collect();
+        cached.sort_by_key(|c| (c.last_used, c.track.chat, c.track.message));
+        let mut size = cached.iter().map(|c| c.size).sum::<u64>();
+        let limit = u64::from(policy.size_mib) * 1024 * 1024;
+        let evict: Vec<_> = cached
+            .into_iter()
+            .filter_map(|c| {
+                if !c.fresh(now, policy.days) || size > limit {
+                    size = size.saturating_sub(c.size);
+                    Some(c.track.id())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in evict {
+            self.discard(id);
+        }
+    }
+    pub(crate) fn clear_cache(&mut self, chat: Option<i64>) {
+        let ids: Vec<_> = self
+            .data
+            .copies
+            .values()
+            .filter(|c| c.cached && chat.is_none_or(|chat| c.track.chat == chat))
+            .map(|c| c.track.id())
+            .collect();
+        for id in ids {
+            self.discard(id);
+        }
     }
     pub fn version(&self) -> u64 {
         self.version
@@ -163,10 +294,15 @@ impl OfflineCore {
         if explicit && self.data.excluded.remove(&id) {
             self.changes.excluded.insert(id, false);
         }
-        if self.data.copies.contains_key(&id)
-            || self.data.excluded.contains(&id)
-            || self.data.pending.contains_key(&id)
-        {
+        if self.data.excluded.contains(&id) || self.data.pending.contains_key(&id) {
+            return;
+        }
+        if let Some(copy) = self.data.copies.get_mut(&id) {
+            if copy.cached {
+                copy.cached = false;
+                self.changes.copies.insert(id, Some(copy.clone()));
+                self.changed();
+            }
             return;
         }
         self.data.pending.insert(id, track.clone());
@@ -199,10 +335,29 @@ impl OfflineCore {
         self.changed();
     }
     pub fn publish(&mut self, track: Track, path: String) {
+        self.publish_file(
+            track,
+            PublishedFile {
+                path,
+                size: 0,
+                remote_id: None,
+            },
+            0,
+        );
+    }
+    pub(crate) fn publish_file(&mut self, track: Track, file: PublishedFile, now: u64) {
         let id = track.id();
         self.data.pending.shift_remove(&id);
         self.changes.pending.insert(id, None);
-        let copy = OfflineCopy { track, path };
+        let copy = OfflineCopy {
+            track,
+            path: file.path,
+            cached: false,
+            size: file.size,
+            last_used: now,
+            handoff_pending: file.size != 0,
+            remote_id: file.remote_id,
+        };
         self.data.copies.insert(id, copy.clone());
         self.changes.copies.insert(id, Some(copy));
         self.changed();
@@ -217,6 +372,11 @@ impl OfflineCore {
         let copy = OfflineCopy {
             track: Track::default(),
             path: path.clone(),
+            cached: false,
+            size: 0,
+            last_used: 0,
+            handoff_pending: false,
+            remote_id: None,
         };
         self.data.removing.insert(path.clone(), copy.clone());
         self.changes.removing.insert(path, Some(copy));
@@ -233,13 +393,67 @@ impl OfflineCore {
         self.changes.excluded.insert(id, true);
         self.changed();
     }
+    pub(crate) fn unpin(&mut self, id: TrackId, now: u64, days: u32) {
+        if let Some(copy) = self.data.copies.get_mut(&id).filter(|c| c.fresh(now, days)) {
+            copy.cached = true;
+            self.changes.copies.insert(id, Some(copy.clone()));
+        } else {
+            self.discard(id);
+        }
+        self.exclude(id);
+    }
     pub fn remove(&mut self, id: TrackId) {
+        self.discard(id);
+        self.exclude(id);
+    }
+    pub(crate) fn discard(&mut self, id: TrackId) {
         if let Some(copy) = self.data.copies.swap_remove(&id) {
             self.data.removing.insert(copy.path.clone(), copy.clone());
             self.changes.removing.insert(copy.path.clone(), Some(copy));
             self.changes.copies.insert(id, None);
+            self.changed();
         }
-        self.exclude(id);
+    }
+    pub(crate) fn remove_playlists(&mut self, chats: &[i64], now: u64, days: u32) {
+        let selected = |chat| chats.contains(&chat);
+        if self
+            .work
+            .scan
+            .as_ref()
+            .is_some_and(|(_, chat, _)| selected(*chat))
+        {
+            self.cancel_scan();
+            self.work.scan_retry = None;
+        }
+        let ids: Vec<_> = self
+            .data
+            .pending
+            .keys()
+            .copied()
+            .filter(|id| selected(id.chat))
+            .collect();
+        for id in ids {
+            self.cancel_attempt(id);
+            self.source_changed(id);
+        }
+        self.work.retry.retain(|id, _| !selected(id.chat));
+        self.work.errors.retain(|(chat, _), _| !selected(*chat));
+        for &chat in chats {
+            if self.data.policies.shift_remove(&chat).is_some() {
+                self.changes.policies.insert(chat, None);
+            }
+        }
+        let ids: Vec<_> = self
+            .data
+            .copies
+            .values()
+            .filter(|c| !c.cached && selected(c.track.chat))
+            .map(|c| c.track.id())
+            .collect();
+        for id in ids {
+            self.unpin(id, now, days);
+        }
+        self.changed();
     }
     pub fn cancel(&mut self) {
         for id in self.data.pending.keys() {

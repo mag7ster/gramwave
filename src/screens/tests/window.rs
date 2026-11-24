@@ -287,3 +287,27 @@ fn sidebar_search_reveals_matching_chats_and_escape_restores_pins() {
     assert!(!visible(&pinned_again, "Electronic archive"));
     h.app.shutdown_core().unwrap();
 }
+
+#[test]
+fn offline_confirmation_supports_cancel_and_confirm_from_the_keyboard() {
+    let mut h = Harness::new();
+    h.size = egui::vec2(365., 650.);
+    crate::demo::apply(&mut h.app, "offline-storage");
+    let id = h.app.state.view().playlists[0].tracks[0].id();
+    h.app.offline_confirm = Some(vec![id.chat]);
+    h.settle();
+
+    h.key(egui::Key::Enter);
+    assert!(h.app.settings_open);
+    assert!(h.app.offline_confirm.is_none());
+    assert!(h.app.state.offline().path(id).is_some());
+
+    h.app.offline_confirm = Some(vec![id.chat]);
+    h.settle();
+    h.key(egui::Key::Tab);
+    h.key(egui::Key::Enter);
+    assert!(h.app.settings_open);
+    assert!(h.app.offline_confirm.is_none());
+    assert!(h.app.state.offline().path(id).is_none());
+    assert!(h.app.state.offline().copies[&id].cached);
+}

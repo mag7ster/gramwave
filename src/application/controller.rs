@@ -5,6 +5,8 @@ use std::time::Duration;
 use std::{path::PathBuf, sync::mpsc};
 use tg_player_application::telegram::TelegramUpdate;
 use tg_player_application::AppCore;
+
+mod artwork;
 pub(crate) enum Event {
     Noop,
     Cache {
@@ -14,6 +16,11 @@ pub(crate) enum Event {
         offline_sizes: Option<std::collections::HashMap<String, u64>>,
     },
     Application(tg_player_application::workflow::AppEvent),
+    CacheHandoff {
+        id: crate::domain::TrackId,
+        path: String,
+        result: Result<(), tg_player_application::AppError>,
+    },
     Error(tg_player_application::AppError),
     Link(String),
     SourceChatError(String),
@@ -29,12 +36,10 @@ pub(crate) enum RetryAction {
     Offline(tg_player_application::model::Track),
     Catalog,
 }
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct PlaylistCacheKey {
     id: i64,
     library: u64,
-    media: u64,
-    offline: u64,
     filters: [bool; 3],
     search: String,
     sort: usize,
@@ -46,6 +51,8 @@ struct PlaylistCache {
 pub(crate) struct DesktopApp {
     pub(crate) wake: fastframe_shell::Waker,
     playlist_cache: std::cell::RefCell<Option<PlaylistCache>>,
+    artwork_view: Option<artwork::PlaylistView>,
+    artwork_prefetch: artwork::Prefetch,
     pub(crate) options: crate::launch::LaunchOptions,
     pub(crate) progress: std::sync::Arc<crate::adapters::offline::Progress>,
     pub(crate) tasks: application::tasks::Scheduler,
@@ -74,6 +81,11 @@ pub(crate) struct DesktopApp {
     pub(crate) control: Option<mpsc::Receiver<application::control::Pending>>,
     pub(crate) player: Option<Box<dyn application::ports::PlayerBackend>>,
     pub(crate) cache_playback: super::cache::CachePlayback,
+    pub(crate) local_playback: Option<(crate::domain::TrackId, String)>,
+    pub(crate) handoff_running: bool,
+    pub(crate) handoff_retry: std::collections::HashMap<String, std::time::Instant>,
+    pub(crate) offline_selected: std::collections::BTreeSet<i64>,
+    pub(crate) offline_confirm: Option<Vec<i64>>,
     pub(crate) stream_base: String,
     pub(crate) server: Option<streaming::Server>,
     pub(crate) opened_chat: Option<i64>,
@@ -97,6 +109,7 @@ pub(crate) struct DesktopApp {
     pub(crate) queue_open: bool,
     pub(crate) pane: crate::screens::WorkspacePane,
     pub(crate) demo: bool,
+    pub(crate) demo_artwork: Option<tempfile::TempDir>,
     pub(crate) media: Option<fastframe_now_playing::NowPlaying>,
     pub(crate) sort: usize,
     pub(crate) tray: Option<crate::adapters::tray::Tray>,
@@ -153,6 +166,8 @@ impl DesktopApp {
             progress: std::sync::Arc::new(crate::adapters::offline::Progress::new(wake.clone())),
             wake,
             playlist_cache: Default::default(),
+            artwork_view: None,
+            artwork_prefetch: Default::default(),
             options: options.clone(),
             tasks,
             #[cfg(test)]
@@ -180,6 +195,11 @@ impl DesktopApp {
             player,
             player_error,
             cache_playback: Default::default(),
+            local_playback: None,
+            handoff_running: false,
+            handoff_retry: Default::default(),
+            offline_selected: Default::default(),
+            offline_confirm: None,
             shutdown_finished: false,
             shutdown_error: Default::default(),
             stream_base: String::new(),
@@ -211,6 +231,7 @@ impl DesktopApp {
             queue_open: false,
             pane: Default::default(),
             demo,
+            demo_artwork: None,
             media,
             sort: 0,
             tray,
@@ -298,6 +319,7 @@ impl DesktopApp {
     }
     pub(crate) fn request_visible_media(&mut self, ctx: &egui::Context) {
         use tg_player_application::library::LibraryCommand;
+        let artwork_view = self.artwork_view.take();
         if self.settings_open {
             return;
         }
@@ -339,6 +361,7 @@ impl DesktopApp {
         }
         self.track_wanted = tracks;
         self.image_wanted = images;
+        self.request_playlist_artwork(ctx, artwork_view, now);
         if let Some(at) = retry {
             ctx.request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
         }
@@ -386,7 +409,10 @@ impl DesktopApp {
                     self.open_chat(i);
                 }
             }
-            Some(RetryAction::Offline(t)) => self.pin(t),
+            Some(RetryAction::Offline(t)) if self.state.offline().pending.contains_key(&t.id()) => {
+                self.pin(t)
+            }
+            Some(RetryAction::Offline(_)) => {}
             Some(RetryAction::Catalog) => self.sync(),
             None => {}
         }
@@ -404,21 +430,23 @@ impl DesktopApp {
     pub(crate) fn playlist_tracks(&self, selected: usize) -> std::sync::Arc<Vec<Track>> {
         self.playlist_tracks_matching(selected, &self.search)
     }
+    fn playlist_cache_key(&self, selected: usize, search: &str) -> PlaylistCacheKey {
+        let playlist = &self.state.view().playlists[selected];
+        PlaylistCacheKey {
+            id: playlist.id,
+            library: self.state.library_version(),
+            filters: playlist.filters,
+            search: search.to_owned(),
+            sort: self.sort,
+        }
+    }
     fn playlist_tracks_matching(
         &self,
         selected: usize,
         search: &str,
     ) -> std::sync::Arc<Vec<Track>> {
         let p = &self.state.view().playlists[selected];
-        let key = PlaylistCacheKey {
-            id: p.id,
-            library: self.state.library_version(),
-            media: self.state.library().media_version(),
-            offline: self.state.offline().version(),
-            filters: p.filters,
-            search: search.to_owned(),
-            sort: self.sort,
-        };
+        let key = self.playlist_cache_key(selected, search);
         if let Some(cache) = self
             .playlist_cache
             .borrow()
@@ -450,7 +478,7 @@ impl DesktopApp {
                             .contains(&query)
                 })
                 .map(|(index, t)| {
-                    let mut track = self.media_track(t.clone());
+                    let mut track = Track::from(t.clone());
                     track.playlist_number = index + 1;
                     track
                 })
@@ -590,6 +618,29 @@ impl DesktopApp {
                 } => self.cache_finished(connection, job, result, offline_sizes),
                 Event::ForgetArtwork(path) => ctx.forget_image(&format!("file://{path}")),
                 Event::Emoji(request, assets) => self.custom_emoji.complete(request, assets),
+                Event::CacheHandoff { id, path, result } => {
+                    self.handoff_running = false;
+                    if result.is_ok() {
+                        self.handoff_retry.remove(&path);
+                        self.core_event(
+                            tg_player_application::workflow::AppEvent::OfflineHandoffFinished {
+                                id,
+                                path,
+                            },
+                        );
+                    } else if self
+                        .state
+                        .offline()
+                        .copies
+                        .get(&id)
+                        .is_some_and(|copy| copy.path == path)
+                    {
+                        self.handoff_retry.insert(
+                            path,
+                            std::time::Instant::now() + std::time::Duration::from_secs(30),
+                        );
+                    }
+                }
                 Event::Application(event) => self.core_event(event),
                 Event::Error(s) => {
                     self.error = s.to_string();

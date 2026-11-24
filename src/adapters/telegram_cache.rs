@@ -73,20 +73,20 @@ pub(crate) struct CacheWrite {
     _artwork: Option<OwnedRwLockWriteGuard<()>>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CacheUsage {
     pub(crate) bytes: u64,
     pub(crate) count: u64,
     pub(crate) by_category: [u64; CacheCategory::ALL.len()],
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct CacheChat {
     pub(crate) id: i64,
     pub(crate) usage: CacheUsage,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CacheStats {
     pub(crate) total: CacheUsage,
     pub(crate) chats: Vec<CacheChat>,
@@ -99,6 +99,27 @@ pub(crate) struct CacheReport {
 }
 
 impl CacheStats {
+    pub(crate) fn add_audio(&mut self, id: i64, bytes: u64) {
+        let index = self
+            .chats
+            .iter()
+            .position(|chat| chat.id == id)
+            .unwrap_or_else(|| {
+                let index = self.chats.len();
+                self.chats.push(CacheChat {
+                    id,
+                    usage: CacheUsage::default(),
+                });
+                index
+            });
+        for usage in [&mut self.total, &mut self.chats[index].usage] {
+            usage.bytes = usage.bytes.saturating_add(bytes);
+            usage.count = usage.count.saturating_add(1);
+            let audio = &mut usage.by_category[CacheCategory::Audio as usize];
+            *audio = audio.saturating_add(bytes);
+        }
+    }
+
     fn selected_bytes(&self, filter: CacheFilter) -> u64 {
         let usage = match filter.chat {
             Some(id) => self
@@ -262,8 +283,12 @@ impl Telegram {
         &self,
         cache: CacheWrite,
         policy: Option<CachePolicy>,
+        reserved: u64,
     ) -> Result<CacheReport, AppError> {
-        let request = optimize_request(&cache.filter, policy)?;
+        let mut request = optimize_request(&cache.filter, policy)?;
+        if let Some(size) = request["size"].as_u64() {
+            request["size"] = json!(size.saturating_sub(reserved));
+        }
         let before = if policy.is_none() {
             self.cache_stats()
                 .await
@@ -395,7 +420,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let report = tg.optimize_cache(writer, None).await.unwrap();
+        let report = tg.optimize_cache(writer, None, 0).await.unwrap();
         assert_eq!(report.stats.total.bytes, 0);
         assert_eq!(report.freed, Some(0));
         assert!(matches!(

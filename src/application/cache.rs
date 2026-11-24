@@ -49,6 +49,10 @@ pub(crate) struct CacheState {
     chat: Option<i64>,
     selected: CacheSelection,
     maintain_at: Option<Instant>,
+    local_maintain_at: Option<Instant>,
+    clearing_local: HashMap<String, u64>,
+    local_freed: u64,
+    remote_freed: u64,
     custom_days: bool,
 }
 
@@ -57,7 +61,7 @@ impl App {
         self.tg.is_some() && *self.state.auth().state() == AuthorizationState::Ready
     }
 
-    fn cache_audio_available(&self) -> bool {
+    pub(crate) fn cache_audio_available(&self) -> bool {
         let playback = self.state.playback().state();
         !playback.loading()
             && self.player.as_ref().is_none_or(|player| {
@@ -142,6 +146,18 @@ impl App {
                 *remaining &= !scheduled;
             }
         }
+        if matches!(job, CacheJob::Clear) && access.filter.categories[CacheCategory::Audio as usize]
+        {
+            self.clear_local_audio(access.filter.chat);
+        }
+        let reserved = self
+            .state
+            .offline()
+            .copies
+            .values()
+            .filter(|c| c.cached)
+            .map(|c| c.size)
+            .sum();
         self.cache.job = Some(job);
         // Releasing the cache must not wait for background slots used by asset readers.
         self.async_event(
@@ -151,7 +167,7 @@ impl App {
                 Event::Cache {
                     connection,
                     job,
-                    result: tg.optimize_cache(access, policy).await,
+                    result: tg.optimize_cache(access, policy, reserved).await,
                     offline_sizes: None,
                 }
             },
@@ -218,11 +234,14 @@ impl App {
                     .categories
                     .into_iter()
                     .any(|selected| selected);
-                if let Some(freed) = pending.freed.filter(|&bytes| bytes > 0) {
-                    self.cache.notice = Some(
-                        tr("Removed from cache · {size}").replace("{size}", &cache_size(freed)),
-                    );
-                } else if error.is_none() && !more && !pending.cancelled {
+                self.cache.remote_freed = pending.freed.unwrap_or_default();
+                if self.cache.remote_freed > 0 || self.cache.local_freed > 0 {
+                    self.show_cache_freed();
+                } else if error.is_none()
+                    && !more
+                    && !pending.cancelled
+                    && self.cache.clearing_local.is_empty()
+                {
                     self.cache.notice = Some(if pending.freed.is_some() {
                         tr("No cache files were removed.")
                     } else {
@@ -242,9 +261,32 @@ impl App {
     }
 
     pub(crate) fn maintain_cache(&mut self, now: Instant) -> Option<Instant> {
-        if self.quitting || !self.cache_ready() {
+        if self.quitting {
             return None;
         }
+        let local_deadline = self
+            .state
+            .offline()
+            .copies
+            .values()
+            .any(|copy| copy.cached)
+            .then(|| {
+                let mut deadline = self.cache.local_maintain_at.unwrap_or(now);
+                if now >= deadline {
+                    self.execute(crate::application::commands::AppCommand::PruneAudioCache);
+                    deadline = now + Duration::from_secs(3600);
+                    self.cache.local_maintain_at = Some(deadline);
+                }
+                deadline
+            });
+        if !self.cache_ready() {
+            return local_deadline;
+        }
+        let remote_deadline = self.maintain_telegram_cache(now);
+        local_deadline.into_iter().chain(remote_deadline).min()
+    }
+
+    fn maintain_telegram_cache(&mut self, now: Instant) -> Option<Instant> {
         if self.cache.job.is_some() {
             return None;
         }
@@ -277,6 +319,7 @@ impl App {
 
     pub(crate) fn cache_policy_changed(&mut self) {
         self.cache.maintain_at = Some(Instant::now());
+        self.cache.local_maintain_at = self.cache.maintain_at;
     }
 
     pub(crate) fn cache_settings_closed(&mut self) {
@@ -284,9 +327,47 @@ impl App {
         self.cache.custom_days = false;
     }
 
+    fn clear_local_audio(&mut self, chat: Option<i64>) {
+        self.cache.clearing_local.extend(
+            self.state
+                .offline()
+                .copies
+                .values()
+                .filter(|copy| copy.cached && chat.is_none_or(|id| copy.track.chat == id))
+                .map(|copy| (copy.path.clone(), copy.size)),
+        );
+        self.execute(crate::application::commands::AppCommand::ClearAudioCache(
+            chat,
+        ));
+    }
+
+    pub(crate) fn cache_file_removed(&mut self, path: &str) {
+        if let Some(size) = self.cache.clearing_local.remove(path) {
+            self.cache.local_freed = self.cache.local_freed.saturating_add(size);
+            self.show_cache_freed();
+        }
+    }
+
+    fn show_cache_freed(&mut self) {
+        let size = self
+            .cache
+            .local_freed
+            .saturating_add(self.cache.remote_freed);
+        self.cache.notice =
+            Some(tr("Removed from cache · {size}").replace("{size}", &cache_size(size)));
+    }
+
     fn request_cache_clear(&mut self, filter: CacheFilter) {
         self.cache.notice = None;
         self.cache.error = None;
+        self.cache.local_freed = 0;
+        self.cache.remote_freed = 0;
+        if !self.cache_ready() {
+            if filter.categories[CacheCategory::Audio as usize] {
+                self.clear_local_audio(filter.chat);
+            }
+            return;
+        }
         self.cache.pending = Some(PendingClear {
             remaining: filter,
             freed: None,
@@ -410,10 +491,21 @@ impl App {
                 ui.weak(tr("Example cache usage"));
             } else if !ready {
                 ui.weak(tr("Connect to Telegram to inspect the cache."));
-                return;
             }
-            let busy = self.cache.job.is_some();
-            let usage_label = self.cache.stats.as_ref().map(|stats| {
+            let busy = self.cache.job.is_some() || !self.cache.clearing_local.is_empty();
+            let mut displayed = self.cache.stats.clone();
+            for copy in self
+                .state
+                .offline()
+                .copies
+                .values()
+                .filter(|copy| copy.cached)
+            {
+                displayed
+                    .get_or_insert_with(CacheStats::default)
+                    .add_audio(copy.track.chat, copy.size);
+            }
+            let usage_label = displayed.as_ref().map(|stats| {
                 tr("On disk · {size} · {count} files")
                     .replace("{size}", &cache_size(stats.total.bytes))
                     .replace("{count}", &stats.total.count.to_string())
@@ -464,7 +556,7 @@ impl App {
                     }
                 }
             }
-            let Some(stats) = &self.cache.stats else {
+            let Some(stats) = &displayed else {
                 return;
             };
             let title = |id: i64| {
@@ -548,7 +640,7 @@ impl App {
                             self.cache.selected = usage.by_category.map(|size| size > 0);
                         }
                         ui.add_enabled(
-                            ready && self.cache.selected.into_iter().any(|selected| selected),
+                            !self.demo && self.cache.selected.into_iter().any(|selected| selected),
                             egui::Button::new(tr("Clear selected cache")),
                         )
                         .clicked()

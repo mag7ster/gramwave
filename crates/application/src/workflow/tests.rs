@@ -318,3 +318,103 @@ fn stale_publication_cleanup_never_removes_a_registered_copy_with_the_same_path(
     assert!(core.offline().removing.is_empty());
     assert_eq!(core.offline().path(track(8).id()), Some("registered-file"));
 }
+
+#[test]
+fn removing_playlists_cancels_only_selected_work_and_survives_restart() {
+    let mut data = crate::offline::OfflineCore::new(OfflineData::default());
+    let saved = track(2);
+    let selected = track(3);
+    let mut other = track(4);
+    other.chat = 90;
+    data.save_playlist(saved.chat, [true, false, false]);
+    data.save_playlist(other.chat, [true, false, false]);
+    data.publish_file(
+        saved.clone(),
+        crate::offline::PublishedFile {
+            path: "saved".into(),
+            size: 100,
+            remote_id: None,
+        },
+        crate::offline::unix_seconds(std::time::SystemTime::now()),
+    );
+    let mut core = AppCore::with_offline(State::default(), data.data());
+    core.command(AppCommand::SaveTrack(selected.clone()));
+    core.command(AppCommand::SaveTrack(other.clone()));
+    let attempts: std::collections::HashMap<_, _> = core
+        .pump(Instant::now(), true)
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::DownloadOffline { track, operation } => Some((track.id(), operation)),
+            _ => None,
+        })
+        .collect();
+    core.command(AppCommand::RemoveOfflinePlaylists(vec![saved.chat]));
+    assert!(attempts[&selected.id()].cancel.is_cancelled());
+    assert!(!attempts[&other.id()].cancel.is_cancelled());
+    core.event(AppEvent::OfflineDownloaded {
+        request: attempts[&selected.id()].key(),
+        id: selected.id(),
+        result: Ok("late".into()),
+    });
+    let mut reopened = AppCore::with_offline(State::default(), core.offline().data());
+    assert!(reopened.offline().removing.contains_key("late"));
+    assert!(reopened.offline().pending.contains_key(&other.id()));
+    assert!(!reopened.offline().policies.contains_key(&saved.chat));
+    assert!(reopened.offline().policies.contains_key(&other.chat));
+    assert_eq!(reopened.offline().path(saved.id()), None);
+    assert!(reopened.offline().copies[&saved.id()].cached);
+    reopened.command(AppCommand::SaveTrack(saved.clone()));
+    assert_eq!(reopened.offline().path(saved.id()), Some("saved"));
+    assert!(!reopened.offline().pending.contains_key(&saved.id()));
+}
+
+#[test]
+fn offline_plays_keep_the_same_file_fresh_and_clear_only_cached_audio() {
+    use crate::offline::{OfflineCore, PublishedFile};
+    let mut offline = OfflineCore::new(OfflineData::default());
+    let [old, played, saved] = [track(1), track(2), track(3)];
+    let now = 9 * 86_400;
+    for (track, path) in [(&old, "old"), (&played, "played"), (&saved, "saved")] {
+        offline.publish_file(
+            track.clone(),
+            PublishedFile {
+                path: path.into(),
+                size: 100,
+                remote_id: None,
+            },
+            86_400,
+        );
+    }
+    offline.mark_used(played.id(), "played", now - 60);
+    offline.unpin(old.id(), now, 7);
+    offline.unpin(played.id(), now, 7);
+    assert!(offline.removing.contains_key("old"));
+    assert_eq!(offline.local_path(played.id(), now, 7), Some("played"));
+    assert_eq!(offline.copies[&played.id()].last_used, now - 60);
+    offline.clear_cache(Some(900));
+    assert_eq!(offline.local_path(played.id(), now, 7), Some("played"));
+    offline.clear_cache(Some(42));
+    assert!(offline.removing.contains_key("played"));
+    assert_eq!(offline.path(saved.id()), Some("saved"));
+}
+
+#[test]
+fn playlist_completion_follows_enabled_filters_and_saved_copies() {
+    let first = track(1);
+    let mut voice = track(2);
+    voice.kind = tg_player_domain::MediaKind::Voice;
+    let mut playlist = crate::model::Playlist {
+        id: first.chat,
+        filters: [true, false, false],
+        done: [true; 3],
+        tracks: vec![first.clone(), voice.clone()],
+        ..Default::default()
+    };
+    let mut offline = crate::offline::OfflineCore::new(OfflineData::default());
+    offline.publish(first, "music".into());
+    assert!(offline.playlist_complete(&playlist));
+    playlist.filters[2] = true;
+    assert!(!offline.playlist_complete(&playlist));
+    offline.publish(voice, "voice".into());
+    assert!(offline.playlist_complete(&playlist));
+}

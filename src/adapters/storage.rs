@@ -9,6 +9,7 @@ use std::{
 use tg_player_application::persistence::ChangeSet;
 type Outcome = Result<(), String>;
 enum Request {
+    CommitBarrier(tokio::sync::oneshot::Sender<Result<(), tg_player_application::AppError>>),
     Changes(Box<ChangeSet>),
     Flush(mpsc::Sender<Outcome>),
     Stop(mpsc::Sender<Outcome>),
@@ -491,6 +492,12 @@ impl Store {
                 };
                 let result = match request {
                     Request::Changes(changes) => write_changes(&mut db, &changes),
+                    Request::CommitBarrier(reply) => {
+                        let _ = reply.send(failure.clone().map_or(Ok(()), |error| {
+                            Err(tg_player_application::AppError::Storage(error))
+                        }));
+                        continue;
+                    }
                     Request::Flush(reply) => {
                         let _ = reply.send(failure.clone().map_or(Ok(()), Err));
                         continue;
@@ -596,6 +603,17 @@ impl Drop for Store {
 
 use crate::application::ports::Repository;
 impl Repository for Store {
+    fn commit_barrier(
+        &self,
+    ) -> Result<
+        tokio::sync::oneshot::Receiver<Result<(), tg_player_application::AppError>>,
+        tg_player_application::AppError,
+    > {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.enqueue(Request::CommitBarrier(send))
+            .map_err(tg_player_application::AppError::Storage)?;
+        Ok(receive)
+    }
     fn apply(&self, changes: ChangeSet) -> Result<(), tg_player_application::AppError> {
         self.apply(changes)
             .map_err(tg_player_application::AppError::Storage)

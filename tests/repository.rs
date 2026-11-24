@@ -886,3 +886,50 @@ fn split_legacy_track_and_session_paths_survive_pure_metadata_migration() {
         original
     );
 }
+
+#[test]
+fn committed_cache_handoff_and_demoted_audio_survive_sqlite_restart() {
+    use tg_player_application::{
+        offline::{OfflineCopy, OfflineData},
+        persistence::ChangeSet,
+        ports::Repository,
+    };
+
+    let directory = TempDir::new();
+    let path = directory.path().join("db");
+    let (store, _) = Store::open(&path).unwrap();
+    let copy = OfflineCopy {
+        track: Track {
+            chat: 42,
+            message: 7,
+            ..Default::default()
+        },
+        path: "published.media".into(),
+        cached: true,
+        size: 4096,
+        last_used: 123456,
+        handoff_pending: true,
+        remote_id: Some("remote-file".into()),
+    };
+    store
+        .apply(ChangeSet {
+            offline: Some(
+                OfflineData {
+                    copies: vec![copy.clone()],
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .commit_barrier()
+        .unwrap()
+        .blocking_recv()
+        .unwrap()
+        .unwrap();
+    let (reopened, _) = Store::open(&path).unwrap();
+    assert_eq!(reopened.offline().copies, vec![copy.clone()]);
+    assert!(reopened.offline().path(copy.track.id()).is_none());
+}

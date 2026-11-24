@@ -63,7 +63,15 @@ pub enum AppEvent {
     OfflineDownloaded {
         request: RequestId,
         id: tg_player_domain::TrackId,
-        result: Result<String, AppError>,
+        result: Result<crate::offline::PublishedFile, AppError>,
+    },
+    OfflineHandoffFinished {
+        id: tg_player_domain::TrackId,
+        path: String,
+    },
+    LocalPlaybackUsed {
+        id: tg_player_domain::TrackId,
+        path: String,
     },
     OfflineRemoved {
         request: RequestId,
@@ -90,7 +98,13 @@ pub struct PreparedPlayback {
 }
 impl AppCore {
     pub fn pump(&mut self, now: std::time::Instant, online: bool) -> Vec<Effect> {
-        self.offline.pump(now, online)
+        let opening = self
+            .playback
+            .state
+            .loading()
+            .then(|| self.playback.target.as_ref().map(Track::id))
+            .flatten();
+        self.offline.pump(now, online, opening)
     }
 
     pub fn shutdown_operations(&mut self) {
@@ -104,6 +118,9 @@ impl AppCore {
         self.invalidate_track(id);
         self.offline.cancel_attempt(id);
         self.offline.source_changed(id);
+        if self.offline.copies.get(&id).is_some_and(|copy| copy.cached) {
+            self.offline.discard(id);
+        }
     }
     pub fn auth(&self) -> &crate::auth::AuthCore {
         &self.auth
@@ -149,6 +166,7 @@ impl AppCore {
                 }));
             }
             AppCommand::SaveTrack(track) => {
+                self.prune_audio_cache();
                 self.offline.work.retry.remove(&track.id());
                 self.offline
                     .work
@@ -158,6 +176,7 @@ impl AppCore {
                 self.offline.work.scan_retry = None;
             }
             AppCommand::SavePlaylist(chat, filters) => {
+                self.prune_audio_cache();
                 self.offline.cancel_scan();
                 self.offline.work.retry.retain(|id, _| id.chat != chat);
                 self.offline.save_playlist(chat, filters);
@@ -184,9 +203,24 @@ impl AppCore {
             AppCommand::RemoveOffline(id, path) => {
                 if self.offline.path(id) == Some(path.as_str()) {
                     self.offline.cancel_attempt(id);
-                    self.offline.remove(id);
+                    self.offline.unpin(
+                        id,
+                        crate::offline::unix_seconds(std::time::SystemTime::now()),
+                        self.state.cache_policy.days,
+                    );
+                    self.prune_audio_cache();
                 }
             }
+            AppCommand::RemoveOfflinePlaylists(chats) => {
+                self.offline.remove_playlists(
+                    &chats,
+                    crate::offline::unix_seconds(std::time::SystemTime::now()),
+                    self.state.cache_policy.days,
+                );
+                self.prune_audio_cache();
+            }
+            AppCommand::PruneAudioCache => self.prune_audio_cache(),
+            AppCommand::ClearAudioCache(chat) => self.offline.clear_cache(chat),
             AppCommand::Authenticate(request) => {
                 if let Some(operation) = self.auth.begin() {
                     effects.push(Effect::Authenticate { operation, request });
@@ -278,10 +312,24 @@ impl AppCore {
         self.persistence_effect(&mut effects);
         effects
     }
+    fn prune_audio_cache(&mut self) {
+        self.offline.prune_cache(
+            crate::offline::unix_seconds(std::time::SystemTime::now()),
+            self.state.cache_policy,
+        );
+    }
+
     pub(crate) fn prepare_playback(&mut self, track: Track, effects: &mut Vec<Effect>) {
         let revision = self.revision(track.id());
         let operation = self.playback.begin(track.clone(), revision);
-        let offline = self.offline.path(track.id()).map(str::to_owned);
+        let offline = self
+            .offline
+            .local_path(
+                track.id(),
+                crate::offline::unix_seconds(std::time::SystemTime::now()),
+                self.state.cache_policy.days,
+            )
+            .map(str::to_owned);
         effects.extend([
             Effect::ClearSeek,
             Effect::Player(PlayerCommand::Stop),
@@ -337,6 +385,12 @@ impl AppCore {
                 result,
                 std::time::Instant::now(),
             )),
+            AppEvent::OfflineHandoffFinished { id, path } => self.offline.finish_handoff(id, &path),
+            AppEvent::LocalPlaybackUsed { id, path } => self.offline.mark_used(
+                id,
+                &path,
+                crate::offline::unix_seconds(std::time::SystemTime::now()),
+            ),
             AppEvent::OfflineRemoved {
                 request,
                 path,

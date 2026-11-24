@@ -1,5 +1,5 @@
 use tg_player_application::media::MediaTrack as Track;
-use tg_player_application::model::{Caption, CaptionEmoji, EmojiStatus};
+use tg_player_application::model::{Caption, CaptionEmoji, CaptionLink, EmojiStatus};
 
 pub(super) fn telegram_int64(value: &serde_json::Value) -> Option<i64> {
     value
@@ -32,26 +32,39 @@ fn caption(value: &serde_json::Value) -> Option<Caption> {
         }
         offsets.push(Some(byte + character.len_utf8()));
     }
-    let mut emoji: Vec<_> = value["entities"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|entity| {
-            let kind = &entity["type"];
-            if kind["@type"] != "textEntityTypeCustomEmoji" {
-                return None;
+    let mut emoji = Vec::new();
+    let mut links = Vec::new();
+    let range = |entity: &serde_json::Value| {
+        let start = usize::try_from(entity["offset"].as_u64()?).ok()?;
+        let length = usize::try_from(entity["length"].as_u64()?).ok()?;
+        let from = offsets.get(start).copied().flatten()?;
+        let to = offsets.get(start.checked_add(length)?).copied().flatten()?;
+        (from < to).then_some(from..to)
+    };
+    for entity in value["entities"].as_array().into_iter().flatten() {
+        let Some(bytes) = range(entity) else { continue };
+        let kind = &entity["type"];
+        match kind["@type"].as_str() {
+            Some("textEntityTypeCustomEmoji") => {
+                if let Some(id) = telegram_int64(&kind["custom_emoji_id"]).filter(|id| *id != 0) {
+                    emoji.push(CaptionEmoji { bytes, id });
+                }
             }
-            let id = telegram_int64(&kind["custom_emoji_id"]).filter(|id| *id != 0)?;
-            let start = usize::try_from(entity["offset"].as_u64()?).ok()?;
-            let length = usize::try_from(entity["length"].as_u64()?).ok()?;
-            let from = offsets.get(start).copied().flatten()?;
-            let to = offsets.get(start.checked_add(length)?).copied().flatten()?;
-            (from < to).then_some(CaptionEmoji {
-                bytes: from..to,
-                id,
-            })
-        })
-        .collect();
+            Some("textEntityTypeUrl") => links.push(CaptionLink {
+                url: text[bytes.clone()].into(),
+                bytes,
+            }),
+            Some("textEntityTypeTextUrl") => {
+                if let Some(url) = kind["url"].as_str() {
+                    links.push(CaptionLink {
+                        bytes,
+                        url: url.into(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
     emoji.sort_by_key(|entity| entity.bytes.start);
     let mut end = 0;
     emoji.retain(|entity| {
@@ -64,6 +77,7 @@ fn caption(value: &serde_json::Value) -> Option<Caption> {
     Some(Caption {
         text: text.to_owned(),
         emoji,
+        links,
     })
 }
 
@@ -309,6 +323,22 @@ mod tests {
         assert_eq!(caption.emoji.len(), 1);
         assert_eq!(caption.emoji[0].id, 9007199254740999);
         assert_eq!(&caption.text[caption.emoji[0].bytes.clone()], "💿");
+    }
+
+    #[test]
+    fn caption_links_share_utf16_offsets_with_emoji() {
+        let caption = super::caption(&serde_json::json!({
+            "text":"😀 go t.me/x",
+            "entities":[
+                {"offset":1,"length":1,"type":{"@type":"textEntityTypeUrl"}},
+                {"offset":3,"length":2,"type":{"@type":"textEntityTypeTextUrl","url":"https://example.com"}},
+                {"offset":6,"length":6,"type":{"@type":"textEntityTypeUrl"}}
+            ]
+        })).unwrap();
+        assert_eq!(caption.links.len(), 2);
+        assert_eq!(&caption.text[caption.links[0].bytes.clone()], "go");
+        assert_eq!(caption.links[0].url, "https://example.com");
+        assert_eq!(caption.links[1].url, "t.me/x");
     }
 
     #[test]

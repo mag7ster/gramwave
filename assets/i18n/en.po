@@ -66,6 +66,10 @@ msgstr ""
 msgid "Cache cleanup finished."
 msgstr ""
 
+#: src/ui.rs:344
+msgid "Cancel"
+msgstr ""
+
 #: src/ui.rs:185
 msgid "Cancel offline downloads"
 msgstr ""
@@ -511,6 +515,10 @@ msgstr ""
 msgid "Quit Gramwave"
 msgstr ""
 
+#: src/ui.rs:342
+msgid "Recent tracks may stay in the automatic cache."
+msgstr ""
+
 #: src/screens.rs:795 src/screens.rs:1025
 msgid "Refresh library"
 msgstr ""
@@ -529,8 +537,34 @@ msgstr ""
 msgid "Remove"
 msgstr ""
 
-#: src/ui.rs:240
-msgid "Remove offline copy"
+#: src/ui.rs:309
+msgid "Remove all downloads"
+msgstr ""
+
+#: src/screens.rs:1315 src/screens.rs:1434 src/ui.rs:351
+msgid "Remove downloads"
+msgstr ""
+
+#: src/ui.rs:335
+#, rust-format
+msgid "Remove downloads for {count} playlists?"
+msgstr ""
+
+#: src/ui.rs:332
+#, rust-format
+msgid "Remove downloads for “{playlist}”?"
+msgstr ""
+
+#: src/screens.rs:1663
+msgid "Remove offline download"
+msgstr ""
+
+#: src/ui.rs:340
+msgid "Remove offline downloads?"
+msgstr ""
+
+#: src/ui.rs:303
+msgid "Remove selected downloads"
 msgstr ""
 
 #: src/application/cache.rs:223
@@ -585,15 +619,6 @@ msgstr ""
 
 #: src/screens.rs:1187
 msgid "Saved offline"
-msgstr ""
-
-#: src/ui.rs:206
-msgid "Saved tracks"
-msgstr ""
-
-#: src/ui.rs:208
-#, rust-format
-msgid "Saved tracks · {size}"
 msgstr ""
 
 #: src/screens.rs:966
@@ -768,6 +793,13 @@ msgstr ""
 #: src/application/cache.rs:358
 msgid "days"
 msgstr ""
+
+#: src/ui.rs:272
+#, rust-format
+msgid "{count} saved track"
+msgid_plural "{count} saved tracks"
+msgstr[0] ""
+msgstr[1] ""
 
 #: src/application/cache.rs:547
 #, rust-format

@@ -411,3 +411,132 @@ fn track_row_mouse_keyboard_and_menu_playback() {
     }
     assert!(reached_row, "Tab must reach track rows");
 }
+
+#[test]
+fn warmed_playlist_covers_are_painted_after_scrolling_in_both_directions() {
+    let mut h = Harness::new();
+    egui_extras::install_image_loaders(&h.ctx);
+    crate::demo::apply(&mut h.app, "artwork");
+
+    let cover_at = |h: &Harness, frame: &egui::FullOutput, track: i64| {
+        let row = h.app.test_rows[&track].0;
+        frame.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if row.contains(rect.rect.center())
+                    && rect.rect.width() >= TRACK_ARTWORK_SIZE - 1.
+                    && rect.rect.width() <= TRACK_ARTWORK_SIZE + 1. =>
+            {
+                rect.brush.as_ref().map(|brush| brush.fill_texture_id)
+            }
+            _ => None,
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let first = loop {
+        let frame = h.frame(vec![]);
+        if let Some(first) = cover_at(&h, &frame, 0) {
+            // Give the offscreen images the same chance to complete as the first row.
+            let all = h
+                .ctx
+                .loaders()
+                .texture
+                .lock()
+                .iter()
+                .any(|loader| loader.byte_size() >= 6 * 96 * 96 * 4);
+            if all {
+                break first;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+
+    let scroll_id = h
+        .ctx
+        .data(|data| data.get_temp(egui::Id::new("test-playlist-scroll")))
+        .unwrap();
+    let offset = |h: &mut Harness, y| {
+        let mut state = egui::scroll_area::State::load(&h.ctx, scroll_id).unwrap();
+        state.offset.y = y;
+        state.store(&h.ctx, scroll_id);
+        h.app.test_rows.clear();
+        h.frame(vec![])
+    };
+    let down = offset(&mut h, 12. * design::ROW_HEIGHT);
+    assert_eq!(cover_at(&h, &down, 12), Some(first));
+    let up = offset(&mut h, 0.);
+    assert_eq!(cover_at(&h, &up, 0), Some(first));
+}
+
+#[test]
+fn removing_track_selected_and_all_downloads_preserves_cover_and_cache_schedule() {
+    use tg_player_application::{telegram::AuthorizationState, workflow::AppEvent};
+
+    for removal in ["track", "selected", "all"] {
+        let mut h = Harness::new();
+        crate::demo::apply(&mut h.app, "offline-storage");
+        h.app.settings_open = false;
+        crate::demo::apply(&mut h.app, "artwork");
+        h.app.tg = Some(crate::adapters::telegram::Telegram::mock_rpc(|request| {
+            panic!("unexpected Telegram request after unpinning audio: {request}")
+        }));
+        h.app
+            .state
+            .event(AppEvent::Authorization(AuthorizationState::Ready));
+        egui_extras::install_image_loaders(&h.ctx);
+        h.settle();
+        let id = h.app.state.view().playlists[0].tracks[0].id();
+        let path = h.app.artwork_path(1).unwrap().to_owned();
+        let deadline = h.app.maintain_cache(std::time::Instant::now()).unwrap();
+        let size = egui::Vec2::splat(TRACK_ARTWORK_SIZE);
+        let wait_until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let texture = loop {
+            match artwork_image(&path, TRACK_ARTWORK_SIZE).load_for_size(&h.ctx, size) {
+                Ok(egui::load::TexturePoll::Ready { texture }) => break texture.id,
+                _ => {
+                    assert!(std::time::Instant::now() < wait_until, "cover did not load");
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+        };
+
+        if removal == "track" {
+            h.click(h.app.test_rows[&id.message].1.center());
+            let frame = h.frame(vec![]);
+            let remove = frame
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "Remove offline download" => {
+                        Some(text.visual_bounding_rect().center())
+                    }
+                    _ => None,
+                })
+                .expect("removal action in track menu");
+            h.click(remove);
+        } else {
+            h.app.offline_confirm = Some(if removal == "selected" {
+                vec![0, 2]
+            } else {
+                vec![0, 2, 4]
+            });
+            h.settle();
+            h.key(egui::Key::Tab);
+            h.key(egui::Key::Enter);
+        }
+        assert!(h.app.state.offline().path(id).is_none(), "{removal}");
+        assert_eq!(
+            h.app.maintain_cache(std::time::Instant::now()),
+            Some(deadline)
+        );
+        h.app.process(&h.ctx);
+        assert_eq!(h.app.artwork_path(1), Some(path.as_str()));
+        assert_eq!(
+            artwork_image(&path, TRACK_ARTWORK_SIZE)
+                .load_for_size(&h.ctx, size)
+                .unwrap()
+                .texture_id(),
+            Some(texture),
+        );
+    }
+}

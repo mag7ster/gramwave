@@ -83,14 +83,20 @@ impl OfflineCore {
             op.cancel.cancel();
         }
     }
-    pub(crate) fn pump(&mut self, now: Instant, online: bool) -> Vec<Effect> {
+    pub(crate) fn pump(
+        &mut self,
+        now: Instant,
+        online: bool,
+        opening: Option<TrackId>,
+    ) -> Vec<Effect> {
         let mut effects = Vec::new();
         let removals: Vec<_> = self
             .data
             .removing
             .iter()
-            .filter(|(path, _)| {
-                !self.work.removals.contains_key(*path)
+            .filter(|(path, copy)| {
+                opening != Some(copy.track.id())
+                    && !self.work.removals.contains_key(*path)
                     && self
                         .work
                         .removal_retry
@@ -148,7 +154,7 @@ impl OfflineCore {
         &mut self,
         request: RequestId,
         id: TrackId,
-        result: Result<String, AppError>,
+        result: Result<crate::offline::PublishedFile, AppError>,
         now: Instant,
     ) -> Vec<Effect> {
         let current = self
@@ -157,25 +163,29 @@ impl OfflineCore {
             .get(&id)
             .is_some_and(|op| op.key() == request);
         if !current {
-            if let Ok(path) = result {
-                self.queue_removal(path);
+            if let Ok(file) = result {
+                self.queue_removal(file.path);
             }
             return Vec::new();
         }
         self.work.active.remove(&id);
         match result {
-            Ok(path) => {
+            Ok(file) => {
                 if self.data.excluded.contains(&id) {
-                    self.queue_removal(path);
+                    self.queue_removal(file.path);
                     return Vec::new();
                 }
                 if let Some(track) = self.data.pending.get(&id).cloned() {
-                    self.publish(track, path);
+                    self.publish_file(
+                        track,
+                        file,
+                        crate::offline::unix_seconds(std::time::SystemTime::now()),
+                    );
                     self.work.retry.remove(&id);
                     self.work.errors.remove(&(id.chat, id.message));
                     vec![Effect::Notice(crate::notice::Notice::OfflineSaved)]
                 } else {
-                    self.queue_removal(path);
+                    self.queue_removal(file.path);
                     Vec::new()
                 }
             }
