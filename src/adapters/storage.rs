@@ -336,14 +336,14 @@ impl Store {
                         );
                     }
                     if version >= 3 {
-                        let expected: usize = db
+                        let expected: i64 = db
                             .query_row(
                                 "SELECT count(*) FROM track_order WHERE playlist=?1",
                                 [id],
                                 |r| r.get(0),
                             )
                             .map_err(|e| e.to_string())?;
-                        if expected != playlist.tracks.len() {
+                        if usize::try_from(expected).ok() != Some(playlist.tracks.len()) {
                             return Err("open: missing library records".into());
                         }
                     }

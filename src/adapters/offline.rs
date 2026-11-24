@@ -76,18 +76,10 @@ pub(crate) async fn download(
         ));
     }
     let remote_id = downloader
-        .call_async(
-            serde_json::json!({"@type":"getFile","file_id":t.file}),
-            cancel,
-        )
+        .get_file(t.file, cancel)
         .await
         .ok()
-        .and_then(|value| {
-            value["remote"]["id"]
-                .as_str()
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned)
-        });
+        .and_then(super::telegram_mapping::FileReply::into_remote_id);
     let path = FileStorage::new(dir.to_path_buf())
         .publish(
             OfflinePublication {
@@ -150,13 +142,13 @@ pub(crate) async fn release_temporary_copy(
     let id = copy.track.id();
     let file = if let Some(remote_id) = &copy.remote_id {
         match tg
-            .call_async(
+            .call_file(
                 json!({"@type":"getRemoteFile","remote_file_id":remote_id}),
                 &cancel,
             )
             .await
         {
-            Ok(file) => Some(super::telegram_mapping::file_state(&file)),
+            Ok(file) => Some(file.into_file()),
             Err(AppError::Telegram {
                 code: 400 | 404, ..
             }) => None,
@@ -259,11 +251,6 @@ async fn wait_for_download(
     let wait = async {
         loop {
             let file = downloader.file(track.file, cancel).await?;
-            if file.id != track.file {
-                return Err(AppError::Protocol(
-                    "Unexpected downloaded file identity".into(),
-                ));
-            }
             if file.complete {
                 return Ok(file);
             }
@@ -506,7 +493,7 @@ mod tests {
         std::fs::write(&source, b"music").unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         for case in ["telegram", "protocol", "unavailable", "storage", "success"] {
-            let mut completed = json!({"id":90,"size":5,"local":{
+            let mut completed = json!({"@type":"file","id":90,"size":5,"local":{
                 "path":source.to_str().unwrap(),"is_downloading_completed":true,"downloaded_size":5,
             }});
             match case {
@@ -563,7 +550,9 @@ mod tests {
     fn incomplete_download_wait_has_typed_timeout_and_cancellation() {
         use serde_json::json;
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let tg = Telegram::mock_rpc(|_| json!({"id":90,"size":5,"local":{"downloaded_size":1}}));
+        let tg = Telegram::mock_rpc(
+            |_| json!({"@type":"file","id":90,"size":5,"local":{"downloaded_size":1}}),
+        );
         let track = tg_player_application::media::MediaTrack {
             file: 90,
             ..Default::default()

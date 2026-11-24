@@ -119,6 +119,37 @@ fn shared_download_is_cancelled_only_after_its_last_consumer() {
 }
 
 #[test]
+fn malformed_updates_preserve_the_last_download_range() {
+    let tg = Telegram::mock_rpc(|request| {
+        if request["@type"] == "getFile" {
+            return json!({"@type":"file","id":1,"size":"malformed"});
+        }
+        json!({"@type":"ok"})
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let cancel = CancellationToken::new();
+        let lease = tg.begin_download(1, 25, false, &cancel).await.unwrap();
+        tg.mock_file_update(json!({"id":1,"size":100,"local":{
+            "path":"partial","download_offset":25,"downloaded_prefix_size":20,
+        }}));
+        let state = lease.state.borrow().clone();
+        assert_eq!(state.path.as_deref(), Some("partial"));
+        assert_eq!((state.offset, state.available_until), (25, 45));
+
+        tg.mock_file_update(json!({"id":1,"size":100,"local":{
+            "path":"","download_offset":25,"downloaded_prefix_size":"invalid",
+        }}));
+        assert_eq!(*lease.state.borrow(), state);
+        assert!(matches!(
+            tg.file(1, &cancel).await,
+            Err(AppError::Protocol(_))
+        ));
+        assert_eq!(*lease.state.borrow(), state);
+    });
+}
+
+#[test]
 fn rpc_deadline_is_typed_and_removes_its_registration() {
     let (started, ready) = mpsc::channel();
     let (release, blocked) = mpsc::channel();

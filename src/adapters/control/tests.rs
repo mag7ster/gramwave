@@ -9,6 +9,7 @@ fn cli_arguments_are_explicit_and_validated_before_connecting() {
     for words in [
         vec![],
         vec!["select", "0"],
+        vec!["queue-play", "0"],
         vec!["seek", "NaN"],
         vec!["seek", "inf"],
         vec!["seek", "-1"],
@@ -38,6 +39,19 @@ fn cli_arguments_are_explicit_and_validated_before_connecting() {
         parse(&args(&["playlist", "50"])).unwrap(),
         Request::Playlist { offset: 50 }
     ));
+    assert!(matches!(
+        parse(&args(&["queue"])).unwrap(),
+        Request::Queue { offset: 0 }
+    ));
+    assert!(matches!(
+        parse(&args(&["queue-play", "18446744073709551615"])).unwrap(),
+        Request::QueuePlay {
+            entry_id: QueueEntryId(u64::MAX)
+        }
+    ));
+    assert!(parse(&args(&["--help"]))
+        .unwrap_err()
+        .contains("queue-play"));
 }
 
 #[test]

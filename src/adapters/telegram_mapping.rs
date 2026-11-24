@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use tg_player_application::media::MediaTrack as Track;
 use tg_player_application::model::{Caption, CaptionEmoji, CaptionLink, EmojiStatus};
 
@@ -178,16 +179,53 @@ pub(crate) fn auth_state(v: &serde_json::Value) -> AuthState {
         _ => AuthState::Starting,
     }
 }
-pub(crate) fn file_state(v: &serde_json::Value) -> TelegramFile {
-    TelegramFile {
-        id: v["id"].as_i64().unwrap_or(0),
-        size: v["size"].as_u64().unwrap_or(0),
-        downloaded: v["local"]["downloaded_size"].as_u64().unwrap_or(0),
-        path: v["local"]["path"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
-        complete: v["local"]["is_downloading_completed"] == true,
+#[derive(serde::Deserialize)]
+pub(super) struct FileReply {
+    pub id: i64,
+    pub size: Option<u64>,
+    pub local: Option<LocalFile>,
+    remote: Option<RemoteFile>,
+}
+
+#[cfg_attr(not(any(feature = "telegram", test)), allow(dead_code))]
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+pub(super) struct LocalFile {
+    pub path: String,
+    pub is_downloading_completed: bool,
+    pub downloaded_size: u64,
+    pub download_offset: u64,
+    pub downloaded_prefix_size: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteFile {
+    id: Option<String>,
+}
+
+impl FileReply {
+    pub(super) fn decode(v: &serde_json::Value) -> Result<Self, tg_player_application::AppError> {
+        let error = || tg_player_application::AppError::Protocol("Invalid Telegram file".into());
+        let file = Self::deserialize(v).map_err(|_| error())?;
+        if file.id <= 0 {
+            return Err(error());
+        }
+        Ok(file)
+    }
+
+    pub(super) fn into_file(self) -> TelegramFile {
+        let local = self.local.unwrap_or_default();
+        TelegramFile {
+            id: self.id,
+            size: self.size.unwrap_or_default(),
+            downloaded: local.downloaded_size,
+            path: Some(local.path).filter(|path| !path.is_empty()),
+            complete: local.is_downloading_completed,
+        }
+    }
+
+    pub(super) fn into_remote_id(self) -> Option<String> {
+        self.remote?.id.filter(|id| !id.is_empty())
     }
 }
 #[cfg(any(feature = "telegram", test))]
@@ -196,7 +234,6 @@ pub(crate) fn update(v: serde_json::Value) -> Option<TelegramUpdate> {
         "updateAuthorizationState" => {
             TelegramUpdate::Authorization(auth_state(&v["authorization_state"]))
         }
-        "updateFile" => TelegramUpdate::File(file_state(&v["file"])),
         "updateNewChat" => TelegramUpdate::Chat(crate::adapters::discovery::chat_metadata(
             &v["chat"],
             [true, true, false],

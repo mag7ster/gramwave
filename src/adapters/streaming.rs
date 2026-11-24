@@ -130,10 +130,10 @@ async fn response(
 ) -> Result<Response, String> {
     let info = endpoint
         .tg
-        .call_async(json!({"@type":"getFile","file_id":id}), &endpoint.cancel)
+        .get_file(id, &endpoint.cancel)
         .await
         .map_err(|e| e.to_string())?;
-    let size = info["size"].as_u64().ok_or("Unknown file size")?;
+    let size = info.size.ok_or("Unknown file size")?;
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
     // Multiple ranges are deliberately ignored, including overlapping ranges.
     let range = range.filter(|v| !v.contains(','));
@@ -263,7 +263,7 @@ impl Transfer {
                         self.confirmed = None;
                         endpoint
                             .tg
-                            .call_async(json!({"@type":"getFile","file_id":id}), &endpoint.cancel)
+                            .get_file(id, &endpoint.cancel)
                             .await
                             .map_err(|e| e.to_string())?;
                         continue;
@@ -278,7 +278,7 @@ impl Transfer {
                     if prefix > 0 {
                         let latest = lease.state.borrow().clone();
                         if latest.path.is_none() {
-                            endpoint.tg.call_async(json!({"@type":"getFile","file_id":id}), &endpoint.cancel).await.map_err(|e| e.to_string())?;
+                            endpoint.tg.get_file(id, &endpoint.cancel).await.map_err(|e| e.to_string())?;
                         } else if latest == state {
                             self.confirmed = Some((state, position.saturating_add(prefix)));
                         }

@@ -14,6 +14,8 @@ use tg_player_application::{
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
+use super::telegram_mapping::FileReply;
+
 #[path = "telegram_cache.rs"]
 mod cache;
 pub(crate) use cache::{CacheCategory, CacheFilter, CacheReport, CacheSelection, CacheStats};
@@ -125,7 +127,7 @@ impl Telegram {
                         {
                             continue;
                         }
-                        record_download_state(&download_updates, &v);
+                        let update = record_download_state(&download_updates, &v);
                         if let Some(key) = v["@extra"].as_u64() {
                             if let Some(pending) = registry.lock().unwrap().remove(&key) {
                                 let _ = pending.reply.send(v);
@@ -133,7 +135,9 @@ impl Telegram {
                         } else {
                             let closed =
                                 v["authorization_state"]["@type"] == "authorizationStateClosed";
-                            if let Some(update) = super::telegram_mapping::update(v) {
+                            if let Some(update) =
+                                update.or_else(|| super::telegram_mapping::update(v))
+                            {
                                 match &update {
                                     TelegramUpdate::Message { id, .. } => {
                                         resolved_updates.lock().unwrap().remove(id);
@@ -326,6 +330,34 @@ impl Telegram {
             .await
             .map(|(path, _)| path)
     }
+    pub(super) async fn get_file(
+        &self,
+        id: i64,
+        cancel: &CancellationToken,
+    ) -> Result<FileReply, AppError> {
+        let file = self
+            .call_file(json!({"@type":"getFile","file_id":id}), cancel)
+            .await?;
+        if file.id != id {
+            return Err(AppError::Protocol(
+                "Unexpected downloaded file identity".into(),
+            ));
+        }
+        Ok(file)
+    }
+
+    pub(super) async fn call_file(
+        &self,
+        request: Value,
+        cancel: &CancellationToken,
+    ) -> Result<FileReply, AppError> {
+        let value = self.call_async(request, cancel).await?;
+        if value["@type"] != "file" {
+            return Err(AppError::Protocol("Invalid Telegram file reply".into()));
+        }
+        FileReply::decode(&value)
+    }
+
     pub(crate) async fn cached_artwork(
         &self,
         file: i64,
@@ -336,9 +368,14 @@ impl Telegram {
             telegram: self,
             file: Some(file),
         };
-        let value=self.call_async(json!({"@type":"downloadFile","file_id":file,"priority":1,"offset":0,"limit":0,"synchronous":true}),cancel).await?;
+        let file = self
+            .call_file(
+                json!({"@type":"downloadFile","file_id":file,"priority":1,"offset":0,"limit":0,"synchronous":true}),
+                cancel,
+            )
+            .await?
+            .into_file();
         pending.file = None;
-        let file = super::telegram_mapping::file_state(&value);
         if file.complete {
             file.path
                 .map(|path| (path, cache))
@@ -456,38 +493,36 @@ pub(super) struct DownloadState {
 }
 
 #[cfg(any(feature = "telegram", test))]
-fn record_download_state(downloads: &Downloads, value: &Value) {
-    let file = match value["@type"].as_str() {
-        Some("file") => value,
-        Some("updateFile") => &value["file"],
-        _ => return,
+fn record_download_state(downloads: &Downloads, value: &Value) -> Option<TelegramUpdate> {
+    let update = value["@type"] == "updateFile";
+    let file = if update {
+        &value["file"]
+    } else if value["@type"] == "file" {
+        value
+    } else {
+        return None;
     };
-    let Some(id) = file["id"].as_i64() else {
-        return;
-    };
+    let file = FileReply::decode(file).ok()?;
+    let local = file.local.as_ref()?;
     let downloads = downloads.lock().unwrap();
-    let Some(entry) = downloads.get(&id) else {
-        return;
-    };
-    let local = &file["local"];
-    let offset = local["download_offset"].as_u64().unwrap_or_default();
-    let state = DownloadState {
-        path: local["path"]
-            .as_str()
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned),
-        complete: local["is_downloading_completed"] == true,
-        offset,
-        available_until: offset
-            .saturating_add(local["downloaded_prefix_size"].as_u64().unwrap_or_default()),
-    };
-    entry.state.send_if_modified(|current| {
-        if *current == state {
-            return false;
-        }
-        *current = state;
-        true
-    });
+    if let Some(entry) = downloads.get(&file.id) {
+        let state = DownloadState {
+            path: Some(&local.path).filter(|path| !path.is_empty()).cloned(),
+            complete: local.is_downloading_completed,
+            offset: local.download_offset,
+            available_until: local
+                .download_offset
+                .saturating_add(local.downloaded_prefix_size),
+        };
+        entry.state.send_if_modified(|current| {
+            if *current == state {
+                return false;
+            }
+            *current = state;
+            true
+        });
+    }
+    update.then(|| TelegramUpdate::File(file.into_file()))
 }
 
 #[derive(Default)]
@@ -730,12 +765,7 @@ impl TelegramGateway for Telegram {
         id: i64,
         cancel: &'a CancellationToken,
     ) -> GatewayFuture<'a, tg_player_application::telegram::TelegramFile> {
-        Box::pin(async move {
-            let file = self
-                .call_async(json!({"@type":"getFile","file_id":id}), cancel)
-                .await?;
-            Ok(super::telegram_mapping::file_state(&file))
-        })
+        Box::pin(async move { Ok(self.get_file(id, cancel).await?.into_file()) })
     }
     fn authenticate<'a>(
         &'a self,

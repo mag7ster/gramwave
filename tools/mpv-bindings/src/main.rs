@@ -3,6 +3,11 @@ fn main() {
     bindgen::Builder::default()
         .header(root.join("vendor/mpv/client.h").to_string_lossy())
         .allowlist_type("mpv_event|mpv_event_end_file|mpv_event_start_file")
+        .allowlist_function(
+            "mpv_(create|initialize|set_option_string|command|wait_event|set_wakeup_callback|error_string|terminate_destroy|get_property)",
+        )
+        .dynamic_library_name("Mpv")
+        .dynamic_link_require_all(true)
         .generate_comments(false)
         .layout_tests(false)
         .generate()

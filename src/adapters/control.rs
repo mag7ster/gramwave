@@ -1,8 +1,10 @@
 //! CLI client and bridge to the existing private single-instance channel.
 use crate::application::control::{Pending, Reply, Request, REPLY_LIMIT};
 use crate::{domain::model::QueueEntryId, RepeatMode};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use fastframe_instance::Slot;
 use std::{
+    num::{NonZeroU64, NonZeroUsize},
     process::ExitCode,
     sync::mpsc,
     time::{Duration, Instant},
@@ -10,7 +12,6 @@ use std::{
 
 const PREFIX: &str = "control-v1:";
 const TIMEOUT: Duration = Duration::from_secs(3);
-const USAGE: &str = "Usage: tg-player [--demo] --ctl status|playlists [offset]|playlist [offset]|queue [offset]|open <chat-id>|select <row>|queue-play <entry-id>|next|previous|pause|resume|seek <seconds>|shuffle on|off|repeat off|all|one";
 
 pub(crate) fn slot(demo: bool) -> Slot {
     let slot = Slot::new("org.tgplayer.App");
@@ -21,76 +22,109 @@ pub(crate) fn slot(demo: bool) -> Slot {
     }
 }
 
+#[derive(Parser)]
+#[command(
+    bin_name = "tg-player [--demo] --ctl",
+    no_binary_name = true,
+    arg_required_else_help = true,
+    disable_help_subcommand = true
+)]
+struct ControlArgs {
+    #[command(subcommand)]
+    command: ControlCommand,
+}
+
+#[derive(Subcommand)]
+enum ControlCommand {
+    Status,
+    Playlists {
+        #[arg(default_value_t)]
+        offset: usize,
+    },
+    Playlist {
+        #[arg(default_value_t)]
+        offset: usize,
+    },
+    Queue {
+        #[arg(default_value_t)]
+        offset: usize,
+    },
+    Open {
+        #[arg(allow_negative_numbers = true)]
+        chat_id: i64,
+    },
+    Select {
+        row: NonZeroUsize,
+    },
+    QueuePlay {
+        entry_id: NonZeroU64,
+    },
+    Next,
+    Previous,
+    Pause,
+    Resume,
+    Seek {
+        #[arg(allow_negative_numbers = true, value_parser = seek_seconds)]
+        seconds: f64,
+    },
+    Shuffle {
+        state: ShuffleValue,
+    },
+    Repeat {
+        mode: RepeatValue,
+    },
+}
+
+#[derive(Clone, ValueEnum)]
+enum ShuffleValue {
+    On,
+    Off,
+}
+
+#[derive(Clone, ValueEnum)]
+enum RepeatValue {
+    Off,
+    All,
+    One,
+}
+
+fn seek_seconds(value: &str) -> Result<f64, &'static str> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|n| n.is_finite() && *n >= 0.)
+        .ok_or("Seek position must be finite and nonnegative")
+}
+
 fn parse(args: &[String]) -> Result<Request, String> {
-    let Some(command) = args.first().map(String::as_str) else {
-        return Err(USAGE.into());
-    };
-    let value = args.get(1).map(String::as_str);
-    if args.len() > 2 {
-        return Err(USAGE.into());
-    }
-    let number = || value.ok_or_else(|| USAGE.to_owned());
-    let offset = || {
-        value
-            .unwrap_or("0")
-            .parse::<usize>()
-            .map_err(|_| "Page offset must be a nonnegative integer".to_owned())
-    };
-    let request = match command {
-        "status" if value.is_none() => Request::Status,
-        "playlists" => Request::Playlists { offset: offset()? },
-        "playlist" => Request::Playlist { offset: offset()? },
-        "queue" => Request::Queue { offset: offset()? },
-        "open" => Request::Open {
-            chat_id: number()?
-                .parse()
-                .map_err(|_| "Chat ID must be an integer")?,
+    use ControlCommand::*;
+    let args = ControlArgs::try_parse_from(args).map_err(|error| error.to_string())?;
+    Ok(match args.command {
+        Status => Request::Status,
+        Playlists { offset } => Request::Playlists { offset },
+        Playlist { offset } => Request::Playlist { offset },
+        Queue { offset } => Request::Queue { offset },
+        Open { chat_id } => Request::Open { chat_id },
+        Select { row } => Request::Select { row: row.get() },
+        QueuePlay { entry_id } => Request::QueuePlay {
+            entry_id: QueueEntryId(entry_id.get()),
         },
-        "select" => Request::Select {
-            row: number()?
-                .parse::<usize>()
-                .ok()
-                .filter(|r| *r > 0)
-                .ok_or("Row must be a positive integer (starting at 1)")?,
+        Next => Request::Next,
+        Previous => Request::Previous,
+        Pause => Request::Pause,
+        Resume => Request::Resume,
+        Seek { seconds } => Request::Seek { seconds },
+        Shuffle { state } => Request::Shuffle {
+            enabled: matches!(state, ShuffleValue::On),
         },
-        "queue-play" => Request::QueuePlay {
-            entry_id: QueueEntryId(
-                number()?
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|id| *id > 0)
-                    .ok_or("Entry ID must be a positive integer")?,
-            ),
-        },
-        "next" if value.is_none() => Request::Next,
-        "previous" if value.is_none() => Request::Previous,
-        "pause" if value.is_none() => Request::Pause,
-        "resume" if value.is_none() => Request::Resume,
-        "seek" => Request::Seek {
-            seconds: number()?
-                .parse::<f64>()
-                .ok()
-                .filter(|n| n.is_finite() && *n >= 0.)
-                .ok_or("Seek position must be finite and nonnegative")?,
-        },
-        "shuffle" => Request::Shuffle {
-            enabled: match number()? {
-                "on" => true,
-                "off" => false,
-                _ => return Err("Use shuffle on|off".into()),
+        Repeat { mode } => Request::Repeat {
+            mode: match mode {
+                RepeatValue::Off => RepeatMode::Off,
+                RepeatValue::All => RepeatMode::All,
+                RepeatValue::One => RepeatMode::One,
             },
         },
-        "repeat" => Request::Repeat {
-            mode: match number()? {
-                "off" => RepeatMode::Off,
-                "all" => RepeatMode::All,
-                "one" => RepeatMode::One,
-                _ => return Err("Use repeat off|all|one".into()),
-            },
-        },
-        _ => return Err(USAGE.into()),
-    };
-    Ok(request)
+    })
 }
 
 pub(crate) fn bridge(
@@ -164,7 +198,8 @@ pub fn run_cli() -> Option<ExitCode> {
                 options.ctl.as_deref().unwrap_or_default(),
             )
         }
-        _ => Reply::failure(USAGE),
+        Ok(_) => Reply::failure(ControlArgs::command().render_help().to_string()),
+        Err(error) => Reply::failure(error),
     };
     println!(
         "{}",

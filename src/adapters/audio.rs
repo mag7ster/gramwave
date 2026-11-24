@@ -1,58 +1,41 @@
-use libloading::Library;
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_void, CStr, CString};
 #[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 #[path = "mpv_abi.rs"]
 mod abi;
-use abi::{mpv_event as MpvEvent, mpv_event_end_file as MpvEndFile};
-type Command = unsafe extern "C" fn(*mut c_void, *const *const c_char) -> i32;
-type Wakeup = unsafe extern "C" fn(*mut c_void);
 pub use crate::application::ports::PlaybackEvent;
+use abi::{
+    mpv_end_file_reason_MPV_END_FILE_REASON_EOF as END_EOF,
+    mpv_end_file_reason_MPV_END_FILE_REASON_ERROR as END_ERROR,
+    mpv_end_file_reason_MPV_END_FILE_REASON_STOP as END_STOP,
+    mpv_event_id_MPV_EVENT_COMMAND_REPLY as COMMAND_REPLY,
+    mpv_event_id_MPV_EVENT_END_FILE as END_FILE, mpv_event_id_MPV_EVENT_FILE_LOADED as FILE_LOADED,
+    mpv_event_id_MPV_EVENT_NONE as NO_EVENT,
+    mpv_event_id_MPV_EVENT_PLAYBACK_RESTART as PLAYBACK_RESTART,
+    mpv_event_id_MPV_EVENT_START_FILE as START_FILE, mpv_format_MPV_FORMAT_DOUBLE as FORMAT_DOUBLE,
+    mpv_format_MPV_FORMAT_FLAG as FORMAT_FLAG, mpv_format_MPV_FORMAT_INT64 as FORMAT_INT64,
+};
 struct NativePlayer {
-    _lib: Library,
-    handle: *mut c_void,
-    command: Command,
+    lib: abi::Mpv,
+    handle: *mut abi::mpv_handle,
     active_entry: std::cell::Cell<Option<i64>>,
     waiting_for_entry: std::cell::Cell<bool>,
     started_entry: std::cell::Cell<Option<i64>>,
     ready_entry: std::cell::Cell<Option<i64>>,
     command_errors: std::cell::RefCell<Vec<String>>,
-    destroy: unsafe extern "C" fn(*mut c_void),
-    wait: unsafe extern "C" fn(*mut c_void, f64) -> *const MpvEvent,
-    set_wakeup: unsafe extern "C" fn(*mut c_void, Option<Wakeup>, *mut c_void),
-    error_string: unsafe extern "C" fn(i32) -> *const c_char,
-    get: unsafe extern "C" fn(*mut c_void, *const c_char, i32, *mut c_void) -> i32,
 }
 impl NativePlayer {
     fn with_audio_output(output: Option<&str>) -> Result<Self, String> {
         unsafe {
-            let lib = Library::new("libmpv.so.2").map_err(|e| e.to_string())?;
-            let create: unsafe extern "C" fn() -> *mut c_void =
-                *lib.get(b"mpv_create\0").map_err(|e| e.to_string())?;
-            let init: unsafe extern "C" fn(*mut c_void) -> i32 =
-                *lib.get(b"mpv_initialize\0").map_err(|e| e.to_string())?;
-            let set: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> i32 = *lib
-                .get(b"mpv_set_option_string\0")
-                .map_err(|e| e.to_string())?;
-            let mut player = Self {
-                handle: std::ptr::null_mut(),
+            let lib = abi::Mpv::new("libmpv.so.2").map_err(|e| e.to_string())?;
+            let player = Self {
+                handle: lib.mpv_create(),
+                lib,
                 active_entry: Default::default(),
                 waiting_for_entry: Default::default(),
                 started_entry: Default::default(),
                 ready_entry: Default::default(),
                 command_errors: Default::default(),
-                command: *lib.get(b"mpv_command\0").map_err(|e| e.to_string())?,
-                wait: *lib.get(b"mpv_wait_event\0").map_err(|e| e.to_string())?,
-                set_wakeup: *lib
-                    .get(b"mpv_set_wakeup_callback\0")
-                    .map_err(|e| e.to_string())?,
-                error_string: *lib.get(b"mpv_error_string\0").map_err(|e| e.to_string())?,
-                destroy: *lib
-                    .get(b"mpv_terminate_destroy\0")
-                    .map_err(|e| e.to_string())?,
-                get: *lib.get(b"mpv_get_property\0").map_err(|e| e.to_string())?,
-                _lib: lib,
             };
-            player.handle = create();
             let handle = player.handle;
             if handle.is_null() {
                 return Err("mpv_create failed".into());
@@ -63,7 +46,7 @@ impl NativePlayer {
                 ("audio-display", "no"),
                 ("idle", "yes"),
             ] {
-                let code = set(
+                let code = player.lib.mpv_set_option_string(
                     handle,
                     CString::new(k).unwrap().as_ptr(),
                     CString::new(v).unwrap().as_ptr(),
@@ -73,7 +56,7 @@ impl NativePlayer {
                 }
             }
             if let Some(output) = output {
-                let code = set(
+                let code = player.lib.mpv_set_option_string(
                     handle,
                     c"ao".as_ptr(),
                     CString::new(output).map_err(|e| e.to_string())?.as_ptr(),
@@ -82,7 +65,7 @@ impl NativePlayer {
                     return Err(format!("set ao: {}", player.error(code)));
                 }
             }
-            let code = init(handle);
+            let code = player.lib.mpv_initialize(handle);
             if code < 0 {
                 return Err(format!("mpv_initialize: {}", player.error(code)));
             }
@@ -120,17 +103,17 @@ impl NativePlayer {
             .map_err(|e| format!("mpv command: {e}"))?;
         let mut ptrs: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
         ptrs.push(std::ptr::null());
-        let code = unsafe { (self.command)(self.handle, ptrs.as_ptr()) };
+        let code = unsafe { self.lib.mpv_command(self.handle, ptrs.as_mut_ptr()) };
         if code < 0 {
             return Err(self.error(code));
         }
         if args.first() == Some(&"loadfile") {
             let mut id = 0i64;
             let code = unsafe {
-                (self.get)(
+                self.lib.mpv_get_property(
                     self.handle,
                     c"playlist/0/id".as_ptr(),
-                    4,
+                    FORMAT_INT64,
                     (&mut id as *mut i64).cast(),
                 )
             };
@@ -147,42 +130,44 @@ impl NativePlayer {
             .map(|e| PlaybackEvent::Failed(tg_player_application::AppError::Player(e)))
             .collect();
         loop {
-            let event = unsafe { (self.wait)(self.handle, 0.) };
-            if event.is_null() || unsafe { (*event).event_id } == 0 {
+            let event = unsafe { self.lib.mpv_wait_event(self.handle, 0.) };
+            if event.is_null() || unsafe { (*event).event_id } == NO_EVENT {
                 break;
             }
             let event = unsafe { &*event };
-            // MPV_EVENT_END_FILE = 7; EOF = 0, STOP = 2, ERROR = 4.
-            if event.event_id == 7 && !event.data.is_null() {
-                let end = unsafe { &*event.data.cast::<MpvEndFile>() };
-                if Some(end.playlist_entry_id) != self.active_entry.get() && end.reason != 2 {
+            if event.event_id == END_FILE && !event.data.is_null() {
+                let end = unsafe { &*event.data.cast::<abi::mpv_event_end_file>() };
+                if Some(end.playlist_entry_id) != self.active_entry.get() && end.reason != END_STOP
+                {
                     continue;
                 }
                 if Some(end.playlist_entry_id) == self.active_entry.get() {
                     self.active_entry.set(None);
                 }
                 match end.reason {
-                    0 => events.push(PlaybackEvent::Finished),
-                    2 => events.push(PlaybackEvent::Stopped),
-                    4 => events.push(PlaybackEvent::Failed(
+                    END_EOF => events.push(PlaybackEvent::Finished),
+                    END_STOP => events.push(PlaybackEvent::Stopped),
+                    END_ERROR => events.push(PlaybackEvent::Failed(
                         tg_player_application::AppError::Player(self.error(end.error)),
                     )),
                     _ => {}
                 }
-            } else if event.event_id == 6 && !event.data.is_null() {
+            } else if event.event_id == START_FILE && !event.data.is_null() {
                 let entry =
                     unsafe { (*event.data.cast::<abi::mpv_event_start_file>()).playlist_entry_id };
                 if self.waiting_for_entry.replace(false) {
                     self.active_entry.set(Some(entry));
                 }
                 self.started_entry.set(Some(entry));
-            } else if event.event_id == 8 && self.started_entry.get() == self.active_entry.get() {
+            } else if event.event_id == FILE_LOADED
+                && self.started_entry.get() == self.active_entry.get()
+            {
                 events.push(PlaybackEvent::Loaded);
-            } else if event.event_id == abi::mpv_event_id_MPV_EVENT_PLAYBACK_RESTART
+            } else if event.event_id == PLAYBACK_RESTART
                 && self.started_entry.get() == self.active_entry.get()
             {
                 self.ready_entry.set(self.active_entry.get());
-            } else if event.event_id == 5 && event.error < 0 {
+            } else if event.event_id == COMMAND_REPLY && event.error < 0 {
                 events.push(PlaybackEvent::Failed(
                     tg_player_application::AppError::Player(self.error(event.error)),
                 ));
@@ -191,17 +176,17 @@ impl NativePlayer {
         events
     }
     fn error(&self, code: i32) -> String {
-        unsafe { CStr::from_ptr((self.error_string)(code)) }
+        unsafe { CStr::from_ptr(self.lib.mpv_error_string(code)) }
             .to_string_lossy()
             .into_owned()
     }
     fn flag(&self, name: &str) -> bool {
         let mut value = 0i32;
         unsafe {
-            (self.get)(
+            self.lib.mpv_get_property(
                 self.handle,
                 CString::new(name).unwrap().as_ptr(),
-                3,
+                FORMAT_FLAG,
                 (&mut value as *mut i32).cast(),
             );
         }
@@ -213,10 +198,10 @@ impl NativePlayer {
     fn number_if_available(&self, name: &str) -> Option<f64> {
         let mut n = 0f64;
         let code = unsafe {
-            (self.get)(
+            self.lib.mpv_get_property(
                 self.handle,
                 CString::new(name).unwrap().as_ptr(),
-                5,
+                FORMAT_DOUBLE,
                 &mut n as *mut _ as *mut c_void,
             )
         };
@@ -226,7 +211,7 @@ impl NativePlayer {
 impl Drop for NativePlayer {
     fn drop(&mut self) {
         if !self.handle.is_null() {
-            unsafe { (self.destroy)(self.handle) }
+            unsafe { self.lib.mpv_terminate_destroy(self.handle) }
         }
     }
 }
@@ -294,7 +279,7 @@ impl Player {
                     }
                 };
                 unsafe {
-                    (native.set_wakeup)(
+                    native.lib.mpv_set_wakeup_callback(
                         native.handle,
                         Some(wake_owner),
                         (&mut *owner as *mut Thread).cast(),
@@ -369,7 +354,11 @@ impl Player {
                         }
                     }
                 }
-                unsafe { (native.set_wakeup)(native.handle, None, std::ptr::null_mut()) };
+                unsafe {
+                    native
+                        .lib
+                        .mpv_set_wakeup_callback(native.handle, None, std::ptr::null_mut())
+                };
             })
             .map_err(|e| e.to_string())?;
         started
