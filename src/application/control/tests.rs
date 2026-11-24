@@ -111,7 +111,7 @@ fn pagination_handles_large_unicode_and_escaped_metadata_without_leaking_state()
     let mut app = app();
     let mut fixture = app.state.view().clone();
     for track in &mut fixture.playlists[0].tracks {
-        track.title = "\n\"\u{0001}🎵Музыка".repeat(1000);
+        track.title = "\n\"\u{0001}🎵Café Étude".repeat(1000);
         track.artist = track.title.clone();
     }
     fixture.api_hash = "private-api-hash".into();

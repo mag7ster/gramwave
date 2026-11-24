@@ -3,15 +3,15 @@ use crate::{tr, App, Playlist, RepeatMode, RetryAction, State};
 use tg_player_application::model::Track;
 pub fn state() -> State {
     State { playlists: (0..5).map(|i| Playlist {
-        id: i, title: ["Midnight frequencies", "Saved Messages", "Jazz & coffee", "Electronic archive", "Музыка · Избранное"][i as usize].into(),
+        id: i, title: ["Midnight frequencies", "Saved Messages", "Jazz & coffee", "Electronic archive", "Music · Favorites"][i as usize].into(),
         personal: tg_player_application::model::PersonalChat {
             lists: [i != 3, i == 3],
             saved_messages: i == 1,
         },
         filters: [true,true,false], done: [true;3],
         tracks: (0..40).map(|j| Track {chat:i,message:j,
-            title: if j == 0 {"Ночной поезд — музыка для долгой дороги / A very long title that should gracefully truncate".into()} else {format!("{} {:02}",["Afterglow","Pacific","Blue hour","Signals","Slow motion"][j as usize%5],j+1)},
-            artist: if j == 0 {"Композитор · Исполнитель с длинным именем / Live session".into()} else {["Nils Frahm","Bonobo","Ólafur Arnalds","Tycho"][j as usize%4].into()},
+            title: if j == 0 {"Night Train — Music for the Long Road Home, Live at the Midnight Sessions".into()} else {format!("{} {:02}",["Afterglow","Pacific","Blue hour","Signals","Slow motion"][j as usize%5],j+1)},
+            artist: if j == 0 {"The Midnight Station Orchestra featuring The Northbound Quartet".into()} else {["Nils Frahm","Bonobo","Ólafur Arnalds","Tycho"][j as usize%4].into()},
             duration: if j == 2 {0} else {180+j as u64*3}, ..Default::default() }).collect(),
         ..Default::default()
     }).collect(),
@@ -92,8 +92,8 @@ pub fn apply(app: &mut App, scenario: &str) {
             state.playlists[0].title = "Midnight frequencies 🌙".into();
             state.playlists[0].emoji_status = Some(EmojiStatus { id, expires_at: 0 });
             let track = &mut state.playlists[0].tracks[0];
-            track.title = "Эфир 🌗 · Late night radio".into();
-            track.artist = "Диджей 👍🏽".into();
+            track.title = "On air 🌗 · Late night radio".into();
+            track.artist = "DJ 👍🏽".into();
             track.caption = Some(Caption {
                 text: "Live from the studio ✨ with headphones 🎧".into(),
                 emoji: vec![CaptionEmoji { bytes: 21..24, id }],

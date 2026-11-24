@@ -35,7 +35,7 @@ mod pin_tests {
                 },
                 Playlist {
                     id: 2,
-                    title: "Музыка".into(),
+                    title: "Études".into(),
                     personal: PersonalChat {
                         lists: [false, true],
                         ..Default::default()
@@ -53,7 +53,7 @@ mod pin_tests {
         assert_eq!(s.sidebar_chats(true, ""), vec![0, 1]);
         s.toggle_chat_pin(2);
         assert_eq!(s.sidebar_chats(false, ""), vec![1]);
-        assert_eq!(s.sidebar_chats(true, "МУЗ"), vec![1]);
+        assert_eq!(s.sidebar_chats(true, "ÉTU"), vec![1]);
         assert_eq!(s.sidebar_chats(true, "amB"), vec![0]);
         s.toggle_chat_pin(2);
         assert!(s.sidebar_chats(false, "").is_empty());

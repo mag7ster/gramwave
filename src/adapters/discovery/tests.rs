@@ -329,22 +329,22 @@ mod refresh_tests {
 mod chat_search_tests {
     use super::*;
     #[test]
-    fn server_finds_uncached_cyrillic_channel_and_deduplicates() {
+    fn server_finds_uncached_channel_with_unicode_query_and_deduplicates() {
         let tg = Telegram::mock_rpc(|v| match v["@type"].as_str().unwrap() {
             "searchChats" => {
-                assert_eq!(v["query"], "РАДИО");
+                assert_eq!(v["query"], "CAFÉ");
                 json!({"chat_ids":[1]})
             }
             "searchChatsOnServer" => json!({"chat_ids":[1,2,3]}),
             "getChat" if v["chat_id"] == 3 => json!({"@type":"error","message":"unavailable"}),
             "getChat" => {
-                json!({"id":v["chat_id"],"title":"Радио канал","type":{"@type":"chatTypeSupergroup"}})
+                json!({"id":v["chat_id"],"title":"Café Radio","type":{"@type":"chatTypeSupergroup"}})
             }
             _ => panic!("unexpected request {v}"),
         });
         let chats = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(search_chats(&tg, "РАДИО", [true; 3], &Default::default()))
+            .block_on(search_chats(&tg, "CAFÉ", [true; 3], &Default::default()))
             .unwrap();
         assert_eq!(chats.iter().map(|p| p.id).collect::<Vec<_>>(), [1, 2]);
         assert!(chats.iter().all(|p| p.tracks.is_empty()));

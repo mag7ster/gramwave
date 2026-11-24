@@ -15,7 +15,7 @@ fn jpeg_png_webp_decode_through_real_egui_loader() {
     ] {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path();
-        let path = dir.join(format!("avatar # музыка {name}"));
+        let path = dir.join(format!("avatar # café {name}"));
         let mut bytes = std::io::Cursor::new(Vec::new());
         image.write_to(&mut bytes, format).unwrap();
         std::fs::write(&path, bytes.into_inner()).unwrap();

@@ -40,7 +40,7 @@ try:
     call(player + ".Next")
     expect("Metadata", "Slow motion 05")  # Manual Next must ignore Repeat One.
     call(player + ".Previous")
-    expect("Metadata", "Ночной поезд")
+    expect("Metadata", "Night Train")
     call(player + ".Pause")
     expect("PlaybackStatus", "Paused")
     call(player + ".Play")
