@@ -97,10 +97,10 @@ late replies are discarded. Gateway requests/updates and auth operations are typ
 JSON and the C API stay in adapters; tdlib-rs 1.4.0 remains pinned and supplies API
 types. A closed allowlist preserves read-only behavior and online=false.
 
-mpv loads libmpv.so.2 with libloading. Checked-in bindgen ABI definitions come from
-the pinned vendor header; ordinary builds need neither libclang nor a link-time
-libmpv dependency. The owner thread validates symbols, owns and destroys the handle,
-executes commands and samples native properties outside the snapshot mutex.
+The desktop's default `mpv` feature links libmpv through `rsmpv`. Development
+builds with `--no-default-features` can run the demo without libmpv or TDLib.
+The owner thread owns the mpv handle, executes commands and samples native
+properties outside the snapshot mutex.
 A brief lock publishes a complete typed snapshot; readers never wait for native
 property calls. Submission and native failures use AppError. Commands/events are correlated with
 loads and mpv playlist entry IDs, so stale EOF and manual Stop cannot advance a
@@ -182,7 +182,8 @@ cargo build --workspace --locked --release --no-default-features
 cargo test --workspace --locked --features native-tests --lib -- --test-threads=1
 ```
 
-Native checks require libmpv, TDLib and permission to bind loopback sockets.
+Native checks require the libmpv development package, TDLib and permission to
+bind loopback sockets.
 Desktop checks run scripts/check-control.py and scripts/check-mpris.py in a graphical
 D-Bus session. Capture demo screenshots in both light and dark themes. Default demo
 starts no SQLite, Telegram, mpv, tray or MPRIS services; desktop integrations require

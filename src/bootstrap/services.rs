@@ -1,6 +1,6 @@
 //! Native service construction lives at the desktop composition boundary.
 use crate::{
-    adapters::{audio, storage, streaming, telegram, tray::Tray},
+    adapters::{storage, streaming, telegram, tray::Tray},
     application::ports::{PlayerBackend, Repository},
     launch::LaunchOptions,
 };
@@ -53,13 +53,19 @@ impl Services {
         let (player, player_error) = if demo {
             (None, String::new())
         } else {
-            match audio::Player::new(wake.clone()) {
+            #[cfg(feature = "mpv")]
+            match crate::adapters::audio::Player::new(wake.clone()) {
                 Ok(player) => (
                     Some(Box::new(player) as Box<dyn PlayerBackend>),
                     String::new(),
                 ),
                 Err(error) => (None, error),
             }
+            #[cfg(not(feature = "mpv"))]
+            (
+                None,
+                crate::tr("This build does not include audio playback"),
+            )
         };
         let desktop = !demo || desktop_integrations;
         let media = desktop.then(|| {

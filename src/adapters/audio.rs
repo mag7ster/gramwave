@@ -1,22 +1,17 @@
-use std::ffi::{c_void, CStr, CString};
-#[allow(non_camel_case_types, non_upper_case_globals, dead_code)]
-#[path = "mpv_abi.rs"]
-mod abi;
 pub use crate::application::ports::PlaybackEvent;
-use abi::{
-    mpv_end_file_reason_MPV_END_FILE_REASON_EOF as END_EOF,
-    mpv_end_file_reason_MPV_END_FILE_REASON_ERROR as END_ERROR,
-    mpv_end_file_reason_MPV_END_FILE_REASON_STOP as END_STOP,
-    mpv_event_id_MPV_EVENT_COMMAND_REPLY as COMMAND_REPLY,
-    mpv_event_id_MPV_EVENT_END_FILE as END_FILE, mpv_event_id_MPV_EVENT_FILE_LOADED as FILE_LOADED,
-    mpv_event_id_MPV_EVENT_NONE as NO_EVENT,
-    mpv_event_id_MPV_EVENT_PLAYBACK_RESTART as PLAYBACK_RESTART,
-    mpv_event_id_MPV_EVENT_START_FILE as START_FILE, mpv_format_MPV_FORMAT_DOUBLE as FORMAT_DOUBLE,
-    mpv_format_MPV_FORMAT_FLAG as FORMAT_FLAG, mpv_format_MPV_FORMAT_INT64 as FORMAT_INT64,
+use rsmpv::{EndFileReason, Event, Mpv};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread,
+    time::Duration,
 };
+use tg_player_application::AppError;
+
 struct NativePlayer {
-    lib: abi::Mpv,
-    handle: *mut abi::mpv_handle,
+    mpv: Mpv,
     active_entry: std::cell::Cell<Option<i64>>,
     waiting_for_entry: std::cell::Cell<bool>,
     started_entry: std::cell::Cell<Option<i64>>,
@@ -25,52 +20,32 @@ struct NativePlayer {
 }
 impl NativePlayer {
     fn with_audio_output(output: Option<&str>) -> Result<Self, String> {
-        unsafe {
-            let lib = abi::Mpv::new("libmpv.so.2").map_err(|e| e.to_string())?;
-            let player = Self {
-                handle: lib.mpv_create(),
-                lib,
-                active_entry: Default::default(),
-                waiting_for_entry: Default::default(),
-                started_entry: Default::default(),
-                ready_entry: Default::default(),
-                command_errors: Default::default(),
-            };
-            let handle = player.handle;
-            if handle.is_null() {
-                return Err("mpv_create failed".into());
-            }
-            for (k, v) in [
-                ("video", "no"),
-                ("terminal", "no"),
-                ("audio-display", "no"),
-                ("idle", "yes"),
-            ] {
-                let code = player.lib.mpv_set_option_string(
-                    handle,
-                    CString::new(k).unwrap().as_ptr(),
-                    CString::new(v).unwrap().as_ptr(),
-                );
-                if code < 0 {
-                    return Err(format!("set {k}: {}", player.error(code)));
-                }
-            }
-            if let Some(output) = output {
-                let code = player.lib.mpv_set_option_string(
-                    handle,
-                    c"ao".as_ptr(),
-                    CString::new(output).map_err(|e| e.to_string())?.as_ptr(),
-                );
-                if code < 0 {
-                    return Err(format!("set ao: {}", player.error(code)));
-                }
-            }
-            let code = player.lib.mpv_initialize(handle);
-            if code < 0 {
-                return Err(format!("mpv_initialize: {}", player.error(code)));
-            }
-            Ok(player)
+        let mut builder = Mpv::builder().map_err(|error| error.to_string())?;
+        for (name, value) in [
+            ("video", "no"),
+            ("terminal", "no"),
+            ("audio-display", "no"),
+            ("idle", "yes"),
+        ] {
+            builder = builder
+                .set_property(name, value)
+                .map_err(|error| format!("set {name}: {error}"))?;
         }
+        if let Some(output) = output {
+            builder = builder
+                .set_property("ao", output)
+                .map_err(|error| format!("set ao: {error}"))?;
+        }
+        Ok(Self {
+            mpv: builder
+                .build()
+                .map_err(|error| format!("mpv_initialize: {error}"))?,
+            active_entry: Default::default(),
+            waiting_for_entry: Default::default(),
+            started_entry: Default::default(),
+            ready_entry: Default::default(),
+            command_errors: Default::default(),
+        })
     }
     fn cmd(&self, args: &[&str], start_ms: Option<u64>) {
         let result = start_ms.map_or(Ok(()), |ms| {
@@ -96,29 +71,11 @@ impl NativePlayer {
             self.active_entry.set(None);
             self.waiting_for_entry.set(false);
         }
-        let strings: Vec<_> = args
-            .iter()
-            .map(|s| CString::new(*s))
-            .collect::<Result<_, _>>()
-            .map_err(|e| format!("mpv command: {e}"))?;
-        let mut ptrs: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
-        ptrs.push(std::ptr::null());
-        let code = unsafe { self.lib.mpv_command(self.handle, ptrs.as_mut_ptr()) };
-        if code < 0 {
-            return Err(self.error(code));
-        }
+        self.mpv.command(args).map_err(|error| error.to_string())?;
         if args.first() == Some(&"loadfile") {
-            let mut id = 0i64;
-            let code = unsafe {
-                self.lib.mpv_get_property(
-                    self.handle,
-                    c"playlist/0/id".as_ptr(),
-                    FORMAT_INT64,
-                    (&mut id as *mut i64).cast(),
-                )
-            };
-            self.active_entry.set((code >= 0).then_some(id));
-            self.waiting_for_entry.set(code < 0);
+            let entry = self.mpv.get_property::<i64>("playlist/0/id").ok();
+            self.active_entry.set(entry);
+            self.waiting_for_entry.set(entry.is_none());
         }
         Ok(())
     }
@@ -127,106 +84,69 @@ impl NativePlayer {
             .command_errors
             .borrow_mut()
             .drain(..)
-            .map(|e| PlaybackEvent::Failed(tg_player_application::AppError::Player(e)))
+            .map(|e| PlaybackEvent::Failed(AppError::Player(e)))
             .collect();
-        loop {
-            let event = unsafe { self.lib.mpv_wait_event(self.handle, 0.) };
-            if event.is_null() || unsafe { (*event).event_id } == NO_EVENT {
-                break;
-            }
-            let event = unsafe { &*event };
-            if event.event_id == END_FILE && !event.data.is_null() {
-                let end = unsafe { &*event.data.cast::<abi::mpv_event_end_file>() };
-                if Some(end.playlist_entry_id) != self.active_entry.get() && end.reason != END_STOP
-                {
-                    continue;
+        while let Some(event) = self.mpv.poll_event() {
+            match event {
+                Event::EndFile {
+                    reason,
+                    error,
+                    playlist_entry_id,
+                    ..
+                } => {
+                    let current = self.active_entry.get() == Some(playlist_entry_id);
+                    if !current && reason != EndFileReason::Stop {
+                        continue;
+                    }
+                    if current {
+                        self.active_entry.set(None);
+                    }
+                    match reason {
+                        EndFileReason::Eof => events.push(PlaybackEvent::Finished),
+                        EndFileReason::Stop => events.push(PlaybackEvent::Stopped),
+                        EndFileReason::Error => {
+                            let message = error
+                                .map(|error| error.to_string())
+                                .unwrap_or_else(|| "mpv playback failed".into());
+                            events.push(PlaybackEvent::Failed(AppError::Player(message)));
+                        }
+                        _ => {}
+                    }
                 }
-                if Some(end.playlist_entry_id) == self.active_entry.get() {
-                    self.active_entry.set(None);
+                Event::StartFile { playlist_entry_id } => {
+                    if self.waiting_for_entry.replace(false) {
+                        self.active_entry.set(Some(playlist_entry_id));
+                    }
+                    self.started_entry.set(Some(playlist_entry_id));
                 }
-                match end.reason {
-                    END_EOF => events.push(PlaybackEvent::Finished),
-                    END_STOP => events.push(PlaybackEvent::Stopped),
-                    END_ERROR => events.push(PlaybackEvent::Failed(
-                        tg_player_application::AppError::Player(self.error(end.error)),
-                    )),
-                    _ => {}
+                Event::FileLoaded if self.started_entry.get() == self.active_entry.get() => {
+                    events.push(PlaybackEvent::Loaded);
                 }
-            } else if event.event_id == START_FILE && !event.data.is_null() {
-                let entry =
-                    unsafe { (*event.data.cast::<abi::mpv_event_start_file>()).playlist_entry_id };
-                if self.waiting_for_entry.replace(false) {
-                    self.active_entry.set(Some(entry));
+                Event::PlaybackRestart if self.started_entry.get() == self.active_entry.get() => {
+                    self.ready_entry.set(self.active_entry.get());
                 }
-                self.started_entry.set(Some(entry));
-            } else if event.event_id == FILE_LOADED
-                && self.started_entry.get() == self.active_entry.get()
-            {
-                events.push(PlaybackEvent::Loaded);
-            } else if event.event_id == PLAYBACK_RESTART
-                && self.started_entry.get() == self.active_entry.get()
-            {
-                self.ready_entry.set(self.active_entry.get());
-            } else if event.event_id == COMMAND_REPLY && event.error < 0 {
-                events.push(PlaybackEvent::Failed(
-                    tg_player_application::AppError::Player(self.error(event.error)),
-                ));
+                Event::CommandReply {
+                    result: Err(error), ..
+                } => {
+                    events.push(PlaybackEvent::Failed(AppError::Player(error.to_string())));
+                }
+                _ => {}
             }
         }
         events
     }
-    fn error(&self, code: i32) -> String {
-        unsafe { CStr::from_ptr(self.lib.mpv_error_string(code)) }
-            .to_string_lossy()
-            .into_owned()
-    }
     fn flag(&self, name: &str) -> bool {
-        let mut value = 0i32;
-        unsafe {
-            self.lib.mpv_get_property(
-                self.handle,
-                CString::new(name).unwrap().as_ptr(),
-                FORMAT_FLAG,
-                (&mut value as *mut i32).cast(),
-            );
-        }
-        value != 0
+        self.mpv.get_property::<bool>(name).unwrap_or_default()
     }
-    pub fn number(&self, name: &str) -> f64 {
+    fn number(&self, name: &str) -> f64 {
         self.number_if_available(name).unwrap_or_default()
     }
     fn number_if_available(&self, name: &str) -> Option<f64> {
-        let mut n = 0f64;
-        let code = unsafe {
-            self.lib.mpv_get_property(
-                self.handle,
-                CString::new(name).unwrap().as_ptr(),
-                FORMAT_DOUBLE,
-                &mut n as *mut _ as *mut c_void,
-            )
-        };
-        (code >= 0 && n.is_finite()).then_some(n)
+        self.mpv
+            .get_property::<f64>(name)
+            .ok()
+            .filter(|n| n.is_finite())
     }
-}
-impl Drop for NativePlayer {
-    fn drop(&mut self) {
-        if !self.handle.is_null() {
-            unsafe { self.lib.mpv_terminate_destroy(self.handle) }
-        }
-    }
-}
-
-use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
-    },
-    thread::{self, Thread},
-    time::Duration,
-};
-unsafe extern "C" fn wake_owner(data: *mut c_void) {
-    // The owner retains the Thread through destruction of the mpv handle.
-    unsafe { &*data.cast::<Thread>() }.unpark();
 }
 
 fn publish_snapshot(
@@ -270,7 +190,6 @@ impl Player {
         let worker = thread::Builder::new()
             .name("tg-mpv".into())
             .spawn(move || {
-                let mut owner = Box::new(thread::current());
                 let native = match NativePlayer::with_audio_output(output.as_deref()) {
                     Ok(p) => p,
                     Err(e) => {
@@ -278,13 +197,8 @@ impl Player {
                         return;
                     }
                 };
-                unsafe {
-                    native.lib.mpv_set_wakeup_callback(
-                        native.handle,
-                        Some(wake_owner),
-                        (&mut *owner as *mut Thread).cast(),
-                    )
-                };
+                let owner = thread::current();
+                native.mpv.set_wakeup_callback(move || owner.unpark());
                 let _ = ready.send(Ok(()));
                 let mut generation = 0;
                 let mut snapshot = crate::application::ports::PlayerSnapshot::default();
@@ -354,11 +268,6 @@ impl Player {
                         }
                     }
                 }
-                unsafe {
-                    native
-                        .lib
-                        .mpv_set_wakeup_callback(native.handle, None, std::ptr::null_mut())
-                };
             })
             .map_err(|e| e.to_string())?;
         started

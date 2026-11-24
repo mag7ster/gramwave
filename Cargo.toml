@@ -10,8 +10,9 @@ members = ["crates/domain", "crates/application"]
 resolver = "2"
 
 [features]
-default = ["telegram", "vulkan"]
-native-tests = []
+default = ["mpv", "telegram", "vulkan"]
+native-tests = ["mpv"]
+mpv = ["dep:rsmpv"]
 telegram = ["dep:tdlib-rs"]
 vulkan = ["eframe/wgpu_no_default_features", "dep:wgpu"]
 
@@ -32,7 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 rusqlite = { version = "0.43.0", features = ["bundled", "backup"] }
-libloading = "0.8"
+rsmpv = { version = "0.2.1", default-features = false, optional = true }
 qrcode = { version = "0.14", default-features = false }
 fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }

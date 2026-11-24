@@ -4,5 +4,3 @@
 /tdata/
 *.sqlite*
 *.log
-
-/tools/mpv-bindings/target/

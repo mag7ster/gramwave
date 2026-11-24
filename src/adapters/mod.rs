@@ -1,3 +1,4 @@
+#[cfg(feature = "mpv")]
 pub mod audio;
 pub mod control;
 pub mod discovery;
