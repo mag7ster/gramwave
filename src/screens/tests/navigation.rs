@@ -83,6 +83,9 @@ fn tab_and_arrows_reveal_rows_across_virtual_list_boundaries() {
     }
 
     h.key(Key::ArrowRight);
+    let current = h.app.state.view().session.current().unwrap().entry_id;
+    assert_eq!(focused(&h), Some(h.app.test_queue_rows[&current].2));
+    h.key(Key::ArrowDown);
     let queue: Vec<_> = h
         .app
         .state

@@ -5,6 +5,7 @@ use crate::{
     tasks::{Operation, RequestId},
     AppError,
 };
+use tg_player_domain::QueueEntryId;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PlaybackState {
@@ -94,10 +95,11 @@ pub(crate) enum PlaybackMutation {
     Repeat(tg_player_domain::RepeatMode),
     Start(Vec<Track>, usize),
     Insert(Track, bool),
-    Move(usize, usize),
+    MoveQueueRow(usize, QueueEntryId, usize),
     Remove(usize),
     Clear,
-    Jump(tg_player_domain::QueueEntryId),
+    Jump(QueueEntryId),
+    PlayQueueRow(usize, QueueEntryId),
     Advance(bool),
     Previous,
     Stop,
@@ -145,7 +147,9 @@ impl PlaybackCore {
                     .map(Into::into)
             }
             PlaybackMutation::Insert(track, next) => state.session.insert(track, next),
-            PlaybackMutation::Move(from, to) => state.session.move_before(from, to),
+            PlaybackMutation::MoveQueueRow(from, id, to) => {
+                state.session.move_timeline_row(from, id, to)
+            }
             PlaybackMutation::Remove(index) => state.session.remove(index),
             PlaybackMutation::Clear => {
                 state.session.clear();
@@ -160,6 +164,9 @@ impl PlaybackCore {
                 play = index
                     .and_then(|index| state.session.jump_to(index))
                     .map(Into::into);
+            }
+            PlaybackMutation::PlayQueueRow(index, id) => {
+                play = state.session.play_timeline_row(index, id).map(Into::into)
             }
             PlaybackMutation::Advance(eof) => {
                 play = state

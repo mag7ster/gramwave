@@ -1,5 +1,5 @@
 use crate::model::Track;
-use tg_player_domain::RepeatMode;
+use tg_player_domain::{QueueEntryId, RepeatMode};
 pub enum AppCommand {
     Connect,
     Retry,
@@ -15,7 +15,11 @@ pub enum AppCommand {
     Settings(crate::persistence::Settings),
     Filters(i64, [bool; 3]),
     Insert(Track, bool),
-    Move(usize, usize),
+    MoveQueueRow {
+        from: usize,
+        entry_id: QueueEntryId,
+        to: usize,
+    },
     Remove(usize),
     Clear,
     Stop,
@@ -35,5 +39,9 @@ pub enum AppCommand {
     RemoveRecentChat(i64),
     ClearRecentChats,
     SelectPlaylistRow(usize),
-    PlayQueue(tg_player_domain::QueueEntryId),
+    PlayQueue(QueueEntryId),
+    PlayQueueRow {
+        index: usize,
+        entry_id: QueueEntryId,
+    },
 }

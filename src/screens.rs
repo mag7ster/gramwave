@@ -4,9 +4,10 @@ use design::{button, Icon};
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-use tg_player_domain::{playback::QueueView, QueueEntryId};
+use tg_player_domain::{playback::QueueTimeline, QueueEntryId};
 
 mod keyboard;
+mod queue_scroll;
 pub(crate) use keyboard::Keyboard;
 use keyboard::{empty_label, focus_outline, popup_focus, ListNavigation};
 
@@ -2253,7 +2254,10 @@ fn art(ui: &mut egui::Ui, title: &str, path: Option<&str>, size: f32) {
 
 #[derive(Clone, Copy)]
 struct QueueDrag {
+    id: egui::Id,
+    from: usize,
     entry: QueueEntryId,
+    current: Option<(usize, QueueEntryId)>,
     grab: egui::Vec2,
     slot: usize,
 }
@@ -2275,10 +2279,14 @@ fn queue_drag(
     ui: &egui::Ui,
     list: egui::Rect,
     stride: f32,
-    queue: QueueView<'_>,
+    queue: QueueTimeline<'_>,
     key: egui::Id,
+    row_id: impl Fn(usize) -> egui::Id,
 ) -> (Option<LiftedQueueRow>, Option<AppCommand>) {
     let ctx = ui.ctx();
+    let current = queue
+        .current_index()
+        .map(|i| (i, queue.get(i).unwrap().entry_id));
     let mut drag = ctx.data(|data| data.get_temp::<QueueDrag>(key));
     let (down, released, cancelled, origin, pointer, dt) = ui.input(|i| {
         (
@@ -2292,13 +2300,14 @@ fn queue_drag(
     });
     if drag.is_none() && down {
         drag = ctx.drag_started_id().zip(origin).and_then(|(id, origin)| {
-            let (slot, track) = queue
-                .iter()
-                .enumerate()
-                .find(|(_, track)| key.with(track.entry_id) == id)?;
+            let slot = (0..queue.len()).find(|&i| row_id(i) == id)?;
+            let track = queue.get(slot)?;
             let response = ctx.read_response(id)?;
             Some(QueueDrag {
+                id,
+                from: slot,
                 entry: track.entry_id,
+                current,
                 grab: origin - response.rect.min,
                 slot,
             })
@@ -2307,15 +2316,20 @@ fn queue_drag(
     let Some(mut drag) = drag else {
         return (None, None);
     };
-    let id = key.with(drag.entry);
+    let id = drag.id;
     let stop = || {
         ctx.data_mut(|data| data.remove::<QueueDrag>(key));
         if ctx.is_being_dragged(id) {
             ctx.stop_dragging();
         }
     };
-    let Some((pointer, from)) = pointer.zip(queue.iter().position(|t| t.entry_id == drag.entry))
-    else {
+    let from = drag.from;
+    let Some(pointer) = pointer.filter(|_| {
+        drag.current == current
+            && queue
+                .get(from)
+                .is_some_and(|row| row.entry_id == drag.entry)
+    }) else {
         stop();
         return (None, None);
     };
@@ -2345,7 +2359,11 @@ fn queue_drag(
         if !cancelled && inside && from != slot {
             return (
                 Some(LiftedQueueRow { from, slot, rect }),
-                Some(AppCommand::Move(from, slot + usize::from(slot > from))),
+                Some(AppCommand::MoveQueueRow {
+                    from,
+                    entry_id: drag.entry,
+                    to: slot,
+                }),
             );
         }
         return (None, None);
@@ -2371,7 +2389,31 @@ fn queue_drag(
     (Some(LiftedQueueRow { from, slot, rect }), None)
 }
 
-fn queue_row_contents(ui: &mut egui::Ui, rect: egui::Rect, track: &crate::Track) -> egui::Response {
+fn queue_row_id(
+    queue: QueueTimeline<'_>,
+    repeated: &HashSet<QueueEntryId>,
+    key: egui::Id,
+    i: usize,
+) -> egui::Id {
+    let id = queue.get(i).unwrap().entry_id;
+    if i < queue.past_len() {
+        key.with(("past", i, id))
+    } else if i < queue.upcoming_start() {
+        key.with(("current", id))
+    } else if repeated.contains(&id) {
+        key.with(("upcoming", i, id))
+    } else {
+        key.with(id)
+    }
+}
+
+fn queue_row_contents(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    track: &crate::Track,
+    past: bool,
+    current: bool,
+) -> egui::Response {
     let inset = rect.shrink2(egui::vec2(TRACK_ROW_PADDING, 6.));
     let center_y = inset.center().y;
     let cover_pos = egui::pos2(inset.left(), center_y - 22.);
@@ -2379,12 +2421,35 @@ fn queue_row_contents(ui: &mut egui::Ui, rect: egui::Rect, track: &crate::Track)
         egui::UiBuilder::new()
             .max_rect(egui::Rect::from_min_size(cover_pos, egui::Vec2::splat(44.))),
     );
+    if past {
+        cover_ui.multiply_opacity(0.62);
+    }
     art(
         &mut cover_ui,
         &track.title,
         track.image_path.as_deref(),
         44.,
     );
+    let palette = design::colors(ui);
+    if current {
+        ui.painter().rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 1.5, center_y),
+                egui::vec2(3., 30.),
+            ),
+            2.,
+            palette.accent,
+        );
+        let size = egui::Vec2::splat(16.);
+        let marker = egui::Rect::from_min_size(cover_pos + egui::Vec2::splat(28.), size);
+        ui.painter().rect_filled(marker, 4., palette.panel);
+        ui.put(
+            marker,
+            Icon::Play
+                .image(palette.accent, 12.)
+                .alt_text(tr("Current track")),
+        );
+    }
 
     let labels_left = cover_pos.x + 52.;
     let labels_right = inset.right() - 44.;
@@ -2400,8 +2465,14 @@ fn queue_row_contents(ui: &mut egui::Ui, rect: egui::Rect, track: &crate::Track)
         );
         labels.set_clip_rect(ui.clip_rect().intersect(labels_rect));
         labels.spacing_mut().item_spacing.y = 4.;
+        let mut title = egui::RichText::new(&track.title);
+        if past {
+            title = title.color(palette.muted);
+        } else if current {
+            title = title.strong();
+        }
         labels.add(
-            egui::Label::new(&track.title)
+            egui::Label::new(title)
                 .truncate()
                 .show_tooltip_when_elided(false),
         );
@@ -2434,14 +2505,19 @@ fn queue_row_contents(ui: &mut egui::Ui, rect: egui::Rect, track: &crate::Track)
 
 impl App {
     fn queue_screen(&mut self, ui: &mut egui::Ui, extend_rows: bool) {
-        let empty = self.state.view().session.remaining().is_empty();
+        let empty = self.state.view().session.timeline().is_empty();
+        let has_current = self.state.view().session.current().is_some();
+        let preview_history =
+            self.demo && self.options.scenario.as_deref() == Some("queue-history");
+        let (scroll_key, mut follow, opened) =
+            queue_scroll::QueueScroll::load(ui.ctx(), preview_history);
         ui.horizontal(|ui| {
             if empty {
-                let heading = empty_label(ui, egui::RichText::new(tr("Up next")).heading());
+                let heading = empty_label(ui, egui::RichText::new(tr("Queue")).heading());
                 self.keyboard.empty(ui, WorkspacePane::Queue, &heading);
                 focus_outline(ui, &heading);
             } else {
-                ui.heading(tr("Up next"));
+                ui.heading(tr("Queue"));
             }
             if extend_rows {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2452,15 +2528,40 @@ impl App {
                 });
             }
         });
-        ui.weak(if self.state.view().shuffle {
-            tr("Shuffled order")
+        let status = ui
+            .allocate_exact_size(egui::vec2(ui.available_width(), 24.), egui::Sense::hover())
+            .0;
+        let mut status_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(status)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        status_ui.spacing_mut().interact_size.y = status.height();
+        status_ui.spacing_mut().button_padding.y = 2.;
+        if has_current && !follow.following {
+            let back = status_ui.button(tr("Back to current track"));
+            #[cfg(test)]
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(egui::Id::new("test-queue-return"), back.rect));
+            if back.clicked() {
+                follow.following = true;
+                ui.request_repaint();
+            }
         } else {
-            tr("Playlist order")
-        });
+            status_ui.weak(if self.state.view().shuffle {
+                tr("Shuffled order")
+            } else {
+                tr("Playlist order")
+            });
+            #[cfg(test)]
+            ui.ctx()
+                .data_mut(|data| data.remove::<egui::Rect>(egui::Id::new("test-queue-return")));
+        }
         if empty {
             ui.label(tr("Your queue is empty"));
         }
         let mut action = None;
+        let mut reordering = false;
         #[cfg(test)]
         self.test_queue_rows.clear();
         let mut list_frame = if extend_rows {
@@ -2470,29 +2571,59 @@ impl App {
         }
         .begin(ui);
         let list_ui = &mut list_frame.content_ui;
+        let queue = self.state.view().session.timeline();
+        let spacing = list_ui.spacing().item_spacing.y;
+        let stride = design::ROW_HEIGHT + spacing;
+        let rows_height = (stride * queue.len() as f32 - spacing).max(0.);
+        let anchor = queue
+            .current_index()
+            .or_else(|| (queue.upcoming_start() < queue.len()).then_some(queue.upcoming_start()))
+            .map(|i| (queue.get(i).unwrap().entry_id, i));
+        let target = anchor.map_or_else(
+            || (rows_height - list_ui.available_height().max(64.)).max(0.),
+            |(_, i)| i as f32 * stride,
+        );
+        let area_id = list_ui.make_persistent_id("queue-list");
+        let middle = design::middle_scroll_active(list_ui.ctx(), area_id);
+        let (offset, busy) = follow.start(list_ui, stride, target, anchor, opened, middle);
+        if follow.following {
+            list_ui.spacing_mut().scroll.fade.strength = 0.;
+        }
+        let padded_to = if follow.following {
+            target
+        } else {
+            target.max(offset.min(rows_height - design::ROW_HEIGHT))
+        };
         let queue_scroll = list_scroll_area(list_ui)
             .id_salt("queue-list")
-            .show(list_ui, |ui| {
-                let queue = self.state.view().session.remaining();
-                let spacing = ui.spacing().item_spacing.y;
-                let stride = design::ROW_HEIGHT + spacing;
+            .vertical_scroll_offset(offset)
+            .show_viewport(list_ui, |ui, viewport| {
+                let queue = self.state.view().session.timeline();
+                let height = if anchor.is_some() && padded_to > 0. {
+                    rows_height.max(padded_to + viewport.height())
+                } else {
+                    rows_height
+                };
                 let (list, _) = ui.allocate_exact_size(
-                    egui::vec2(
-                        ui.available_width(),
-                        (stride * queue.len() as f32 - spacing).max(0.),
-                    ),
+                    egui::vec2(ui.available_width(), height),
                     egui::Sense::hover(),
                 );
                 let key = ui.id().with("reorder");
                 let nav = ListNavigation::new(WorkspacePane::Queue, queue.len(), stride);
-                let key_at = |i: usize| key.with(queue[i].entry_id);
+                let mut seen = HashSet::new();
+                let repeated = queue
+                    .upcoming_ids()
+                    .filter(|&id| !seen.insert(id))
+                    .collect();
+                let key_at = |i: usize| queue_row_id(queue, &repeated, key, i);
                 if let Some(i) = self.keyboard.step(ui, nav, true, key_at) {
                     let rect = queue_row_rect(list, stride, i as f32);
                     if !ui.is_rect_visible(rect) {
                         self.keyboard.reveal(ui, rect, nav, i);
                     }
                 }
-                let (lifted, moved) = queue_drag(ui, list, stride, queue, key);
+                let (lifted, moved) = queue_drag(ui, list, stride, queue, key, key_at);
+                reordering = lifted.is_some();
                 action = moved;
                 let palette = design::colors(ui);
                 if let Some(lifted) = &lifted {
@@ -2507,7 +2638,9 @@ impl App {
                 let bottom = ((ui.clip_rect().bottom() - list.top()) / stride).ceil() as usize;
                 let animation_time = ui.style().animation_time;
                 for i in top.saturating_sub(2)..bottom.saturating_add(2).min(queue.len()) {
-                    let entry = &queue[i];
+                    let entry = queue.get(i).unwrap();
+                    let past = i < queue.past_len();
+                    let current = queue.current_index() == Some(i);
                     let mut slot = i;
                     if let Some(lifted) = &lifted {
                         if i == lifted.from {
@@ -2543,9 +2676,13 @@ impl App {
                         )
                     });
                     if lifted.is_none() && row.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        ui.ctx().set_cursor_icon(if current {
+                            egui::CursorIcon::Grab
+                        } else {
+                            egui::CursorIcon::PointingHand
+                        });
                     }
-                    let fill = if row.has_focus() {
+                    let fill = if current || row.has_focus() {
                         palette.selected
                     } else if row.hovered() {
                         palette.raised
@@ -2555,29 +2692,40 @@ impl App {
                     ui.painter().rect_filled(rect, 8., fill);
                     let mut row_ui =
                         ui.new_child(egui::UiBuilder::new().id(id.with("body")).max_rect(rect));
-                    let menu = queue_row_contents(&mut row_ui, rect, &track);
+                    let menu = queue_row_contents(&mut row_ui, rect, &track, past, current);
                     self.keyboard.row(ui, nav, i, id, true, (&menu, rect));
+                    focus_outline(&row_ui, &row);
                     focus_outline(&row_ui, &menu);
                     #[cfg(test)]
                     self.test_queue_rows
                         .insert(entry.entry_id, (rect, menu.rect, row.id));
-                    if lifted.is_none() && !menu.clicked() && row.clicked() {
-                        action = Some(AppCommand::PlayQueue(entry.entry_id));
+                    if lifted.is_none() && !current && !menu.clicked() && row.clicked() {
+                        action = Some(AppCommand::PlayQueueRow {
+                            index: i,
+                            entry_id: entry.entry_id,
+                        });
+                        if row.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                        {
+                            ui.memory_mut(|m| {
+                                m.request_focus(key.with(("current", entry.entry_id)))
+                            });
+                        }
                     }
                     let mut first = None;
                     let mut contents = |ui: &mut egui::Ui| {
+                        let move_to = |to| AppCommand::MoveQueueRow {
+                            from: i,
+                            entry_id: entry.entry_id,
+                            to,
+                        };
                         for (available, label, command) in [
+                            (i > 0, tr("Move up"), move_to(i.saturating_sub(1))),
+                            (i + 1 < queue.len(), tr("Move down"), move_to(i + 1)),
                             (
-                                i > 0,
-                                tr("Move up"),
-                                AppCommand::Move(i, i.saturating_sub(1)),
+                                i >= queue.upcoming_start(),
+                                tr("Remove"),
+                                AppCommand::Remove(i.saturating_sub(queue.upcoming_start())),
                             ),
-                            (
-                                i + 1 < queue.len(),
-                                tr("Move down"),
-                                AppCommand::Move(i, i + 2),
-                            ),
-                            (true, tr("Remove"), AppCommand::Remove(i)),
                         ] {
                             if available {
                                 let button = ui.button(label);
@@ -2596,7 +2744,7 @@ impl App {
                     popup_focus(&menu, was_open, first);
                 }
                 if let Some(lifted) = lifted {
-                    let track = self.media_track((&queue[lifted.from]).into());
+                    let track = self.media_track(queue.get(lifted.from).unwrap().into());
                     self.image_wanted.push(track.image_file);
                     let id = key.with("lifted");
                     let mut overlay = ui.new_child(
@@ -2620,8 +2768,16 @@ impl App {
                     overlay
                         .painter()
                         .rect_filled(lifted.rect, 8., palette.raised);
-                    queue_row_contents(&mut overlay, lifted.rect, &track);
+                    let current = queue.current_index() == Some(lifted.from);
+                    queue_row_contents(
+                        &mut overlay,
+                        lifted.rect,
+                        &track,
+                        lifted.from < queue.past_len(),
+                        current,
+                    );
                 }
+                viewport.min.y
             });
         list_frame.end(ui);
         #[cfg(test)]
@@ -2633,9 +2789,14 @@ impl App {
             queue_scroll.inner_rect,
             queue_scroll.content_size.y,
         );
+        let middle = design::middle_scroll_active(ui.ctx(), queue_scroll.id);
+        follow.finish(ui, &queue_scroll, target, busy, reordering, middle);
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(scroll_key, follow));
         if let Some(action) = action {
-            let persist = !matches!(action, AppCommand::PlayQueue(_));
+            let persist = !matches!(action, AppCommand::PlayQueueRow { .. });
             self.execute(action);
+            ui.request_repaint();
             if persist {
                 self.persist();
             }

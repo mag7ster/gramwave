@@ -249,6 +249,9 @@ impl AppCore {
             }
             AppCommand::Play(track) => play = Some(track),
             AppCommand::PlayQueue(id) => play = self.handle(CoreCommand::Jump(id)),
+            AppCommand::PlayQueueRow { index, entry_id } => {
+                play = self.handle(CoreCommand::PlayQueueRow(index, entry_id))
+            }
             AppCommand::Next => play = self.handle(CoreCommand::Advance(false)),
             AppCommand::Advance(eof) => play = self.handle(CoreCommand::Advance(eof)),
             AppCommand::Previous => {
@@ -306,8 +309,8 @@ impl AppCore {
             AppCommand::Insert(track, next) => {
                 self.handle(CoreCommand::Insert(track, next));
             }
-            AppCommand::Move(from, to) => {
-                self.handle(CoreCommand::Move(from, to));
+            AppCommand::MoveQueueRow { from, entry_id, to } => {
+                self.handle(CoreCommand::MoveQueueRow(from, entry_id, to));
             }
             AppCommand::Remove(index) => {
                 self.handle(CoreCommand::Remove(index));

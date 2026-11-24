@@ -16,6 +16,65 @@ mod regression {
         s.remaining().iter().map(|t| t.message).collect()
     }
     #[test]
+    fn timeline_moves_every_role_and_keeps_the_current_track_and_position() {
+        for (from, to, current, upcoming) in [
+            (0, 3, 1, vec![3, 0, 4]),
+            (4, 1, 3, vec![3]),
+            (2, 0, 0, vec![0, 1, 3, 4]),
+            (2, 4, 4, vec![]),
+        ] {
+            let mut s = Session::default();
+            let playing = s.start(&tracks(), 2, false).unwrap().entry_id;
+            s.set_position_ms(42_000);
+            let id = s.timeline().get(from).unwrap().entry_id;
+            s.move_timeline_row(from, id, to);
+            let restored: Session =
+                serde_json::from_value(serde_json::to_value(s).unwrap()).unwrap();
+            assert_eq!(restored.timeline().current_index(), Some(current));
+            assert_eq!(restored.timeline().get(to).unwrap().entry_id, id);
+            assert_eq!(restored.current().unwrap().entry_id, playing);
+            assert_eq!(restored.position_ms(), 42_000);
+            assert_eq!(order(&restored), upcoming);
+        }
+    }
+
+    #[test]
+    fn timeline_moves_a_repeat_appearance_independently() {
+        let mut s = Session::default();
+        let id = s.start(&tracks(), 0, false).unwrap().entry_id;
+        for _ in 0..5 {
+            s.advance(RepeatMode::All, false, true);
+        }
+        s.move_timeline_row(0, id, 6);
+        assert_eq!(s.current().unwrap().entry_id, id);
+        let moved = &s.remaining()[1];
+        assert_eq!(moved.message, 0);
+        assert_ne!(moved.entry_id, id);
+        s.remove(1);
+        assert_eq!(s.current().unwrap().entry_id, id);
+        assert!(s.snapshot().iter().any(|entry| entry.entry_id == id));
+    }
+
+    #[test]
+    fn rewind_selects_an_exact_repeat_appearance_and_matches_previous() {
+        let mut s = Session::default();
+        s.start(&tracks(), 1, false);
+        for _ in 0..13 {
+            s.advance(RepeatMode::All, false, true);
+        }
+        for index in 0..s.timeline().past_len() {
+            let mut actual = s.clone();
+            let mut expected = s.clone();
+            let id = s.timeline().get(index).unwrap().entry_id;
+            while expected.timeline().past_len() > index {
+                expected.previous().unwrap();
+            }
+            assert!(actual.play_timeline_row(index, QueueEntryId(0)).is_none());
+            assert_eq!(actual.play_timeline_row(index, id).unwrap().entry_id, id);
+            assert_eq!(actual, expected);
+        }
+    }
+    #[test]
     fn previous_from_middle_survives_restart_and_returns_forward() {
         let mut s = Session::default();
 

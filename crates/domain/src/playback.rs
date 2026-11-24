@@ -3,6 +3,8 @@ use crate::model::{QueueEntry, QueueEntryId, TrackMetadata};
 use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+mod timeline;
+pub use timeline::QueueTimeline;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
     #[default]

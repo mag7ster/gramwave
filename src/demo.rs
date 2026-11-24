@@ -101,7 +101,9 @@ pub fn apply(app: &mut App, scenario: &str) {
             });
             app.custom_emoji.set_demo();
         }
-        "queue" => {
+        "queue" | "queue-history" => {
+            state.session.start(&tracks, 3, false);
+            state.session.jump_to(2);
             state.queue_panel_open = true;
             app.pane = crate::screens::WorkspacePane::Queue;
         }

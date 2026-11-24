@@ -62,6 +62,10 @@ msgstr ""
 msgid "B"
 msgstr ""
 
+#: src/screens.rs:2542
+msgid "Back to current track"
+msgstr ""
+
 #: src/application/cache.rs:229
 msgid "Cache cleanup finished."
 msgstr ""
@@ -186,6 +190,10 @@ msgstr ""
 #: src/application/source_chat.rs:18
 msgid ""
 "Could not open Telegram. Check that a Telegram desktop app is installed."
+msgstr ""
+
+#: src/screens.rs:2450
+msgid "Current track"
 msgstr ""
 
 #: src/application/cache.rs:346
@@ -747,10 +755,6 @@ msgstr ""
 
 #: src/screens.rs:426 src/screens.rs:855
 msgid "Unpin chat"
-msgstr ""
-
-#: src/screens.rs:1712
-msgid "Up next"
 msgstr ""
 
 #: src/auth.rs:155
