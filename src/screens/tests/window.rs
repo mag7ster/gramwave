@@ -160,7 +160,11 @@ fn side_panels_keep_the_dragged_width_with_an_empty_queue() {
 #[test]
 fn resizing_switches_between_docked_and_compact_library() {
     let mut h = Harness::new();
-    let library_visible = |h: &Harness| h.ctx.read_response(egui::Id::new("chat-search")).is_some();
+    let library_visible = |h: &Harness| {
+        h.ctx
+            .read_response(egui::Id::new(CHAT_SEARCH_TRIGGER))
+            .is_some()
+    };
     assert!(!library_visible(&h));
     h.size.x = 1100.;
     h.settle();
@@ -190,7 +194,7 @@ fn compact_tabs_show_one_view_and_opening_a_chat_reveals_its_tracks() {
     h.frame(vec![]);
     let search = h
         .ctx
-        .read_response(egui::Id::new("chat-search"))
+        .read_response(egui::Id::new(CHAT_SEARCH_TRIGGER))
         .unwrap()
         .rect;
     h.click(egui::pos2(search.left() + 22., search.bottom() + 36.));
@@ -293,7 +297,10 @@ fn sidebar_search_reveals_matching_chats_and_escape_restores_pins() {
     assert!(visible(&pinned, "Jazz & coffee"));
     assert!(!visible(&pinned, "Saved Messages"));
 
-    let search = h.ctx.read_response(egui::Id::new("chat-search")).unwrap();
+    let search = h
+        .ctx
+        .read_response(egui::Id::new(CHAT_SEARCH_TRIGGER))
+        .unwrap();
     h.click(search.rect.center());
     h.settle();
     let all = h.frame(vec![]);
@@ -320,7 +327,10 @@ fn recent_chats_follow_sidebar_search_and_can_be_removed_or_cleared() {
     let search = |h: &mut Harness| {
         h.app.pane = WorkspacePane::Library;
         h.settle();
-        let field = h.ctx.read_response(egui::Id::new("chat-search")).unwrap();
+        let field = h
+            .ctx
+            .read_response(egui::Id::new(CHAT_SEARCH_TRIGGER))
+            .unwrap();
         h.click(field.rect.center());
         h.settle();
         h.frame(vec![])

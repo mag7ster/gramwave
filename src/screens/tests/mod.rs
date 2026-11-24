@@ -1,5 +1,6 @@
 use super::*;
 
+mod navigation;
 mod playlist;
 mod queue;
 mod transport;
@@ -63,19 +64,22 @@ impl Harness {
         self.pointer(p, false);
     }
     fn key(&mut self, key: egui::Key) {
+        self.key_with(key, egui::Modifiers::NONE);
+    }
+    fn key_with(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
         self.frame(vec![egui::Event::Key {
             key,
             physical_key: None,
             pressed: true,
             repeat: false,
-            modifiers: egui::Modifiers::NONE,
+            modifiers,
         }]);
         self.frame(vec![egui::Event::Key {
             key,
             physical_key: None,
             pressed: false,
             repeat: false,
-            modifiers: egui::Modifiers::NONE,
+            modifiers,
         }]);
     }
 }
