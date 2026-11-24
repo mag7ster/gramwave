@@ -229,6 +229,16 @@ pub fn choice(ui: &mut egui::Ui, label: String, active: bool) -> bool {
     .inner
 }
 
+pub(crate) fn slider_rail(rect: egui::Rect) -> egui::Rect {
+    rect.shrink2(egui::vec2(6., 0.))
+}
+
+pub(crate) fn repaint_after(ui: &egui::Ui, delay: std::time::Duration) {
+    // egui subtracts predicted_dt when scheduling the repaint.
+    let frame = ui.input(|input| std::time::Duration::from_secs_f32(input.predicted_dt));
+    ui.ctx().request_repaint_after(delay + frame);
+}
+
 /// A labelled slider with a generous hit target and explicit keyboard handling.
 pub fn slider(
     ui: &mut egui::Ui,
@@ -243,7 +253,7 @@ pub fn slider(
         egui::Sense::click_and_drag(),
     );
     response.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), *value, &label));
-    let rail = rect.shrink2(egui::vec2(6., 0.));
+    let rail = slider_rail(rect);
     let before = *value;
     if response.is_pointer_button_down_on() {
         response.request_focus();

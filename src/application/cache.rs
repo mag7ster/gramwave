@@ -427,7 +427,6 @@ impl App {
                 },
                 |ui, ()| {
                     if busy {
-                        ui.spinner();
                         ui.weak(if matches!(self.cache.job, Some(CacheJob::Inspect)) {
                             tr("Measuring cache…")
                         } else {

@@ -18,6 +18,7 @@ use tg_player_application::{
 };
 
 const FRAME_BUDGET: usize = 64 * 1024 * 1024;
+const ANIMATION_FPS: f64 = 12.;
 
 pub(crate) fn install(ctx: &egui::Context, screenshot: bool) {
     fastframe_emoji::EmojiSetup::default()
@@ -67,6 +68,12 @@ impl CustomEmoji {
         if self.0.borrow().connection != connection {
             self.invalidate();
             self.0.borrow_mut().connection = connection;
+        }
+    }
+
+    pub(crate) fn release_textures(&self) {
+        for loaded in self.0.borrow_mut().loaded.values_mut() {
+            loaded.texture = None;
         }
     }
 
@@ -121,12 +128,15 @@ impl CustomEmoji {
             loaded.used = Instant::now();
             if let Some(animation) = &loaded.asset.animation {
                 let frame = if animation.frames.len() > 1 {
-                    let seconds = animation.duration.as_secs_f64();
-                    let step = seconds / animation.frames.len() as f64;
-                    let position = ui.input(|input| input.time).rem_euclid(seconds);
-                    ui.ctx()
-                        .request_repaint_after(Duration::from_secs_f64(step - position % step));
-                    ((position / step) as usize).min(animation.frames.len() - 1)
+                    // Give short loops at least two ticks so they can show movement.
+                    let seconds = animation.duration.as_secs_f64().max(2. / ANIMATION_FPS);
+                    let time_in_ticks = ui.input(|input| input.time) * ANIMATION_FPS;
+                    let tick = time_in_ticks.floor();
+                    let position = (tick / ANIMATION_FPS).rem_euclid(seconds);
+                    let until_next_tick = (1. - time_in_ticks.fract()) / ANIMATION_FPS;
+                    crate::design::repaint_after(ui, Duration::from_secs_f64(until_next_tick));
+                    let frame = (position / seconds * animation.frames.len() as f64) as usize;
+                    frame.min(animation.frames.len() - 1)
                 } else {
                     0
                 };
@@ -425,6 +435,98 @@ mod tests {
         let state = app.custom_emoji.0.borrow();
         assert_eq!(state.requested, vec![emoji::DEMO_ID]);
         assert!(state.loaded[&emoji::DEMO_ID].texture.is_some());
+    }
+
+    #[test]
+    fn visible_emoji_with_different_durations_share_a_repaint_tick() {
+        let cache = CustomEmoji::default();
+        cache.set_demo();
+        let mut second = emoji::demo_asset();
+        let short = second.animation.as_mut().unwrap();
+        short.frames.truncate(2);
+        short.duration = Duration::from_secs_f64(1. / ANIMATION_FPS);
+        let second_id = emoji::DEMO_ID + 1;
+        cache.0.borrow_mut().loaded.insert(
+            second_id,
+            Loaded {
+                asset: second,
+                used: Instant::now(),
+                texture: None,
+            },
+        );
+        let ctx = egui::Context::default();
+        let draw = |time| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    for id in [emoji::DEMO_ID, second_id] {
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(24.), egui::Sense::hover());
+                        cache.paint(ui, rect, id, Color32::WHITE, "");
+                    }
+                },
+            );
+            let updates = output.textures_delta.set.len();
+            output.textures_delta.clear();
+            (
+                updates,
+                output.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            )
+        };
+        draw(0.);
+        draw(0.02);
+        let (updates, delay) = draw(0.07);
+        assert_eq!(updates, 0);
+        assert!(delay.abs_diff(Duration::from_micros(13_333)) < Duration::from_micros(1));
+        assert_eq!(draw(0.09).0, 2);
+    }
+
+    #[test]
+    fn reopened_window_uploads_its_own_animated_status_texture() {
+        use fastframe_shell::Resident;
+
+        let mut app = App::new_at(Default::default(), true);
+        app.custom_emoji.set_demo();
+        let status = Some(EmojiStatus {
+            id: emoji::DEMO_ID,
+            expires_at: 0,
+        });
+        let draw = |app: &App, ctx: &egui::Context, time| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| app.chat_emoji(ui, status, 24., None),
+            );
+            let id = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.texture_id),
+                _ => None,
+            });
+            let upload = id.and_then(|id| output.textures_delta.set.remove(&id));
+            output.textures_delta.clear();
+            (id.unwrap(), upload.unwrap()[0].image.clone())
+        };
+        let original = egui::Context::default();
+        let (original_id, first_frame) = draw(&app, &original, 0.);
+
+        app.window_gone();
+        let reopened = egui::Context::default();
+        let cover = reopened.load_texture(
+            "album cover",
+            egui::ColorImage::filled([24, 24], Color32::RED),
+            egui::TextureOptions::LINEAR,
+        );
+        assert_eq!(original_id, cover.id());
+        let (reopened_id, reopened_frame) = draw(&app, &reopened, 0.);
+        assert_ne!(reopened_id, cover.id());
+        assert!(reopened_frame == first_frame);
+        let (next_id, next_frame) = draw(&app, &reopened, 0.5);
+        assert_eq!(next_id, reopened_id);
+        assert!(next_frame != first_frame);
     }
 
     #[test]

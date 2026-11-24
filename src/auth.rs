@@ -196,13 +196,10 @@ self.execute(crate::application::commands::AppCommand::Authenticate(AuthRequest:
 }
 }
 ,
-   Phase::Closed=>{ui.label(tr("Connection closed. Please reconnect."));},Phase::Starting=>{ui.spinner();ui.label(tr("Connecting securely to Telegram…"));},Phase::Ready=>{}
+   Phase::Closed=>{ui.label(tr("Connection closed. Please reconnect."));},Phase::Starting=>{ui.label(tr("Connecting securely to Telegram…"));},Phase::Ready=>{}
   }});
         if pending {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(tr("Please wait…"));
-            });
+            ui.label(tr("Please wait…"));
         }
         if !self.auth_error.is_empty() {
             ui.colored_label(ui.visuals().error_fg_color, &self.auth_error);

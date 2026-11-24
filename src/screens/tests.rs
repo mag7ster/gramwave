@@ -146,7 +146,26 @@ mod regression {
 #[cfg(test)]
 mod interaction_tests {
     use super::*;
+    use crate::application::ports::{PlaybackEvent, PlayerBackend, PlayerCommand, PlayerSnapshot};
     use crate::Track;
+    use tg_player_application::AppError;
+
+    struct Clock(PlayerSnapshot);
+
+    impl PlayerBackend for Clock {
+        fn command(&self, _: PlayerCommand) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn drain(&self) -> Vec<PlaybackEvent> {
+            Vec::new()
+        }
+
+        fn snapshot(&self) -> PlayerSnapshot {
+            self.0
+        }
+    }
+
     struct Harness {
         app: App,
         ctx: egui::Context,
@@ -172,7 +191,7 @@ mod interaction_tests {
             h.frame(vec![]);
             h
         }
-        fn frame(&mut self, events: Vec<egui::Event>) {
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
             self.time += 0.02;
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)),
@@ -182,6 +201,12 @@ mod interaction_tests {
             };
             let mut output = self.ctx.run_ui(input, |ui| self.app.render(ui));
             output.textures_delta.clear();
+            output
+        }
+        fn settle(&mut self) {
+            for _ in 0..10 {
+                self.frame(vec![]);
+            }
         }
         fn pointer(&mut self, p: egui::Pos2, pressed: bool) {
             self.frame(vec![
@@ -220,8 +245,7 @@ mod interaction_tests {
         let mut h = Harness::new();
         h.size = egui::vec2(1100., 800.);
         h.app.queue_open = true;
-        h.frame(vec![]);
-        h.frame(vec![]);
+        h.settle();
 
         for (name, left, offsets) in [
             ("sidebar", true, [85., -100.]),
@@ -255,6 +279,42 @@ mod interaction_tests {
     }
 
     #[test]
+    fn resizing_slides_the_sidebar_as_the_track_view_reflows() {
+        let mut h = Harness::new();
+        let tracks_left = |h: &Harness| {
+            h.ctx
+                .read_response(egui::Id::new("track-search"))
+                .unwrap()
+                .rect
+                .left()
+        };
+        let compact = tracks_left(&h);
+        h.size.x = 1100.;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let opening = tracks_left(&h);
+        h.settle();
+        let docked = tracks_left(&h);
+        assert!(
+            compact < opening && opening < docked,
+            "{compact} < {opening} < {docked}"
+        );
+
+        h.size.x = 1039.;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let closing = tracks_left(&h);
+        h.settle();
+        assert!(
+            compact < closing && closing < docked,
+            "{compact} < {closing} < {docked}"
+        );
+        assert_eq!(tracks_left(&h), compact);
+        assert!(h.ctx.read_response(egui::Id::new("chat-search")).is_none());
+        h.app.shutdown_core().unwrap();
+    }
+
+    #[test]
     fn compact_tabs_show_one_view_and_opening_a_chat_reveals_its_tracks() {
         let mut h = Harness::new();
         h.app.queue_open = true;
@@ -266,6 +326,26 @@ mod interaction_tests {
         h.click(tab(&h, WorkspacePane::Queue).center());
         assert_eq!(h.app.pane, WorkspacePane::Queue);
         assert!(h.ctx.memory(|m| m.area_rect("compact-queue").is_none()));
+        let marker = |output: egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect) if rect.fill == design::palette(false).selected => {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let moving = marker(h.frame(vec![]));
+        let tracks = tab(&h, WorkspacePane::Playlist);
+        let queue = tab(&h, WorkspacePane::Queue);
+        assert!(tracks.left() < moving.left() && moving.left() < queue.left());
+        h.settle();
+        let settled = marker(h.frame(vec![]));
+        assert!((settled.min - queue.min).length() < 1.);
+        assert!((settled.max - queue.max).length() < 1.);
         h.frame(vec![]);
         assert!(h.ctx.read_response(egui::Id::new("track-search")).is_none());
         h.click(tab(&h, WorkspacePane::Library).center());
@@ -420,7 +500,7 @@ mod interaction_tests {
             });
             h.app.state = tg_player_application::AppCore::new(state);
             h.time += 0.1;
-            let output = h.ctx.run_ui(
+            let mut output = h.ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, h.size)),
                     time: Some(h.time),
@@ -428,6 +508,7 @@ mod interaction_tests {
                 },
                 |ui| h.app.render(ui),
             );
+            output.textures_delta.clear();
             let heading = output
                 .shapes
                 .iter()
@@ -686,6 +767,45 @@ mod interaction_tests {
     }
 
     #[test]
+    fn sidebar_search_reveals_all_chats_then_restores_pinned_chats() {
+        let mut h = Harness::new();
+        h.app.pane = WorkspacePane::Library;
+        let chat = |output: &egui::FullOutput, title| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == title => {
+                    Some((text.pos.y, text.fallback_color.a()))
+                }
+                _ => None,
+            })
+        };
+        let pinned = h.frame(vec![]);
+        assert!(chat(&pinned, "Saved Messages").is_none());
+
+        let search = h.ctx.read_response(egui::Id::new("chat-search")).unwrap();
+        h.click(search.rect.center());
+        let (enter_y, enter_opacity) = chat(&h.frame(vec![]), "Saved Messages").unwrap();
+        h.settle();
+        let (rest_y, rest_opacity) = chat(&h.frame(vec![]), "Saved Messages").unwrap();
+        assert!(
+            enter_y > rest_y && enter_opacity < rest_opacity,
+            "enter ({enter_y}, {enter_opacity}), rest ({rest_y}, {rest_opacity})"
+        );
+
+        h.key(egui::Key::Escape);
+        let pinned_again = h.frame(vec![]);
+        let (exit_y, exit_opacity) = chat(&pinned_again, "Jazz & coffee").unwrap();
+        h.settle();
+        let settled = h.frame(vec![]);
+        let (rest_y, rest_opacity) = chat(&settled, "Jazz & coffee").unwrap();
+        assert!(
+            exit_y > rest_y && exit_opacity < rest_opacity,
+            "exit ({exit_y}, {exit_opacity}), rest ({rest_y}, {rest_opacity})"
+        );
+        assert!(chat(&settled, "Saved Messages").is_none());
+        h.app.shutdown_core().unwrap();
+    }
+
+    #[test]
     fn queue_row_plays_on_click_or_enter() {
         for target in ["artwork", "title", "row", "keyboard"] {
             let mut h = queue_harness(5);
@@ -788,8 +908,7 @@ mod interaction_tests {
                 .collect(),
             0,
         ));
-        h.frame(vec![]);
-        h.frame(vec![]);
+        h.settle();
         h
     }
 
@@ -986,25 +1105,56 @@ mod interaction_tests {
     }
 
     #[test]
+    fn timeline_repaint_interval_accounts_for_track_duration_and_pixel_density() {
+        assert_eq!(seek_repaint_interval(180., 600.), Duration::from_millis(75));
+        assert_eq!(
+            seek_repaint_interval(180., 1200.),
+            Duration::from_micros(37_500)
+        );
+        assert_eq!(
+            seek_repaint_interval(5., 600.),
+            Duration::from_secs_f64(1. / 60.)
+        );
+        assert_eq!(
+            seek_repaint_interval(3600., 600.),
+            Duration::from_millis(200)
+        );
+    }
+
+    #[test]
+    fn timeline_only_requests_frames_while_visible_and_playing() {
+        let mut h = Harness::new();
+        crate::demo::apply(&mut h.app, "playing");
+        h.app.player = Some(Box::new(Clock(PlayerSnapshot {
+            duration: 180.,
+            ..Default::default()
+        })));
+        h.settle();
+        let delay = h.frame(vec![]).viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        let rect = h.app.test_seek.unwrap().0;
+        assert_eq!(
+            delay,
+            seek_repaint_interval(180., design::slider_rail(rect).width())
+        );
+
+        h.app.execute(AppCommand::Pause(true));
+        h.settle();
+        assert_eq!(
+            h.frame(vec![]).viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            Duration::MAX
+        );
+
+        h.app.execute(AppCommand::Pause(false));
+        h.size.y = 140.;
+        h.settle();
+        assert_eq!(
+            h.frame(vec![]).viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            Duration::MAX
+        );
+    }
+
+    #[test]
     fn timeline_uses_audio_clock_until_seek_preview_or_backend_seek() {
-        use crate::application::ports::{
-            PlaybackEvent, PlayerBackend, PlayerCommand, PlayerSnapshot,
-        };
-        use tg_player_application::AppError;
-
-        struct Clock(PlayerSnapshot);
-        impl PlayerBackend for Clock {
-            fn command(&self, _: PlayerCommand) -> Result<(), AppError> {
-                Ok(())
-            }
-            fn drain(&self) -> Vec<PlaybackEvent> {
-                Vec::new()
-            }
-            fn snapshot(&self) -> PlayerSnapshot {
-                self.0
-            }
-        }
-
         let mut h = Harness::new();
         h.click(h.app.test_rows[&0].0.center());
         assert!(!h.app.state.playback().state().paused());

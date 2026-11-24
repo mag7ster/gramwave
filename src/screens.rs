@@ -16,6 +16,28 @@ pub(crate) enum WorkspacePane {
     Queue,
 }
 
+fn reveal_progress<T: Copy + Eq + Send + Sync + 'static>(
+    ui: &egui::Ui,
+    id: &'static str,
+    target: T,
+    duration: f64,
+) -> f32 {
+    let id = egui::Id::new(id);
+    let now = ui.input(|i| i.time);
+    let started = ui.data_mut(|data| {
+        let state = data.get_temp_mut_or(id, (target, f64::NEG_INFINITY));
+        if state.0 != target {
+            *state = (target, now);
+        }
+        state.1
+    });
+    let progress = ((now - started) / duration).clamp(0., 1.) as f32;
+    if progress < 1. {
+        ui.ctx().request_repaint();
+    }
+    egui::emath::easing::cubic_out(progress)
+}
+
 fn search_field(
     ui: &mut egui::Ui,
     query: &mut String,
@@ -67,11 +89,24 @@ fn search_field(
         if close.clicked()
             || (escape && (active.is_some() || edit.has_focus() || edit.lost_focus()))
         {
-            if let Some(active) = active {
+            if let Some(active) = active.as_deref_mut() {
                 *active = false;
             }
             query.clear();
             edit.surrender_focus();
+        }
+    }
+    if let Some(active) = active {
+        let accent = ui
+            .ctx()
+            .animate_bool(egui::Id::new(id).with("accent"), *active);
+        if accent > 0. {
+            ui.painter().rect_stroke(
+                rect,
+                9.,
+                egui::Stroke::new(1., p.accent.gamma_multiply(0.7 * accent)),
+                egui::StrokeKind::Inside,
+            );
         }
     }
 }
@@ -167,53 +202,76 @@ impl App {
 
         if player_only {
             egui::CentralPanel::default().show(root, |ui| {
+                let reveal = reveal_progress(
+                    ui,
+                    "transport-layout",
+                    (player_only, controls_only, false, false, false),
+                    0.15,
+                );
+                ui.multiply_opacity(egui::lerp(0.7..=1., reveal));
                 if controls_only {
                     self.seek_preview = None;
                     let rect = ui.available_rect_before_wrap();
                     ui.scope_builder(
                         egui::UiBuilder::new()
                             .max_rect(egui::Rect::from_center_size(
-                                rect.center(),
+                                rect.center() + egui::vec2(0., 5. * (1. - reveal)),
                                 egui::vec2(132., 44.),
                             ))
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         |ui| self.transport_buttons(ui, false),
                     );
                 } else {
-                    ui.add_space((ui.available_height() - 80.).max(0.) / 2.);
+                    ui.add_space((ui.available_height() - 80.).max(0.) / 2. + 5. * (1. - reveal));
                     self.transport(ui, false, true);
                 }
             });
         } else {
-            let transport = egui::Panel::bottom("transport");
+            let mut transport = egui::Panel::bottom("transport");
             if dense {
-                transport
-                    .exact_size(52.)
-                    .frame(
-                        egui::Frame::new()
-                            .fill(design::colors(root).background)
-                            .inner_margin(4.),
-                    )
-                    .show(root, |ui| {
+                transport = transport.frame(
+                    egui::Frame::new()
+                        .fill(design::colors(root).background)
+                        .inner_margin(4.),
+                );
+            }
+            transport
+                .exact_size(if dense { 52. } else { 96. })
+                .show(root, |ui| {
+                    let reveal = reveal_progress(
+                        ui,
+                        "transport-layout",
+                        (
+                            false,
+                            false,
+                            dense,
+                            !dense && ui.available_width() < 798.,
+                            dock,
+                        ),
+                        0.15,
+                    );
+                    ui.multiply_opacity(egui::lerp(0.7..=1., reveal));
+                    if dense {
                         self.seek_preview = None;
                         self.compact_transport_controls(ui, dock);
-                    });
-            } else {
-                transport
-                    .exact_size(96.)
-                    .show(root, |ui| self.transport(ui, dock, false));
-            }
-            if dock {
-                self.desktop_panes(root, size.x, header_visible);
-            } else {
-                egui::Panel::top("compact-navigation")
-                    .frame(
-                        egui::Frame::new()
-                            .fill(design::colors(root).panel)
-                            .inner_margin(4.),
-                    )
-                    .show(root, |ui| self.pane_switcher(ui, header_visible));
-            }
+                    } else {
+                        self.transport(ui, dock, false);
+                    }
+                });
+            let mut navigation_visible = !dock;
+            egui::Panel::top("compact-navigation")
+                .exact_size(44.)
+                .frame(
+                    egui::Frame::new()
+                        .fill(design::colors(root).panel)
+                        .inner_margin(4.),
+                )
+                .show_collapsible(root, &mut navigation_visible, |ui| {
+                    if !dock {
+                        self.pane_switcher(ui, header_visible);
+                    }
+                });
+            self.desktop_panes(root, size.x, dock, header_visible);
 
             let inset = if compact_heading { 10 } else { 24 };
             egui::CentralPanel::default()
@@ -228,19 +286,25 @@ impl App {
                         }),
                 )
                 .show(root, |ui| {
+                    let pane = if dock {
+                        WorkspacePane::Playlist
+                    } else {
+                        self.pane
+                    };
+                    let reveal = reveal_progress(
+                        ui,
+                        "workspace-layout",
+                        (dock, compact_heading, dense, pane),
+                        0.16,
+                    );
+                    ui.multiply_opacity(egui::lerp(0.7..=1., reveal));
                     if dense {
                         ui.spacing_mut().item_spacing.y = 4.;
                     }
-                    if dock {
-                        self.playlist_screen(ui, compact_heading, dense);
-                    } else {
-                        match self.pane {
-                            WorkspacePane::Library => self.library_screen(ui),
-                            WorkspacePane::Playlist => {
-                                self.playlist_screen(ui, compact_heading, dense)
-                            }
-                            WorkspacePane::Queue => self.queue_screen(ui, false),
-                        }
+                    match pane {
+                        WorkspacePane::Library => self.library_screen(ui),
+                        WorkspacePane::Playlist => self.playlist_screen(ui, compact_heading, dense),
+                        WorkspacePane::Queue => self.queue_screen(ui, false),
                     }
                 });
         }
@@ -264,11 +328,17 @@ impl App {
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.x = 2.;
                     let width = ((ui.available_width() - 4.) / 3.).max(0.);
-                    for (pane, label) in [
+                    let marker = ui.painter().add(egui::Shape::Noop);
+                    let mut tab_rects = [egui::Rect::NOTHING; 3];
+                    ui.visuals_mut().selection.bg_fill = egui::Color32::TRANSPARENT;
+                    for ((pane, label), rect) in [
                         (WorkspacePane::Library, tr("Library")),
                         (WorkspacePane::Playlist, tr("Tracks")),
                         (WorkspacePane::Queue, tr("Queue")),
-                    ] {
+                    ]
+                    .into_iter()
+                    .zip(&mut tab_rects)
+                    {
                         let selected = self.pane == pane;
                         let response = ui.add_sized(
                             [width, 32.],
@@ -283,6 +353,7 @@ impl App {
                             .corner_radius(8)
                             .truncate(),
                         );
+                        *rect = response.rect;
                         #[cfg(test)]
                         ui.ctx().data_mut(|d| {
                             d.insert_temp(egui::Id::new(("test-pane", pane)), response.rect)
@@ -291,46 +362,66 @@ impl App {
                             self.pane = pane;
                         }
                     }
+                    let tab = ui.ctx().animate_value_with_time(
+                        ui.id().with("selected-tab"),
+                        match self.pane {
+                            WorkspacePane::Library => 0.,
+                            WorkspacePane::Playlist => 1.,
+                            WorkspacePane::Queue => 2.,
+                        },
+                        ui.style().animation_time,
+                    );
+                    let rect = tab_rects[tab.floor() as usize]
+                        .lerp_towards(&tab_rects[tab.ceil() as usize], tab.fract());
+                    ui.painter()
+                        .set(marker, egui::Shape::rect_filled(rect, 8., p.selected));
                 });
         });
     }
 
-    fn desktop_panes(&mut self, root: &mut egui::Ui, width: f32, header_visible: bool) {
+    fn desktop_panes(&mut self, root: &mut egui::Ui, width: f32, dock: bool, header_visible: bool) {
         const PLAYLIST_MIN_WIDTH: f32 = 400.;
         const QUEUE_MIN_WIDTH: f32 = 250.;
         let reserve = PLAYLIST_MIN_WIDTH + QUEUE_MIN_WIDTH;
         let palette = design::colors(root);
+        let sidebar_max = (width - reserve).clamp(0., 400.);
+        let mut library_visible = dock;
         egui::Panel::left("sidebar")
             .default_size(232.)
-            .size_range(180. ..=(width - reserve).min(400.))
+            .size_range(sidebar_max.min(180.)..=sidebar_max)
+            .drag_to_open(false)
             .frame(egui::Frame::new().fill(palette.panel).inner_margin(16.))
-            .show(root, |ui| {
-                ui.take_available_width();
-                if !header_visible {
-                    let (_, action) = application_menu(ui, true);
-                    self.apply_application_menu(ui.ctx(), action);
+            .show_collapsible(root, &mut library_visible, |ui| {
+                if dock {
+                    ui.take_available_width();
+                    if !header_visible {
+                        let (_, action) = application_menu(ui, true);
+                        self.apply_application_menu(ui.ctx(), action);
+                    }
+                    self.library_screen(ui);
                 }
-                self.library_screen(ui);
             });
-        if self.queue_open {
-            let max_width =
-                (root.available_width() - PLAYLIST_MIN_WIDTH).clamp(QUEUE_MIN_WIDTH, 480.);
-            egui::Panel::right("queue")
-                .default_size(290.)
-                .size_range(QUEUE_MIN_WIDTH..=max_width)
-                .frame(
-                    egui::Frame::new()
-                        .fill(palette.panel)
-                        .inner_margin(egui::Margin {
-                            right: 20 - TRACK_SCROLL_GUTTER,
-                            ..egui::Margin::same(20)
-                        }),
-                )
-                .show(root, |ui| {
+        let queue_max = (root.available_width() - PLAYLIST_MIN_WIDTH).clamp(0., 480.);
+        let queue_open = dock && self.queue_open;
+        let mut queue_visible = queue_open;
+        egui::Panel::right("queue")
+            .default_size(290.)
+            .size_range(queue_max.min(QUEUE_MIN_WIDTH)..=queue_max)
+            .drag_to_open(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(palette.panel)
+                    .inner_margin(egui::Margin {
+                        right: 20 - TRACK_SCROLL_GUTTER,
+                        ..egui::Margin::same(20)
+                    }),
+            )
+            .show_collapsible(root, &mut queue_visible, |ui| {
+                if queue_open {
                     ui.take_available_width();
                     self.queue_screen(ui, true);
-                });
-        }
+                }
+            });
     }
 
     fn library_screen(&mut self, ui: &mut egui::Ui) {
@@ -341,6 +432,15 @@ impl App {
             tr("Find a chat"),
             Some(&mut self.chat_search_active),
         );
+        let reveal = reveal_progress(ui, "chat-list-mode", self.chat_search_active, 0.17);
+        ui.scope(|ui| {
+            ui.add_space(8. * (1. - reveal));
+            ui.multiply_opacity(egui::lerp(0.3..=1., reveal));
+            self.library_chats(ui);
+        });
+    }
+
+    fn library_chats(&mut self, ui: &mut egui::Ui) {
         let mut indices = self
             .state
             .view()
@@ -704,9 +804,6 @@ impl App {
                     };
                     let has_duration = duration.is_finite() && duration > 0. && current.is_some();
                     let enabled = restored.is_none() && has_duration;
-                    if enabled && self.player.is_some() && !playback.paused() {
-                        ui.ctx().request_repaint_after(Duration::from_millis(16));
-                    }
                     let position = if let Some(position) = restored {
                         position
                     } else if enabled {
@@ -740,6 +837,17 @@ impl App {
                                 .inner
                             })
                             .inner;
+                        if enabled
+                            && self.player.is_some()
+                            && !playback.paused()
+                            && !snapshot.seeking
+                            && !response.is_pointer_button_down_on()
+                            && ui.is_rect_visible(response.rect)
+                        {
+                            let rail_pixels = design::slider_rail(response.rect).width()
+                                * ui.ctx().pixels_per_point();
+                            design::repaint_after(ui, seek_repaint_interval(duration, rail_pixels));
+                        }
                         #[cfg(test)]
                         {
                             self.test_seek = Some((response.rect, response.id));
@@ -883,16 +991,16 @@ impl App {
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        art(
-                            ui,
-                            &title,
-                            artwork.as_deref(),
+                        let cover_size = ui.ctx().animate_value_with_time(
+                            ui.id().with("playlist-cover-size"),
                             if ui.available_width() < 650. {
                                 72.
                             } else {
                                 112.
                             },
+                            0.15,
                         );
+                        art(ui, &title, artwork.as_deref(), cover_size);
                         ui.add_space(16.);
                         ui.vertical(|ui| {
                             ui.add_space(4.);
@@ -1004,10 +1112,7 @@ impl App {
                 if let Some(notice) = notice {
                     ui.weak(notice);
                 } else if loading {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.small(tr("Loading music from this chat…"));
-                    });
+                    ui.small(tr("Loading music from this chat…"));
                 }
             });
         }
@@ -1487,6 +1592,11 @@ fn track_labels(ui: &mut egui::Ui, title: &str, artist: &str, active: bool) -> e
         },
     )
     .response
+}
+
+fn seek_repaint_interval(duration: f64, rail_pixels: f32) -> Duration {
+    let seconds_per_quarter_pixel = 0.25 * duration.max(1.) / f64::from(rail_pixels);
+    Duration::from_secs_f64(seconds_per_quarter_pixel.clamp(1. / 60., 0.2))
 }
 
 fn clock(seconds: f64) -> String {
