@@ -31,6 +31,9 @@ pub enum AppCommand {
     Seek(f64),
     Play(Track),
     OpenPlaylist(i64),
+    OpenSearchPlaylist(i64),
+    RemoveRecentChat(i64),
+    ClearRecentChats,
     SelectPlaylistRow(usize),
     PlayQueue(tg_player_domain::QueueEntryId),
 }

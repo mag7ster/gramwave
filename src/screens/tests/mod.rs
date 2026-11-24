@@ -83,7 +83,7 @@ impl Harness {
 fn queue_harness(count: i64) -> Harness {
     let mut h = Harness::new();
     h.size = egui::vec2(1240., 800.);
-    h.app.queue_open = true;
+    h.app.set_queue_panel_open(true);
     h.app.execute(AppCommand::StartSession(
         (1..=count)
             .map(|message| tg_player_application::model::Track {

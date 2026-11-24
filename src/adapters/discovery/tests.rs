@@ -80,20 +80,66 @@ mod lazy_tests {
     }
     #[test]
     fn catalog_never_reads_history_or_counts() {
+        const DIRECT_MESSAGES: i64 = -2_100_000_000_000;
         let tg = Telegram::mock_rpc(|v| match v["@type"].as_str().unwrap() {
             "loadChats" => json!({"@type":"error","code":404,"message":"Not Found"}),
-            "getChats" => json!({"chat_ids":[1,2]}),
-            "getChat" => {
+            "getChats" if v["chat_list"]["@type"] == "chatListMain" => {
+                json!({"chat_ids":[1,4,DIRECT_MESSAGES]})
+            }
+            "getChats" => json!({"chat_ids":[2]}),
+            "getOption" if v["name"] == "my_id" => json!({"value":"3"}),
+            "getChat" if v["chat_id"] == 4 => {
+                json!({"id":4,"title":"Public chat","chat_lists":[],"positions":[{"list":{"@type":"chatListMain"},"order":"100"}]})
+            }
+            "getChat" if v["chat_id"] != DIRECT_MESSAGES => {
                 json!({"id":v["chat_id"],"title":"Chat","type":{"@type":"chatTypePrivate"}})
             }
             other => panic!("Unexpected startup request: {other}"),
         });
-        let chats = tokio::runtime::Runtime::new()
+        let catalog = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(catalog(&tg, [true, true, false], &Default::default()))
             .unwrap();
-        assert_eq!(chats.len(), 2);
-        assert!(chats.iter().all(|p| p.tracks.is_empty()));
+        assert_eq!(
+            catalog.chats.iter().map(|p| p.id).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(catalog.chats.iter().all(|p| p.tracks.is_empty()));
+        assert_eq!(catalog.lists, [[1].into(), [2].into()]);
+        assert_eq!(catalog.saved_messages, Some(3));
+
+        let temp = tempfile::tempdir().unwrap();
+        let (mut store, state) =
+            crate::adapters::storage::Store::open(&temp.path().join("db")).unwrap();
+        use tg_player_application::{
+            library::{LibraryCommand, LibraryEffect, LibraryEvent},
+            workflow::Effect,
+            AppCore,
+        };
+        let mut core = AppCore::new(state);
+        core.library_command(LibraryCommand::Connected(1));
+        let request = core
+            .library_command(LibraryCommand::RefreshCatalog)
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Library(LibraryEffect::Catalog { operation, .. }) => Some(operation.key()),
+                _ => None,
+            })
+            .unwrap();
+        for effect in core.library_event(LibraryEvent::Catalog {
+            request,
+            result: Ok(catalog),
+        }) {
+            if let Effect::Persist(changes) = effect {
+                store.apply(*changes).unwrap();
+            }
+        }
+        store.shutdown().unwrap();
+        let (mut store, state) =
+            crate::adapters::storage::Store::open(&temp.path().join("db")).unwrap();
+        assert_eq!(state.sidebar_chats(true, "chat"), [0, 1, 2]);
+        assert_eq!(state.playlists.len(), 3);
+        store.shutdown().unwrap();
     }
     #[test]
     fn one_page_per_enabled_type() {

@@ -4,6 +4,10 @@ use tg_player_application::model::Track;
 pub fn state() -> State {
     State { playlists: (0..5).map(|i| Playlist {
         id: i, title: ["Midnight frequencies", "Saved Messages", "Jazz & coffee", "Electronic archive", "Музыка · Избранное"][i as usize].into(),
+        personal: tg_player_application::model::PersonalChat {
+            lists: [i != 3, i == 3],
+            saved_messages: i == 1,
+        },
         filters: [true,true,false], done: [true;3],
         tracks: (0..40).map(|j| Track {chat:i,message:j,
             title: if j == 0 {"Ночной поезд — музыка для долгой дороги / A very long title that should gracefully truncate".into()} else {format!("{} {:02}",["Afterglow","Pacific","Blue hour","Signals","Slow motion"][j as usize%5],j+1)},
@@ -37,7 +41,7 @@ pub fn apply(app: &mut App, scenario: &str) {
             state.session.insert(tracks[7].clone(), false);
             state.shuffle = true;
             state.repeat = RepeatMode::One;
-            app.queue_open = true;
+            state.queue_panel_open = true;
             offline.enqueue(tracks[1].clone(), true);
             offline.publish(tracks[3].clone(), "demo-offline".into());
             if scenario == "error" {
@@ -72,11 +76,16 @@ pub fn apply(app: &mut App, scenario: &str) {
         "resumed" => {
             state.session.start(&tracks, 1, false);
             state.session.set_position_ms(37_625);
-            app.queue_open = true;
+            state.queue_panel_open = true;
         }
         "empty" => state.playlists[0].tracks.clear(),
         "filters" => state.playlists[0].filters = [false; 3],
         "search" => app.search = "no-matching-demo-track".into(),
+        "recent-chats" => {
+            state.recent_chats = vec![1, 3];
+            app.chat_search_active = true;
+            app.pane = crate::screens::WorkspacePane::Library;
+        }
         "emojis" => {
             use tg_player_application::model::{Caption, CaptionEmoji, EmojiStatus};
             let id = crate::adapters::emoji::DEMO_ID;
@@ -93,7 +102,7 @@ pub fn apply(app: &mut App, scenario: &str) {
             app.custom_emoji.set_demo();
         }
         "queue" => {
-            app.queue_open = true;
+            state.queue_panel_open = true;
             app.pane = crate::screens::WorkspacePane::Queue;
         }
         _ => {}

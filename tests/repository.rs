@@ -2,6 +2,9 @@ mod common;
 use common::TempDir;
 use tg_player::adapters::storage::Store;
 use tg_player_application::model::{Playlist, State, Track};
+use tg_player_application::{
+    commands::AppCommand, persistence::ChangeSet, workflow::Effect, AppCore,
+};
 // Snapshot input only constructs migration fixtures; the production port accepts ChangeSet.
 trait FixtureSave {
     fn save(&self, state: State) -> Result<(), String>;
@@ -45,6 +48,114 @@ fn roundtrip_and_closed_channel_are_explicit() {
     assert_eq!(state.api_id, "12345");
     assert_eq!(state.filters, [false; 3]);
     assert_eq!(state.chat_pins, vec![42]);
+}
+
+#[test]
+fn repeated_chat_ids_in_saved_library_order_load_once() {
+    let dir = TempDir::new();
+    let path = dir.path().join("db");
+    let (mut store, mut state) = Store::open(&path).unwrap();
+    state.playlists = [42, 17, 9]
+        .into_iter()
+        .map(|id| Playlist {
+            id,
+            tracks: vec![Track {
+                chat: id,
+                message: 7,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .collect();
+    store.save(state).unwrap();
+    store
+        .apply(ChangeSet {
+            library_order: Some(vec![42, 17, 42, 9, 17]),
+            ..Default::default()
+        })
+        .unwrap();
+    store.shutdown().unwrap();
+    let (mut store, state) = Store::open(&path).unwrap();
+    let chats: Vec<_> = state.playlists.iter().map(|p| p.id).collect();
+    assert_eq!(chats, [42, 17, 9]);
+    for playlist in &state.playlists {
+        assert_eq!(playlist.tracks.len(), 1);
+        assert_eq!(playlist.tracks[0].chat, playlist.id);
+        assert_eq!(playlist.tracks[0].message, 7);
+    }
+    store.shutdown().unwrap();
+}
+
+#[test]
+fn old_channel_direct_messages_stay_in_storage_but_out_of_chat_search() {
+    use tg_player_application::model::PersonalChat;
+    const DIRECT_MESSAGES: i64 = -2_100_000_000_000;
+    let dir = TempDir::new();
+    let path = dir.path().join("db");
+    let (mut store, mut state) = Store::open(&path).unwrap();
+    state.playlists = [42, DIRECT_MESSAGES, 43]
+        .into_iter()
+        .map(|id| Playlist {
+            id,
+            title: "Radio".into(),
+            personal: PersonalChat {
+                lists: [id != DIRECT_MESSAGES, false],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .collect();
+    state.chat_pins = vec![DIRECT_MESSAGES, 42];
+    state.last_opened_chat = Some(DIRECT_MESSAGES);
+    store.save(state).unwrap();
+    store.shutdown().unwrap();
+    let (mut store, state) = Store::open(&path).unwrap();
+    assert_eq!(state.playlists.len(), 3);
+    assert_eq!(state.sidebar_chats(true, "radio"), [0, 2]);
+    assert_eq!(state.sidebar_chats(false, ""), [0]);
+    assert_eq!(state.startup_chat(), None);
+    store.shutdown().unwrap();
+}
+
+#[test]
+fn recent_chat_edits_survive_sqlite_restart() {
+    let dir = TempDir::new();
+    let path = dir.path().join("db");
+    let (mut store, mut state) = Store::open(&path).unwrap();
+    state.playlists = [42, 17]
+        .into_iter()
+        .map(|id| Playlist {
+            id,
+            ..Default::default()
+        })
+        .collect();
+    store.save(state).unwrap();
+    store.shutdown().unwrap();
+    let reopen = |commands: Vec<AppCommand>| {
+        let (mut store, state) = Store::open(&path).unwrap();
+        let before = state.recent_chats.clone();
+        let mut core = AppCore::new(state);
+        for command in commands {
+            for effect in core.command(command) {
+                if let Effect::Persist(changes) = effect {
+                    assert!(changes.library_order.is_none());
+                    store.apply(*changes).unwrap();
+                }
+            }
+        }
+        store.shutdown().unwrap();
+        before
+    };
+    assert!(reopen(vec![
+        AppCommand::OpenSearchPlaylist(42),
+        AppCommand::OpenSearchPlaylist(17),
+        AppCommand::OpenSearchPlaylist(42),
+        AppCommand::OpenPlaylist(17),
+    ])
+    .is_empty());
+    assert_eq!(reopen(vec![AppCommand::RemoveRecentChat(42)]), [42, 17]);
+    assert_eq!(reopen(vec![AppCommand::ClearRecentChats]), [17]);
+    assert!(reopen(vec![]).is_empty());
 }
 #[test]
 fn queue_jump_backwards_and_forwards_survive_sqlite_restart() {

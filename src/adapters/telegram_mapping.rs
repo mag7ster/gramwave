@@ -228,16 +228,47 @@ impl FileReply {
         self.remote?.id.filter(|id| !id.is_empty())
     }
 }
+fn personal_chat_list(
+    list: &serde_json::Value,
+) -> Option<tg_player_application::telegram::PersonalChatList> {
+    use tg_player_application::telegram::PersonalChatList;
+    match list["@type"].as_str()? {
+        "chatListMain" => Some(PersonalChatList::Main),
+        "chatListArchive" => Some(PersonalChatList::Archive),
+        _ => None,
+    }
+}
+pub(super) fn personal_chat_lists(chat: &serde_json::Value) -> Option<[bool; 2]> {
+    let mut lists = [false; 2];
+    for list in chat["chat_lists"]
+        .as_array()?
+        .iter()
+        .filter_map(personal_chat_list)
+    {
+        lists[list as usize] = true;
+    }
+    Some(lists)
+}
 #[cfg(any(feature = "telegram", test))]
 pub(crate) fn update(v: serde_json::Value) -> Option<TelegramUpdate> {
     Some(match v["@type"].as_str()? {
         "updateAuthorizationState" => {
             TelegramUpdate::Authorization(auth_state(&v["authorization_state"]))
         }
-        "updateNewChat" => TelegramUpdate::Chat(crate::adapters::discovery::chat_metadata(
-            &v["chat"],
-            [true, true, false],
-        )?),
+        "updateNewChat" => {
+            let chat = &v["chat"];
+            TelegramUpdate::Chat(
+                crate::adapters::discovery::chat_response(chat, [true, true, false]).ok()??,
+                personal_chat_lists(chat),
+            )
+        }
+        "updateChatAddedToList" | "updateChatRemovedFromList" => {
+            TelegramUpdate::ChatListMembership(
+                v["chat_id"].as_i64()?,
+                personal_chat_list(&v["chat_list"])?,
+                v["@type"] == "updateChatAddedToList",
+            )
+        }
         "updateChatTitle" => {
             TelegramUpdate::ChatTitle(v["chat_id"].as_i64()?, v["title"].as_str()?.into())
         }

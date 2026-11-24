@@ -153,10 +153,18 @@ impl AppCore {
             AppCommand::Quit => effects.push(Effect::Quit),
             AppCommand::Retry => effects.push(Effect::RetryRequested),
             AppCommand::SelectPlaylistRow(index) => effects.push(Effect::SelectPlaylistRow(index)),
-            AppCommand::OpenPlaylist(chat) if self.state.playlists.iter().any(|p| p.id == chat) => {
-                if self.state.last_opened_chat != Some(chat) {
+            command @ (AppCommand::OpenPlaylist(chat) | AppCommand::OpenSearchPlaylist(chat))
+                if self.state.playlists.iter().any(|p| p.id == chat) =>
+            {
+                let promote = matches!(command, AppCommand::OpenSearchPlaylist(_))
+                    && self.state.recent_chats.first() != Some(&chat);
+                if self.state.last_opened_chat != Some(chat) || promote {
                     let mut settings = crate::persistence::Settings::from(&self.state);
                     settings.last_opened_chat = Some(chat);
+                    if promote {
+                        settings.recent_chats.retain(|&id| id != chat);
+                        settings.recent_chats.insert(0, chat);
+                    }
                     self.handle(CoreCommand::Settings(settings));
                 }
                 effects.push(Effect::OpenedPlaylist(chat));
@@ -164,6 +172,16 @@ impl AppCore {
                     chat,
                     refresh: true,
                 }));
+            }
+            AppCommand::RemoveRecentChat(chat) if self.state.recent_chats.contains(&chat) => {
+                let mut settings = crate::persistence::Settings::from(&self.state);
+                settings.recent_chats.retain(|&id| id != chat);
+                self.handle(CoreCommand::Settings(settings));
+            }
+            AppCommand::ClearRecentChats if !self.state.recent_chats.is_empty() => {
+                let mut settings = crate::persistence::Settings::from(&self.state);
+                settings.recent_chats.clear();
+                self.handle(CoreCommand::Settings(settings));
             }
             AppCommand::SaveTrack(track) => {
                 self.prune_audio_cache();
@@ -300,7 +318,12 @@ impl AppCore {
             AppCommand::ToggleChatPin(id) => {
                 self.handle(CoreCommand::ToggleChatPin(id));
             }
-            AppCommand::Volume(_) | AppCommand::Seek(_) | AppCommand::OpenPlaylist(_) => {}
+            AppCommand::Volume(_)
+            | AppCommand::Seek(_)
+            | AppCommand::OpenPlaylist(_)
+            | AppCommand::OpenSearchPlaylist(_)
+            | AppCommand::RemoveRecentChat(_)
+            | AppCommand::ClearRecentChats => {}
         }
         if let Some(track) = play {
             self.prepare_playback(track, &mut effects);

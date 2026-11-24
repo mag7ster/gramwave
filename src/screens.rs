@@ -2,6 +2,7 @@ use crate::application::commands::AppCommand;
 use crate::{design, tr, App, RepeatMode};
 use design::{button, Icon};
 use eframe::egui;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tg_player_domain::{playback::QueueView, QueueEntryId};
 
@@ -367,7 +368,7 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 4.;
             }
             match pane {
-                Some(WorkspacePane::Library) => self.library_screen(ui),
+                Some(WorkspacePane::Library) => self.library_screen(ui, false),
                 Some(WorkspacePane::Playlist) => self.playlist_screen(ui, compact_heading, dense),
                 Some(WorkspacePane::Queue) => self.queue_screen(ui, false),
                 None => {}
@@ -495,11 +496,11 @@ impl App {
                         let (_, action) = application_menu(ui, true);
                         self.apply_application_menu(ui.ctx(), action);
                     }
-                    self.library_screen(ui);
+                    self.library_screen(ui, true);
                 }
             });
         let queue_max = (root.available_width() - PLAYLIST_MIN_WIDTH).clamp(0., 480.);
-        let queue_open = dock && self.queue_open;
+        let queue_open = dock && self.state.view().queue_panel_open;
         let mut queue_visible = queue_open;
         egui::Panel::right("queue")
             .default_size(290.)
@@ -521,7 +522,7 @@ impl App {
             });
     }
 
-    fn library_screen(&mut self, ui: &mut egui::Ui) {
+    fn library_screen(&mut self, ui: &mut egui::Ui, docked: bool) {
         search_field(
             ui,
             &mut self.chat_query,
@@ -531,7 +532,16 @@ impl App {
         );
         let duration = if self.chat_search_active { 0.23 } else { 0.18 };
         let progress = change_progress(ui, "chat-list-mode", self.chat_search_active, duration);
-        self.library_chats(ui, progress);
+        if docked {
+            egui::Frame::NONE
+                .inner_margin(egui::Margin {
+                    right: -TRACK_SCROLL_GUTTER,
+                    ..egui::Margin::ZERO
+                })
+                .show(ui, |ui| self.library_chats(ui, progress));
+        } else {
+            self.library_chats(ui, progress);
+        }
     }
 
     fn library_chats(&mut self, ui: &mut egui::Ui, progress: f32) {
@@ -540,29 +550,21 @@ impl App {
         const ROW_HEIGHT: f32 = ART_SIZE + ROW_MARGIN * 2.;
         const ROW_GAP: f32 = 3.;
         const STAGGER: f32 = 0.45;
-        let mut indices = self
-            .state
-            .view()
-            .sidebar_chats(self.chat_search_active, &self.chat_query);
-        if self.chat_search_active {
-            for (i, p) in self.state.view().playlists.iter().enumerate() {
-                if self.state.library().search().ids.contains(&p.id) && !indices.contains(&i) {
-                    indices.push(i);
-                }
-            }
-            if self.state.library().search().loading() {
+        let state = self.state.view();
+        let query = self.chat_query.trim();
+        let search = self.state.library().search();
+        let mut indices = state.sidebar_chats(self.chat_search_active, query);
+        let mut seen = HashSet::new();
+        indices.retain(|&i| seen.insert(state.playlists[i].id));
+        if self.chat_search_active && !query.is_empty() && search.query == query {
+            indices.extend(state.playlists.iter().enumerate().filter_map(|(i, p)| {
+                (p.in_chat_search() && search.ids.contains(&p.id) && seen.insert(p.id)).then_some(i)
+            }));
+            if search.loading() {
                 ui.weak(tr("Searching chats…"));
             }
-            if self.state.library().search().error.is_some() {
-                ui.label(
-                    self.state
-                        .library()
-                        .search()
-                        .error
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                );
+            if let Some(error) = &search.error {
+                ui.label(error.to_string());
                 if ui.button(tr("Retry search")).clicked() {
                     self.retry_chat_search();
                 }
@@ -575,100 +577,150 @@ impl App {
                 tr("Pin chats here, or find one using search.")
             });
         }
+        let mut recent = Vec::new();
+        if self.chat_search_active && self.chat_query.trim().is_empty() {
+            let state = self.state.view();
+            if !state.recent_chats.is_empty() {
+                let mut by_id: HashMap<_, _> = indices
+                    .iter()
+                    .map(|&i| (state.playlists[i].id, i))
+                    .collect();
+                recent.extend(state.recent_chats.iter().filter_map(|id| by_id.remove(id)));
+                indices.retain(|&i| by_id.contains_key(&state.playlists[i].id));
+            }
+        }
+        let recent_len = recent.len();
         let mut open = None;
         let mut toggle = None;
-        let chats_scroll = egui::ScrollArea::vertical()
-            .id_salt("chat-list")
-            .show(ui, |ui| {
-                let clip = ui.clip_rect();
-                let stride = ROW_HEIGHT + ROW_GAP + ui.spacing().item_spacing.y;
-                let first_visible =
-                    ((clip.top() - ui.next_widget_position().y) / stride).floor() as usize;
-                let visible_slots = (clip.height() / stride).ceil().max(1.) as usize;
-                for (row, i) in indices.into_iter().enumerate() {
-                    let delay = STAGGER
-                        * row.saturating_sub(first_visible).min(visible_slots) as f32
-                        / visible_slots as f32;
-                    let phase = ((progress - delay) / (1. - STAGGER)).clamp(0., 1.);
-                    let arrived = egui::emath::easing::cubic_out(phase);
-                    let origin = ui.next_widget_position()
-                        + egui::vec2(ui.available_width() / 2., ROW_HEIGHT / 2.);
-                    let scale = egui::lerp(0.65..=1., arrived);
-                    let transform = egui::emath::TSTransform::new(
-                        origin.to_vec2() * (1. - scale) + egui::vec2(0., -26. * (1. - arrived)),
-                        scale,
-                    );
-                    let p = &self.state.view().playlists[i];
-                    let id = p.id;
-                    let pinned = self.state.view().chat_pins.contains(&id);
-                    let row_id = ui.id().with(("chat", id));
-                    let focused = ui.memory(|m| m.has_focus(row_id));
-                    let colors = design::colors(ui);
-                    let frame = egui::Frame::new()
-                        .fill(if focused {
-                            colors.raised
-                        } else if self.opened_chat == Some(id) {
-                            colors.selected
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        })
-                        .corner_radius(8)
-                        .inner_margin(ROW_MARGIN);
-                    let draw = |ui: &mut egui::Ui| {
-                        frame
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    art(
-                                        ui,
-                                        &p.title,
-                                        self.state.library().playlist_artwork(p.id).path.as_deref(),
-                                        ART_SIZE,
-                                    );
-                                    chat_title(ui, &p.title, p.emoji_status.is_some(), 14., 1);
-                                    self.chat_emoji(ui, p.emoji_status, 18., None);
-                                });
-                            })
-                            .response
-                            .rect
-                    };
-                    let rect = if phase < 1. {
-                        ui.with_visual_transform(transform, |ui| {
-                            ui.set_clip_rect(transform.inverse() * clip);
-                            ui.multiply_opacity((2. * phase).min(1.));
-                            draw(ui)
-                        })
-                        .inner
-                    } else {
-                        ui.scope(draw).inner
-                    };
-                    ui.add_space(ROW_GAP);
-                    if phase == 0. {
-                        continue;
-                    }
-                    let response = ui.interact(transform * rect, row_id, egui::Sense::click());
-                    if ui.is_rect_visible(response.rect) {
-                        self.image_wanted
-                            .push(self.state.library().playlist_artwork(p.id).file);
-                    }
-                    if response.clicked() {
-                        open = Some(i);
-                    }
-                    response.context_menu(|ui| {
-                        if ui
-                            .button(if pinned {
-                                tr("Unpin chat")
-                            } else {
-                                tr("Pin chat")
-                            })
-                            .clicked()
-                        {
-                            toggle = Some(id);
-                            ui.close();
+        let mut recent_action = None;
+        let chats_scroll = list_scroll_area(ui).id_salt("chat-list").show(ui, |ui| {
+            if recent_len > 0 {
+                ui.horizontal(|ui| {
+                    ui.weak(tr("Recent"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = tr("Clear recent chats");
+                        let icon = Icon::Trash
+                            .image(design::colors(ui).muted, 14.)
+                            .alt_text(&label);
+                        let clear = ui
+                            .add(
+                                egui::Button::image(icon)
+                                    .frame_when_inactive(false)
+                                    .min_size(egui::vec2(28., 28.)),
+                            )
+                            .on_hover_text(label);
+                        #[cfg(test)]
+                        ui.data_mut(|data| {
+                            data.insert_temp(egui::Id::new("test-clear-recent-chats"), clear.id)
+                        });
+                        if clear.clicked() {
+                            recent_action = Some(AppCommand::ClearRecentChats);
                         }
                     });
+                });
+            }
+            let clip = ui.clip_rect();
+            let stride = ROW_HEIGHT + ROW_GAP + ui.spacing().item_spacing.y;
+            let first_visible =
+                ((clip.top() - ui.next_widget_position().y) / stride).floor() as usize;
+            let visible_slots = (clip.height() / stride).ceil().max(1.) as usize;
+            for (row, i) in recent.into_iter().chain(indices).enumerate() {
+                if recent_len > 0 && row == recent_len {
+                    ui.separator();
                 }
-            });
+                let delay = STAGGER * row.saturating_sub(first_visible).min(visible_slots) as f32
+                    / visible_slots as f32;
+                let phase = ((progress - delay) / (1. - STAGGER)).clamp(0., 1.);
+                let arrived = egui::emath::easing::cubic_out(phase);
+                let origin = ui.next_widget_position()
+                    + egui::vec2(ui.available_width() / 2., ROW_HEIGHT / 2.);
+                let scale = egui::lerp(0.65..=1., arrived);
+                let transform = egui::emath::TSTransform::new(
+                    origin.to_vec2() * (1. - scale) + egui::vec2(0., -26. * (1. - arrived)),
+                    scale,
+                );
+                let p = &self.state.view().playlists[i];
+                let id = p.id;
+                let pinned = self.state.view().chat_pins.contains(&id);
+                let row_id = ui.id().with(("chat", id));
+                let focused = ui.memory(|m| m.has_focus(row_id));
+                let colors = design::colors(ui);
+                let frame = egui::Frame::new()
+                    .fill(if focused {
+                        colors.raised
+                    } else if self.opened_chat == Some(id) {
+                        colors.selected
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .corner_radius(8)
+                    .inner_margin(ROW_MARGIN);
+                let draw = |ui: &mut egui::Ui| {
+                    frame
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                art(
+                                    ui,
+                                    &p.title,
+                                    self.state.library().playlist_artwork(p.id).path.as_deref(),
+                                    ART_SIZE,
+                                );
+                                chat_title(ui, &p.title, p.emoji_status.is_some(), 14., 1);
+                                self.chat_emoji(ui, p.emoji_status, 18., None);
+                            });
+                        })
+                        .response
+                        .rect
+                };
+                let rect = if phase < 1. {
+                    ui.with_visual_transform(transform, |ui| {
+                        ui.set_clip_rect(transform.inverse() * clip);
+                        ui.multiply_opacity((2. * phase).min(1.));
+                        draw(ui)
+                    })
+                    .inner
+                } else {
+                    ui.scope(draw).inner
+                };
+                ui.add_space(ROW_GAP);
+                if phase == 0. {
+                    continue;
+                }
+                let response = ui.interact(transform * rect, row_id, egui::Sense::click());
+                if ui.is_rect_visible(response.rect) {
+                    self.image_wanted
+                        .push(self.state.library().playlist_artwork(p.id).file);
+                }
+                if response.clicked() {
+                    open = Some(id);
+                }
+                response.context_menu(|ui| {
+                    if ui
+                        .button(if pinned {
+                            tr("Unpin chat")
+                        } else {
+                            tr("Pin chat")
+                        })
+                        .clicked()
+                    {
+                        toggle = Some(id);
+                        ui.close();
+                    }
+                    if row < recent_len && ui.button(tr("Remove from Recent")).clicked() {
+                        recent_action = Some(AppCommand::RemoveRecentChat(id));
+                        ui.close();
+                    }
+                });
+            }
+        });
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("test-chat-scroll"),
+                (chats_scroll.id, chats_scroll.inner_rect),
+            )
+        });
         design::middle_scroll(
             ui,
             chats_scroll.id,
@@ -678,8 +730,15 @@ impl App {
         if let Some(id) = toggle {
             self.toggle_chat_pin(id);
         }
-        if let Some(i) = open {
-            self.open_chat(i);
+        if let Some(command) = recent_action {
+            self.execute(command);
+        }
+        if let Some(id) = open {
+            self.execute(if self.chat_search_active {
+                AppCommand::OpenSearchPlaylist(id)
+            } else {
+                AppCommand::OpenPlaylist(id)
+            });
             self.pane = WorkspacePane::Playlist;
             ui.ctx().request_repaint();
             self.chat_search_active = false;
@@ -804,18 +863,19 @@ impl App {
     }
 
     fn queue_button(&mut self, ui: &mut egui::Ui) {
+        let open = self.state.view().queue_panel_open;
         if design::toggle(
             ui,
             Icon::Queue,
-            self.queue_open,
+            open,
             "",
-            if self.queue_open {
+            if open {
                 tr("Queue open · Close queue")
             } else {
                 tr("Queue closed · Open queue")
             },
         ) {
-            self.queue_open = !self.queue_open;
+            self.set_queue_panel_open(!open);
             ui.ctx().request_repaint();
         }
     }
@@ -1518,7 +1578,7 @@ impl App {
         let mut action = None;
         let mut list_frame = track_list_frame().begin(ui);
         let list_ui = &mut list_frame.content_ui;
-        let scroll = track_scroll_area(list_ui)
+        let scroll = list_scroll_area(list_ui)
             .id_salt(("playlist-tracks", chat_id))
             .show_rows(list_ui, design::ROW_HEIGHT, tracks.len(), |ui, range| {
                 self.note_playlist_view(selected, tracks.clone(), range.clone());
@@ -1803,7 +1863,7 @@ fn application_menu(
     (response.rect, menu.and_then(|menu| menu.inner))
 }
 
-fn track_scroll_area(ui: &mut egui::Ui) -> egui::ScrollArea {
+fn list_scroll_area(ui: &mut egui::Ui) -> egui::ScrollArea {
     let scroll = &mut ui.spacing_mut().scroll;
     scroll.floating = false;
     scroll.bar_inner_margin = 4.;
@@ -2256,7 +2316,7 @@ impl App {
             if extend_rows {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if button(ui, Icon::Close, "Close queue") {
-                        self.queue_open = false;
+                        self.set_queue_panel_open(false);
                         ui.ctx().request_repaint();
                     }
                 });
@@ -2280,7 +2340,7 @@ impl App {
         }
         .begin(ui);
         let list_ui = &mut list_frame.content_ui;
-        let queue_scroll = track_scroll_area(list_ui)
+        let queue_scroll = list_scroll_area(list_ui)
             .id_salt("queue-list")
             .show(list_ui, |ui| {
                 let queue = self.state.view().session.remaining();

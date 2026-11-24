@@ -3,7 +3,7 @@ use crate::{
     media::{MediaPatch, MediaPlaylist, MediaTrack, RuntimeArtwork, RuntimeMedia},
     model::{Playlist, Track},
     tasks::{Operation, RequestId},
-    telegram::{TelegramFile, TelegramUpdate},
+    telegram::{PersonalChatList, TelegramFile, TelegramUpdate},
     AppError,
 };
 use std::{
@@ -41,7 +41,7 @@ pub enum LibraryCommand {
 pub enum LibraryEvent {
     Catalog {
         request: RequestId,
-        result: Result<Vec<MediaPlaylist>, AppError>,
+        result: Result<ChatCatalog, AppError>,
     },
     Search {
         request: RequestId,
@@ -75,6 +75,12 @@ pub enum LibraryEvent {
         id: i64,
         result: Result<String, AppError>,
     },
+}
+#[derive(Debug, Default)]
+pub struct ChatCatalog {
+    pub chats: Vec<MediaPlaylist>,
+    pub lists: [HashSet<i64>; 2],
+    pub saved_messages: Option<i64>,
 }
 pub enum LibraryEffect {
     Media {
@@ -143,6 +149,7 @@ pub struct LibraryCore {
     generation: u64,
     connection: Option<u64>,
     pub(crate) catalog: Option<Operation>,
+    pub(crate) catalog_updates: HashMap<(i64, PersonalChatList), bool>,
     pub(crate) index: Option<IndexOperation>,
     pub(crate) search: SearchState,
     pub(crate) sources: HashSet<TrackId>,
@@ -265,6 +272,7 @@ impl LibraryCore {
         if let Some(op) = self.catalog.take() {
             op.cancel.cancel();
         }
+        self.catalog_updates.clear();
         self.cancel_index();
         if let Some(op) = self.search.operation.take() {
             op.cancel.cancel();

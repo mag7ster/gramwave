@@ -130,6 +130,7 @@ impl From<MediaPlaylist> for Playlist {
             id: p.id,
             title: p.title,
             emoji_status: p.emoji_status,
+            personal: Default::default(),
             url: p.url,
             tracks: p.tracks.into_iter().map(Into::into).collect(),
             filters: p.filters,

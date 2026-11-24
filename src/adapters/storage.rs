@@ -1,6 +1,6 @@
 use crate::model::{Playlist, State};
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     path::Path,
     sync::{mpsc, Arc, Condvar, Mutex},
     thread::JoinHandle,
@@ -317,7 +317,8 @@ impl Store {
                 .map_err(|e| e.to_string())?;
                 let order: Vec<i64> = serde_json::from_str(&read_document(&db, "library_order")?)
                     .map_err(|e| e.to_string())?;
-                for id in order {
+                let mut seen = HashSet::new();
+                for id in order.into_iter().filter(|id| seen.insert(*id)) {
                     let s: String = db
                         .query_row("SELECT value FROM library WHERE id=?1", [id], |r| r.get(0))
                         .map_err(|e| e.to_string())?;

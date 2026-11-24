@@ -123,7 +123,7 @@ fn header_drags_again_when_the_compositor_keeps_the_release() {
 fn side_panels_keep_the_dragged_width_with_an_empty_queue() {
     let mut h = Harness::new();
     h.size = egui::vec2(1100., 800.);
-    h.app.queue_open = true;
+    h.app.set_queue_panel_open(true);
     h.settle();
 
     for (name, left, offsets) in [
@@ -174,7 +174,7 @@ fn resizing_switches_between_docked_and_compact_library() {
 #[test]
 fn compact_tabs_show_one_view_and_opening_a_chat_reveals_its_tracks() {
     let mut h = Harness::new();
-    h.app.queue_open = true;
+    h.app.set_queue_panel_open(true);
     let tab = |h: &Harness, pane| -> egui::Rect {
         h.ctx
             .data(|d| d.get_temp(egui::Id::new(("test-pane", pane))))
@@ -222,8 +222,20 @@ fn short_workspace_keeps_a_full_track_row_above_the_player() {
 }
 
 #[test]
-fn scrollbars_stay_outside_the_track_rows_and_menus() {
+fn scrollbars_stay_outside_the_rows_and_menus() {
     let mut h = queue_harness(24);
+    let mut state = h.app.state.view().clone();
+    state.playlists.extend((5..30).map(|id| crate::Playlist {
+        id,
+        title: format!("Chat {id}"),
+        personal: tg_player_application::model::PersonalChat {
+            lists: [true, false],
+            ..Default::default()
+        },
+        ..Default::default()
+    }));
+    h.app.state = tg_player_application::AppCore::new(state);
+    h.app.chat_search_active = true;
     for width in [1240., 900.] {
         h.size.x = width;
         h.app.pane = WorkspacePane::Playlist;
@@ -247,6 +259,20 @@ fn scrollbars_stay_outside_the_track_rows_and_menus() {
         let queue = bar(&h.ctx, "test-queue-scroll");
         for (row, menu, _) in h.app.test_queue_rows.values() {
             assert!(row.right() <= queue.left() && menu.right() <= queue.left());
+        }
+        h.app.pane = WorkspacePane::Library;
+        h.settle();
+        let (scroll, rows): (egui::Id, egui::Rect) = h
+            .ctx
+            .data(|d| d.get_temp(egui::Id::new("test-chat-scroll")))
+            .unwrap();
+        let chats = h.ctx.read_response(scroll.with(1)).unwrap().rect;
+        assert_eq!(chats.width(), playlist.width());
+        assert_eq!(chats.left() - rows.right(), 4.);
+        if width == 1240. {
+            let sidebar = egui::panel::PanelState::load(&h.ctx, egui::Id::new("sidebar")).unwrap();
+            let gap = sidebar.outer_rect.right() - chats.right();
+            assert!((4. ..=5.).contains(&gap), "sidebar scrollbar gap: {gap}");
         }
     }
 }
@@ -285,6 +311,109 @@ fn sidebar_search_reveals_matching_chats_and_escape_restores_pins() {
     assert!(!h.app.chat_search_active);
     assert!(visible(&pinned_again, "Jazz & coffee"));
     assert!(!visible(&pinned_again, "Electronic archive"));
+    h.app.shutdown_core().unwrap();
+}
+
+#[test]
+fn recent_chats_follow_sidebar_search_and_can_be_removed_or_cleared() {
+    let mut h = Harness::new();
+    let search = |h: &mut Harness| {
+        h.app.pane = WorkspacePane::Library;
+        h.settle();
+        let field = h.ctx.read_response(egui::Id::new("chat-search")).unwrap();
+        h.click(field.rect.center());
+        h.settle();
+        h.frame(vec![])
+    };
+    let positions = |output: &egui::FullOutput, title| {
+        output
+            .shapes
+            .iter()
+            .filter_map(|painted| {
+                if let egui::Shape::Text(text) = &painted.shape {
+                    let rect = text.visual_bounding_rect().intersect(painted.clip_rect);
+                    if text.galley.text() == title && rect.is_positive() {
+                        return Some(rect.center());
+                    }
+                }
+                None
+            })
+            .collect::<Vec<egui::Pos2>>()
+    };
+    let saved = "Saved Messages";
+    let electronic = "Electronic archive";
+    h.app.pane = WorkspacePane::Library;
+    h.settle();
+    let pinned = h.frame(vec![]);
+    h.click(positions(&pinned, "Jazz & coffee")[0]);
+    assert!(h.app.state.view().recent_chats.is_empty());
+
+    let all = search(&mut h);
+    assert!(positions(&all, "Recent").is_empty());
+    h.click(positions(&all, saved)[0]);
+    assert_eq!(h.app.state.view().recent_chats, [1]);
+
+    let all = search(&mut h);
+    assert_eq!(positions(&all, saved).len(), 1);
+    assert!(positions(&all, saved)[0].y < positions(&all, electronic)[0].y);
+    let results = h.frame(vec![egui::Event::Text("Electronic".into())]);
+    assert!(positions(&results, "Recent").is_empty());
+    h.click(positions(&results, electronic)[0]);
+    assert_eq!(h.app.state.view().recent_chats, [3, 1]);
+
+    let all = search(&mut h);
+    h.click(positions(&all, saved)[0]);
+    assert_eq!(h.app.state.view().recent_chats, [1, 3]);
+
+    search(&mut h);
+    let results = h.frame(vec![egui::Event::Text("Saved".into())]);
+    assert!(positions(&results, "Recent").is_empty());
+    assert_eq!(positions(&results, saved).len(), 1);
+    for _ in 0..5 {
+        h.key(egui::Key::Backspace);
+    }
+    assert!(h.app.chat_query.is_empty());
+    let all = h.frame(vec![]);
+    assert_eq!(positions(&all, "Recent").len(), 1);
+    let pos = positions(&all, saved)[0];
+    for pressed in [true, false] {
+        h.frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+    }
+    let menu = h.frame(vec![]);
+    h.click(positions(&menu, "Remove from Recent")[0]);
+    assert_eq!(h.app.state.view().recent_chats, [3]);
+    let all = h.frame(vec![]);
+    assert_eq!(positions(&all, saved).len(), 1);
+    assert!(positions(&all, electronic)[0].y < positions(&all, saved)[0].y);
+
+    let clear_id = h.ctx.data(|data| {
+        data.get_temp::<egui::Id>(egui::Id::new("test-clear-recent-chats"))
+            .unwrap()
+    });
+    h.click(h.ctx.read_response(clear_id).unwrap().rect.center());
+    let all = h.frame(vec![]);
+    assert!(h.app.state.view().recent_chats.is_empty());
+    assert!(positions(&all, "Recent").is_empty());
+    assert_eq!(positions(&all, electronic).len(), 1);
+    let mut state = h.app.state.view().clone();
+    state.playlists.push(crate::Playlist {
+        id: 99,
+        title: "Saved public channel".into(),
+        ..Default::default()
+    });
+    state.recent_chats.push(99);
+    h.app.state = tg_player_application::AppCore::new(state);
+    let all = h.frame(vec![]);
+    assert!(positions(&all, "Recent").is_empty());
+    assert!(positions(&all, "Saved public channel").is_empty());
     h.app.shutdown_core().unwrap();
 }
 

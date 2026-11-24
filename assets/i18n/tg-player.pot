@@ -110,6 +110,10 @@ msgstr ""
 msgid "Choose your soundtrack"
 msgstr ""
 
+#: src/screens.rs:601
+msgid "Clear recent chats"
+msgstr ""
+
 #: src/screens.rs:59
 msgid "Clear search"
 msgstr ""
@@ -526,6 +530,10 @@ msgstr ""
 msgid "Quit Gramwave"
 msgstr ""
 
+#: src/screens.rs:599
+msgid "Recent"
+msgstr ""
+
 #: src/ui.rs:342
 msgid "Recent tracks may stay in the automatic cache."
 msgstr ""
@@ -564,6 +572,10 @@ msgstr ""
 #: src/ui.rs:332
 #, rust-format
 msgid "Remove downloads for “{playlist}”?"
+msgstr ""
+
+#: src/screens.rs:710
+msgid "Remove from Recent"
 msgstr ""
 
 #: src/screens.rs:1663

@@ -56,6 +56,7 @@ pub struct Playlist {
     pub id: i64,
     pub title: String,
     pub emoji_status: Option<EmojiStatus>,
+    pub personal: PersonalChat,
     pub url: String,
     pub tracks: Vec<Track>,
     pub filters: [bool; 3],
@@ -63,7 +64,22 @@ pub struct Playlist {
     pub cursors: [i64; 3],
     pub done: [bool; 3],
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersonalChat {
+    pub lists: [bool; 2],
+    pub saved_messages: bool,
+}
+impl PersonalChat {
+    pub fn is_empty(&self) -> bool {
+        !self.saved_messages && !self.lists.contains(&true)
+    }
+}
 impl Playlist {
+    pub fn in_chat_search(&self) -> bool {
+        !self.personal.is_empty() && !crate::telegram::is_channel_direct_messages(self.id)
+    }
+
     pub fn merge_tracks(&mut self, tracks: Vec<Track>, protected: &std::collections::HashSet<i64>) {
         for mut t in tracks {
             if protected.contains(&t.message) {
@@ -122,6 +138,7 @@ impl Playlist {
 pub struct State {
     pub playlists: Vec<Playlist>,
     pub chat_pins: Vec<i64>,
+    pub recent_chats: Vec<i64>,
     pub last_opened_chat: Option<i64>,
     pub startup_playlist: StartupPlaylist,
     pub last_played_chat: Option<i64>,
@@ -133,6 +150,7 @@ pub struct State {
     pub api_id: String,
     pub api_hash: String,
     pub light: bool,
+    pub queue_panel_open: bool,
     pub cache_policy: crate::persistence::CachePolicy,
     #[serde(default = "default_filters")]
     pub filters: [bool; 3],
@@ -142,6 +160,7 @@ impl Default for State {
         Self {
             playlists: Vec::new(),
             chat_pins: Vec::new(),
+            recent_chats: Vec::new(),
             last_opened_chat: None,
             startup_playlist: StartupPlaylist::default(),
             last_played_chat: None,
@@ -153,6 +172,7 @@ impl Default for State {
             api_id: String::new(),
             api_hash: String::new(),
             light: false,
+            queue_panel_open: false,
             cache_policy: Default::default(),
             filters: default_filters(),
         }
@@ -179,6 +199,7 @@ impl State {
             .into_iter()
             .chain(self.last_opened_chat)
             .chain(self.session.source)
+            .filter(|&id| !crate::telegram::is_channel_direct_messages(id))
             .find(|id| self.playlists.iter().any(|playlist| playlist.id == *id))
     }
 
@@ -188,12 +209,13 @@ impl State {
             self.playlists
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| p.title.to_lowercase().contains(&query))
+                .filter(|(_, p)| p.in_chat_search() && p.title.to_lowercase().contains(&query))
                 .map(|(i, _)| i)
                 .collect()
         } else {
             self.chat_pins
                 .iter()
+                .filter(|&&id| !crate::telegram::is_channel_direct_messages(id))
                 .filter_map(|id| self.playlists.iter().position(|p| p.id == *id))
                 .collect()
         }

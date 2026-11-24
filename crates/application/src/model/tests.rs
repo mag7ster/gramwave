@@ -27,11 +27,19 @@ mod pin_tests {
                 Playlist {
                     id: 1,
                     title: "Ambient".into(),
+                    personal: PersonalChat {
+                        lists: [true, false],
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 Playlist {
                     id: 2,
                     title: "Музыка".into(),
+                    personal: PersonalChat {
+                        lists: [false, true],
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             ],

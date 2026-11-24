@@ -30,6 +30,8 @@ impl CachePolicy {
 #[serde(default)]
 pub struct Settings {
     pub chat_pins: Vec<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_chats: Vec<i64>,
     pub last_opened_chat: Option<i64>,
     pub startup_playlist: StartupPlaylist,
     pub last_played_chat: Option<i64>,
@@ -40,6 +42,7 @@ pub struct Settings {
     pub api_id: String,
     pub api_hash: String,
     pub light: bool,
+    pub queue_panel_open: bool,
     pub cache_policy: CachePolicy,
     pub filters: [bool; 3],
 }
@@ -52,6 +55,7 @@ impl From<&State> for Settings {
     fn from(s: &State) -> Self {
         Self {
             chat_pins: s.chat_pins.clone(),
+            recent_chats: s.recent_chats.clone(),
             last_opened_chat: s.last_opened_chat,
             startup_playlist: s.startup_playlist,
             last_played_chat: s.last_played_chat,
@@ -62,6 +66,7 @@ impl From<&State> for Settings {
             api_id: s.api_id.clone(),
             api_hash: s.api_hash.clone(),
             light: s.light,
+            queue_panel_open: s.queue_panel_open,
             cache_policy: s.cache_policy,
             filters: s.filters,
         }
@@ -70,6 +75,7 @@ impl From<&State> for Settings {
 impl Settings {
     pub fn apply(self, s: &mut State) {
         s.chat_pins = self.chat_pins;
+        s.recent_chats = self.recent_chats;
         s.last_opened_chat = self.last_opened_chat;
         s.startup_playlist = self.startup_playlist;
         s.last_played_chat = self.last_played_chat;
@@ -80,6 +86,7 @@ impl Settings {
         s.api_id = self.api_id;
         s.api_hash = self.api_hash;
         s.light = self.light;
+        s.queue_panel_open = self.queue_panel_open;
         s.cache_policy = self.cache_policy.normalized();
         s.filters = self.filters;
     }
@@ -91,6 +98,8 @@ pub struct PlaylistHeader {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji_status: Option<crate::model::EmojiStatus>,
+    #[serde(default, skip_serializing_if = "crate::model::PersonalChat::is_empty")]
+    pub personal: crate::model::PersonalChat,
     pub url: String,
     pub filters: [bool; 3],
     pub pinned: bool,
@@ -104,6 +113,7 @@ impl From<&Playlist> for PlaylistHeader {
             id: p.id,
             title: p.title.clone(),
             emoji_status: p.emoji_status,
+            personal: p.personal,
             url: p.url.clone(),
             filters: p.filters,
             pinned: p.pinned,

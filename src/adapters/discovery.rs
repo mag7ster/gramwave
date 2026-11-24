@@ -2,7 +2,9 @@ use crate::{adapters::telegram_mapping::track, model::Playlist, telegram::Telegr
 use serde_json::{json, Value};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use tg_player_application::{media::MediaPlaylist, AppError};
+use tg_player_application::{
+    library::ChatCatalog, media::MediaPlaylist, telegram::is_channel_direct_messages, AppError,
+};
 fn response(v: Value) -> Result<Value, AppError> {
     if v["@type"] == "error" {
         Err(AppError::Telegram {
@@ -37,8 +39,13 @@ fn chat_ids(batch: &Value) -> Result<Vec<i64>, AppError> {
         })
         .collect()
 }
-fn chat_response(chat: &Value, filters: [bool; 3]) -> Result<Option<MediaPlaylist>, AppError> {
-    if chat["type"]["@type"] == "chatTypeSecret" {
+pub(super) fn chat_response(
+    chat: &Value,
+    filters: [bool; 3],
+) -> Result<Option<MediaPlaylist>, AppError> {
+    if chat["type"]["@type"] == "chatTypeSecret"
+        || chat["id"].as_i64().is_some_and(is_channel_direct_messages)
+    {
         return Ok(None);
     }
     chat_metadata(chat, filters)
@@ -140,10 +147,7 @@ async fn refresh_async<F: std::future::Future<Output = Result<Value, AppError>>>
     }
     Ok(())
 }
-pub(super) fn chat_metadata(c: &Value, filters: [bool; 3]) -> Option<MediaPlaylist> {
-    if c["type"]["@type"] == "chatTypeSecret" {
-        return None;
-    }
+fn chat_metadata(c: &Value, filters: [bool; 3]) -> Option<MediaPlaylist> {
     Some(MediaPlaylist {
         id: c["id"].as_i64()?,
         title: c["title"].as_str()?.into(),
@@ -169,7 +173,7 @@ pub async fn search_chats(
         {
             Ok(v) => {
                 for id in chat_ids(&v)? {
-                    if ids.insert(id) {
+                    if !is_channel_direct_messages(id) && ids.insert(id) {
                         match tg
                             .call_async(json!({"@type":"getChat","chat_id":id}), cancel)
                             .await
@@ -200,11 +204,12 @@ pub async fn catalog(
     tg: &Telegram,
     filters: [bool; 3],
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<Vec<MediaPlaylist>, AppError> {
+) -> Result<ChatCatalog, AppError> {
     let mut ids = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for archive in [false, true] {
-        let list = json!({"@type":if archive{"chatListArchive"}else{"chatListMain"}});
+    let mut catalog = ChatCatalog::default();
+    for (index, name) in ["chatListMain", "chatListArchive"].into_iter().enumerate() {
+        let list = json!({"@type":name});
         loop {
             match tg
                 .call_async(
@@ -225,21 +230,63 @@ pub async fn catalog(
             )
             .await?;
         for id in chat_ids(&chats)? {
+            if is_channel_direct_messages(id) {
+                continue;
+            }
+            catalog.lists[index].insert(id);
             if seen.insert(id) {
                 ids.push(id);
             }
         }
     }
-    let mut chats = Vec::new();
     for id in ids {
         let c = tg
             .call_async(json!({"@type":"getChat","chat_id":id}), cancel)
             .await?;
         if let Some(p) = chat_response(&c, filters)? {
-            chats.push(p);
+            if let Some(lists) = super::telegram_mapping::personal_chat_lists(&c) {
+                for (list, member) in catalog.lists.iter_mut().zip(lists) {
+                    if member {
+                        list.insert(id);
+                    } else {
+                        list.remove(&id);
+                    }
+                }
+            }
+            if catalog.lists.iter().any(|list| list.contains(&id)) {
+                catalog.chats.push(p);
+            }
+        } else {
+            for list in &mut catalog.lists {
+                list.remove(&id);
+            }
         }
     }
-    Ok(chats)
+    let me = tg
+        .call_async(json!({"@type":"getOption","name":"my_id"}), cancel)
+        .await?;
+    catalog.saved_messages =
+        super::telegram_mapping::telegram_int64(&me["value"]).filter(|&id| id > 0);
+    if let Some(id) = catalog
+        .saved_messages
+        .filter(|&id| !catalog.chats.iter().any(|p| p.id == id))
+    {
+        match tg
+            .call_async(json!({"@type":"getChat","chat_id":id}), cancel)
+            .await
+        {
+            Ok(chat) => {
+                if let Some(playlist) = chat_response(&chat, filters)? {
+                    catalog.chats.push(playlist);
+                }
+            }
+            Err(AppError::Telegram {
+                code: 400 | 404, ..
+            }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(catalog)
 }
 async fn index_async<F: std::future::Future<Output = Result<Value, AppError>>>(
     p: Playlist,

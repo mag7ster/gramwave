@@ -121,6 +121,16 @@ impl AppCore {
     pub fn library_version(&self) -> u64 {
         self.library.version()
     }
+    pub(crate) fn set_personal_chat(&mut self, index: usize, value: crate::model::PersonalChat) {
+        let playlist = &mut self.state.playlists[index];
+        if playlist.personal != value {
+            playlist.personal = value;
+            self.pending.merge(ChangeSet {
+                headers: vec![crate::persistence::PlaylistHeader::from(&*playlist)],
+                ..Default::default()
+            });
+        }
+    }
     pub fn take_changes(&mut self) -> ChangeSet {
         if let Some(data) = self.offline.take_changes() {
             if let Some(pending) = &mut self.pending.offline {

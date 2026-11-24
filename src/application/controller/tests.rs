@@ -253,6 +253,36 @@ fn remembers_the_opened_playlist_independently_of_the_playing_queue() {
     assert!(app.handle_control(Request::Playlist { offset: 0 }).ok);
     app.shutdown_core().unwrap();
 }
+
+#[test]
+fn queue_panel_visibility_survives_closing_and_reopening() {
+    use crate::{adapters::storage::Store, bootstrap::Services};
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("library.sqlite");
+    let reopen = || {
+        let (db, state) = Store::open(&path).unwrap();
+        let mut services = Services::open(PathBuf::new(), true, false, Default::default()).unwrap();
+        services.core = AppCore::new(state);
+        services.repository = Some(Box::new(db));
+        App::from_services(services, Default::default())
+    };
+
+    let mut app = reopen();
+    assert!(!app.state.view().queue_panel_open);
+    app.set_queue_panel_open(true);
+    app.shutdown_core().unwrap();
+
+    let mut app = reopen();
+    assert!(app.state.view().queue_panel_open);
+    app.set_queue_panel_open(false);
+    app.shutdown_core().unwrap();
+
+    let mut app = reopen();
+    assert!(!app.state.view().queue_panel_open);
+    app.shutdown_core().unwrap();
+}
+
 #[test]
 fn live_edits_keep_library_occurrences_and_the_started_queue_snapshot() {
     let mut app = App::new_at(PathBuf::new(), true);

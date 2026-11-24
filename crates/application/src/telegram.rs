@@ -51,10 +51,25 @@ pub struct TelegramFile {
     pub path: Option<String>,
     pub complete: bool,
 }
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PersonalChatList {
+    Main,
+    Archive,
+}
+impl PersonalChatList {
+    pub const ALL: [Self; 2] = [Self::Main, Self::Archive];
+}
+
+pub fn is_channel_direct_messages(chat: i64) -> bool {
+    // TDLib uses Telegram's dedicated dialog ID range for channel direct messages.
+    (-4_000_000_000_000..=-2_002_147_483_649).contains(&chat)
+}
+
 pub enum TelegramUpdate {
     Authorization(AuthorizationState),
     File(TelegramFile),
-    Chat(MediaPlaylist),
+    Chat(MediaPlaylist, Option<[bool; 2]>),
+    ChatListMembership(i64, PersonalChatList, bool),
     ChatTitle(i64, String),
     ChatEmojiStatus(i64, Option<crate::model::EmojiStatus>),
     Message {

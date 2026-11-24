@@ -1,12 +1,12 @@
 use crate::{
     core::{AppCore, CoreCommand, LibraryPatch},
     library::{
-        metadata_track, IndexOperation, LibraryCommand, LibraryCore, LibraryEffect, LibraryEvent,
-        LibraryRetry, MediaOperation,
+        metadata_track, ChatCatalog, IndexOperation, LibraryCommand, LibraryCore, LibraryEffect,
+        LibraryEvent, LibraryRetry, MediaOperation,
     },
     media::{MediaPlaylist, MediaTrack},
-    model::Track,
-    telegram::TelegramUpdate,
+    model::{PersonalChat, Track},
+    telegram::{is_channel_direct_messages, PersonalChatList, TelegramUpdate},
     workflow::Effect,
 };
 use std::{collections::HashSet, time::Duration};
@@ -159,9 +159,26 @@ impl AppCore {
                         effects.push(Effect::Library(LibraryEffect::ForgetArtwork(path)));
                     }
                 }
-                TelegramUpdate::Chat(mut playlist) => {
+                TelegramUpdate::Chat(mut playlist, lists) => {
+                    let id = playlist.id;
                     playlist.filters = self.state.filters;
                     self.merge_library_chat(playlist);
+                    if let (Some(lists), Some(index)) = (
+                        lists,
+                        self.state
+                            .playlists
+                            .iter()
+                            .position(|p| p.id == id && !is_channel_direct_messages(id)),
+                    ) {
+                        let personal = PersonalChat {
+                            lists,
+                            ..self.state.playlists[index].personal
+                        };
+                        self.set_personal_chat(index, personal);
+                    }
+                }
+                TelegramUpdate::ChatListMembership(chat, list, member) => {
+                    self.update_chat_list(chat, list, member);
                 }
                 TelegramUpdate::ChatTitle(chat, title) => {
                     if let Some(playlist) = self.state.playlists.iter().find(|p| p.id == chat) {
@@ -228,16 +245,21 @@ impl AppCore {
                 }
                 self.library.catalog = None;
                 match result {
-                    Ok(chats) => {
-                        for playlist in chats {
-                            self.merge_library_chat(playlist);
+                    Ok(catalog) => {
+                        self.reconcile_catalog(catalog);
+                        if let Some(op) = self.library.search.operation.take() {
+                            op.cancel.cancel();
                         }
+                        self.library.search.sent = false;
                         effects.push(Effect::Notice(crate::notice::Notice::OpenChatPrompt));
                     }
-                    Err(error) => effects.push(Effect::Library(LibraryEffect::Failed {
-                        error,
-                        retry: LibraryRetry::Catalog,
-                    })),
+                    Err(error) => {
+                        self.library.catalog_updates.clear();
+                        effects.push(Effect::Library(LibraryEffect::Failed {
+                            error,
+                            retry: LibraryRetry::Catalog,
+                        }));
+                    }
                 }
             }
             LibraryEvent::Search {
@@ -257,7 +279,15 @@ impl AppCore {
                 }
                 self.library.search.operation = None;
                 match result {
-                    Ok(chats) => {
+                    Ok(mut chats) => {
+                        let allowed: HashSet<_> = self
+                            .state
+                            .playlists
+                            .iter()
+                            .filter(|p| p.in_chat_search())
+                            .map(|p| p.id)
+                            .collect();
+                        chats.retain(|p| allowed.contains(&p.id));
                         self.library.search.ids = chats.iter().map(|p| p.id).collect();
                         for playlist in chats {
                             self.merge_library_chat(playlist);
@@ -375,11 +405,49 @@ impl AppCore {
         effects
     }
     fn merge_library_chat(&mut self, playlist: MediaPlaylist) {
+        if is_channel_direct_messages(playlist.id) {
+            return;
+        }
         for track in &playlist.tracks {
             self.library.cache_track(track);
         }
         self.library.cache_playlist_artwork(&playlist);
         self.handle(CoreCommand::MergeChat(playlist.into()));
+    }
+    fn update_chat_list(&mut self, chat: i64, list: PersonalChatList, member: bool) {
+        if is_channel_direct_messages(chat) {
+            return;
+        }
+        if self.library.catalog_running() {
+            self.library.catalog_updates.insert((chat, list), member);
+        }
+        if let Some(index) = self.state.playlists.iter().position(|p| p.id == chat) {
+            let mut personal = self.state.playlists[index].personal;
+            personal.lists[list as usize] = member;
+            self.set_personal_chat(index, personal);
+        }
+    }
+    fn reconcile_catalog(&mut self, catalog: ChatCatalog) {
+        let updates = std::mem::take(&mut self.library.catalog_updates);
+        for playlist in catalog.chats {
+            self.merge_library_chat(playlist);
+        }
+        for index in 0..self.state.playlists.len() {
+            let playlist = &self.state.playlists[index];
+            let id = playlist.id;
+            let personal = PersonalChat {
+                lists: PersonalChatList::ALL.map(|list| {
+                    updates
+                        .get(&(id, list))
+                        .copied()
+                        .unwrap_or_else(|| catalog.lists[list as usize].contains(&id))
+                }),
+                saved_messages: catalog
+                    .saved_messages
+                    .map_or(playlist.personal.saved_messages, |saved| saved == id),
+            };
+            self.set_personal_chat(index, personal);
+        }
     }
     fn library_persistence_effect(&mut self, effects: &mut Vec<Effect>) {
         let changes = self.take_changes();
@@ -614,6 +682,73 @@ mod tests {
             .into()]),
         });
         assert!(!core.state.playlists.iter().any(|p| p.id == 99));
+    }
+    #[test]
+    fn personal_search_uses_catalog_and_newer_membership_updates() {
+        let mut core = core();
+        core.state.playlists[0].title = "Radio".into();
+        core.state.playlists.push(Playlist {
+            id: 43,
+            title: "Radio".into(),
+            personal: PersonalChat {
+                lists: [true, false],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let request = catalog(&mut core);
+        for (list, member) in [
+            (PersonalChatList::Main, false),
+            (PersonalChatList::Archive, true),
+        ] {
+            core.library_command(LibraryCommand::Source(TelegramUpdate::ChatListMembership(
+                42, list, member,
+            )));
+        }
+        core.library_event(LibraryEvent::Catalog {
+            request,
+            result: Ok(ChatCatalog {
+                chats: vec![MediaPlaylist {
+                    id: 44,
+                    title: "Radio".into(),
+                    ..Default::default()
+                }],
+                lists: [[42, 44].into(), Default::default()],
+                saved_messages: None,
+            }),
+        });
+        assert_eq!(core.view().playlists[0].personal.lists, [false, true]);
+        assert_eq!(core.view().sidebar_chats(true, "radio"), [0, 2]);
+        assert_eq!(core.view().playlists[0].tracks.len(), 3);
+
+        let request = search(&mut core, "username", Instant::now());
+        core.library_event(LibraryEvent::Search {
+            request,
+            query: "username".into(),
+            result: Ok([42, 43, 99]
+                .into_iter()
+                .map(|id| MediaPlaylist {
+                    id,
+                    title: "Radio".into(),
+                    ..Default::default()
+                })
+                .collect()),
+        });
+        assert_eq!(core.library.search().ids, [42]);
+        assert_eq!(core.view().playlists.len(), 3);
+
+        core.library_command(LibraryCommand::Source(TelegramUpdate::ChatListMembership(
+            42,
+            PersonalChatList::Archive,
+            false,
+        )));
+        assert_eq!(core.view().sidebar_chats(true, "radio"), [2]);
+        let request = catalog(&mut core);
+        core.library_event(LibraryEvent::Catalog {
+            request,
+            result: Err(AppError::Unavailable("Telegram")),
+        });
+        assert_eq!(core.view().sidebar_chats(true, "radio"), [2]);
     }
     #[test]
     fn live_edits_preserve_occurrences_queue_metadata_and_win_over_index_pages() {
