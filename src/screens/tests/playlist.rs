@@ -340,6 +340,35 @@ fn right_click_opens_track_menu_without_starting_playback() {
 }
 
 #[test]
+fn track_menu_separates_only_visible_sections() {
+    for (scenario, index, sections) in [("emojis", 1, 0), ("emojis", 0, 1), ("playing", 3, 1)] {
+        let mut h = Harness::new();
+        crate::demo::apply(&mut h.app, scenario);
+        let track = &h.app.state.view().playlists[0].tracks[index];
+        let message = track.message;
+        h.app.search = track.title.clone();
+        h.settle();
+        h.click(h.app.test_rows[&message].1.center());
+        let frame = h.frame(vec![]);
+        let actions_end = frame
+            .shapes
+            .iter()
+            .position(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Copy title")
+            })
+            .expect("track menu actions");
+        let separators = frame.shapes[actions_end + 1..]
+            .iter()
+            .filter(|shape| {
+                matches!(&shape.shape, egui::Shape::LineSegment { points: [left, right], .. }
+                    if left.y == right.y && right.x - left.x > 80.)
+            })
+            .count();
+        assert_eq!(separators, sections, "{scenario}, track {message}");
+    }
+}
+
+#[test]
 fn track_row_mouse_keyboard_and_menu_playback() {
     let mut h = Harness::new();
     let (row, menu) = h.app.test_rows[&0];

@@ -1681,7 +1681,9 @@ impl App {
                                             ui.close();
                                         }
                                     }
-                                    ui.separator();
+                                    if offline.is_some() {
+                                        ui.separator();
+                                    }
                                     if t.pinned.is_some() {
                                         ui.label(tr("Saved offline"));
                                     } else if self
