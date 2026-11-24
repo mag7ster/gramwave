@@ -92,6 +92,7 @@ impl App {
                     .inner_margin(margin),
             )
             .show(ctx, |ui| {
+                crate::screens::reveal_layout(ui, "settings-layout", compact);
                 ui.set_width(width);
                 ui.set_height(height);
                 ui.spacing_mut().scroll.floating = false;

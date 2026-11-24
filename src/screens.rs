@@ -16,7 +16,76 @@ pub(crate) enum WorkspacePane {
     Queue,
 }
 
-fn reveal_progress<T: Copy + Eq + Send + Sync + 'static>(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlayerLayout {
+    Controls,
+    Mini,
+    Dense,
+    Full,
+}
+
+impl PlayerLayout {
+    const MIN_WORKSPACE_HEIGHT: f32 = 260.;
+
+    fn for_size(size: egui::Vec2) -> Self {
+        if size.y < 150. || size.x < 300. {
+            Self::Controls
+        } else if size.y < Self::MIN_WORKSPACE_HEIGHT {
+            Self::Mini
+        } else if size.y < 350. {
+            Self::Dense
+        } else {
+            Self::Full
+        }
+    }
+
+    fn height(self) -> f32 {
+        match self {
+            Self::Controls => 44.,
+            Self::Mini => 84.,
+            Self::Dense => 52.,
+            Self::Full => 96.,
+        }
+    }
+
+    fn has_workspace(self) -> bool {
+        matches!(self, Self::Dense | Self::Full)
+    }
+
+    fn margin(self) -> egui::Vec2 {
+        match self {
+            Self::Controls | Self::Mini => egui::vec2(8., 0.),
+            Self::Dense => egui::vec2(4., 4.),
+            Self::Full => egui::vec2(8., 2.),
+        }
+    }
+
+    fn transport_rect(self, ctx: &egui::Context, viewport: egui::Rect) -> egui::Rect {
+        let alignment = if self.has_workspace() { 1. } else { 0.5 };
+        let anchor =
+            ctx.animate_value_with_time(egui::Id::new("transport-anchor"), alignment, 0.17);
+        let offset = ctx.animate_value_with_time(
+            egui::Id::new("transport-offset"),
+            -self.height() * alignment,
+            0.17,
+        );
+        // Keep the main buttons on-screen while the timeline slides in below them.
+        let controls_top = if matches!(self, Self::Mini | Self::Full) {
+            8.
+        } else {
+            0.
+        };
+        let max_y = viewport.bottom() - self.margin().y - controls_top - Self::Controls.height();
+        let y = (viewport.top() + viewport.height() * anchor + offset)
+            .clamp(viewport.top(), max_y.max(viewport.top()));
+        egui::Rect::from_min_size(
+            egui::pos2(viewport.left(), y),
+            egui::vec2(viewport.width(), self.height()),
+        )
+    }
+}
+
+fn change_progress<T: Copy + Eq + Send + Sync + 'static>(
     ui: &egui::Ui,
     id: &'static str,
     target: T,
@@ -35,7 +104,41 @@ fn reveal_progress<T: Copy + Eq + Send + Sync + 'static>(
     if progress < 1. {
         ui.ctx().request_repaint();
     }
-    egui::emath::easing::cubic_out(progress)
+    progress
+}
+
+pub(crate) fn reveal_layout<T: Copy + Eq + Send + Sync + 'static>(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    target: T,
+) {
+    let progress = change_progress(ui, id, target, 0.16);
+    ui.multiply_opacity(egui::lerp(
+        0.7..=1.,
+        egui::emath::easing::cubic_out(progress),
+    ));
+}
+
+fn layout_fraction(ui: &egui::Ui, id: &'static str, target: bool) -> f32 {
+    let value = ui
+        .ctx()
+        .animate_bool_with_time(egui::Id::new(id), target, 0.18);
+    value * value * (3. - 2. * value)
+}
+
+fn horizontal_slot(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    left_center: egui::Pos2,
+    size: egui::Vec2,
+) -> egui::Ui {
+    let rect = egui::Rect::from_min_size(left_center - egui::vec2(0., size.y / 2.), size);
+    ui.new_child(
+        egui::UiBuilder::new()
+            .id(ui.id().with(id))
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    )
 }
 
 fn search_field(
@@ -165,6 +268,7 @@ impl App {
             egui::CentralPanel::default().show(root, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let compact = ui.available_width() < 480. || ctx.content_rect().height() < 400.;
+                    reveal_layout(ui, "auth-layout", compact);
                     ui.add_space(if compact { 6. } else { 50. });
                     ui.vertical_centered(|ui| {
                         ui.heading(egui::RichText::new("Gramwave").size(32.));
@@ -196,122 +300,114 @@ impl App {
         let size = ctx.content_rect().size();
         let dock = size.x >= 1040.;
         let compact_heading = size.y < 600. || size.x < 520.;
-        let controls_only = size.y < 150. || size.x < 300.;
-        let player_only = controls_only || size.y < 260.;
-        let dense = size.y < 350.;
-
-        if player_only {
-            egui::CentralPanel::default().show(root, |ui| {
-                let reveal = reveal_progress(
-                    ui,
-                    "transport-layout",
-                    (player_only, controls_only, false, false, false),
-                    0.15,
-                );
-                ui.multiply_opacity(egui::lerp(0.7..=1., reveal));
-                if controls_only {
-                    self.seek_preview = None;
-                    let rect = ui.available_rect_before_wrap();
-                    ui.scope_builder(
-                        egui::UiBuilder::new()
-                            .max_rect(egui::Rect::from_center_size(
-                                rect.center() + egui::vec2(0., 5. * (1. - reveal)),
-                                egui::vec2(132., 44.),
-                            ))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        |ui| self.transport_buttons(ui, false),
-                    );
-                } else {
-                    ui.add_space((ui.available_height() - 80.).max(0.) / 2. + 5. * (1. - reveal));
-                    self.transport(ui, false, true);
+        let player = PlayerLayout::for_size(size);
+        let viewport = root.available_rect_before_wrap();
+        let transport_rect = player.transport_rect(&ctx, viewport);
+        let workspace = player.has_workspace();
+        let dense = player == PlayerLayout::Dense;
+        if workspace {
+            // Leave space for a track row near the mini-player breakpoint.
+            let min_height = PlayerLayout::Dense.height();
+            let max_height = (min_height + size.y - PlayerLayout::MIN_WORKSPACE_HEIGHT)
+                .min(PlayerLayout::Full.height());
+            let height = (viewport.bottom() - transport_rect.top()).clamp(min_height, max_height);
+            egui::Panel::bottom("transport")
+                .exact_size(height)
+                .frame(egui::Frame::new().fill(design::colors(root).background))
+                .show_separator_line(false)
+                .show(root, |_| {});
+        }
+        let show_navigation = workspace && !dock;
+        let mut navigation_visible = show_navigation;
+        egui::Panel::top("compact-navigation")
+            .exact_size(44.)
+            .frame(
+                egui::Frame::new()
+                    .fill(design::colors(root).panel)
+                    .inner_margin(4.),
+            )
+            .show_collapsible(root, &mut navigation_visible, |ui| {
+                if show_navigation {
+                    self.pane_switcher(ui, header_visible);
                 }
             });
-        } else {
-            let mut transport = egui::Panel::bottom("transport");
-            if dense {
-                transport = transport.frame(
-                    egui::Frame::new()
-                        .fill(design::colors(root).background)
-                        .inner_margin(4.),
-                );
-            }
-            transport
-                .exact_size(if dense { 52. } else { 96. })
-                .show(root, |ui| {
-                    let reveal = reveal_progress(
-                        ui,
-                        "transport-layout",
-                        (
-                            false,
-                            false,
-                            dense,
-                            !dense && ui.available_width() < 798.,
-                            dock,
-                        ),
-                        0.15,
-                    );
-                    ui.multiply_opacity(egui::lerp(0.7..=1., reveal));
-                    if dense {
-                        self.seek_preview = None;
-                        self.compact_transport_controls(ui, dock);
-                    } else {
-                        self.transport(ui, dock, false);
-                    }
-                });
-            let mut navigation_visible = !dock;
-            egui::Panel::top("compact-navigation")
-                .exact_size(44.)
-                .frame(
-                    egui::Frame::new()
-                        .fill(design::colors(root).panel)
-                        .inner_margin(4.),
-                )
-                .show_collapsible(root, &mut navigation_visible, |ui| {
-                    if !dock {
-                        self.pane_switcher(ui, header_visible);
-                    }
-                });
-            self.desktop_panes(root, size.x, dock, header_visible);
+        self.desktop_panes(root, size.x, workspace && dock, header_visible);
 
-            let inset = if compact_heading { 10 } else { 24 };
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::new()
-                        .fill(design::colors(root).background)
-                        .inner_margin(egui::Margin {
-                            right: (inset - TRACK_SCROLL_GUTTER).max(4),
-                            top: if dense { 4 } else { inset },
-                            bottom: if dense { 4 } else { inset },
-                            ..egui::Margin::same(inset)
-                        }),
-                )
-                .show(root, |ui| {
-                    let pane = if dock {
-                        WorkspacePane::Playlist
-                    } else {
-                        self.pane
-                    };
-                    let reveal = reveal_progress(
-                        ui,
-                        "workspace-layout",
-                        (dock, compact_heading, dense, pane),
-                        0.16,
-                    );
-                    ui.multiply_opacity(egui::lerp(0.7..=1., reveal));
-                    if dense {
-                        ui.spacing_mut().item_spacing.y = 4.;
-                    }
-                    match pane {
-                        WorkspacePane::Library => self.library_screen(ui),
-                        WorkspacePane::Playlist => self.playlist_screen(ui, compact_heading, dense),
-                        WorkspacePane::Queue => self.queue_screen(ui, false),
-                    }
-                });
+        let pane = workspace.then_some(if dock {
+            WorkspacePane::Playlist
+        } else {
+            self.pane
+        });
+        let mut central = egui::CentralPanel::default();
+        let narrow = layout_fraction(root, "workspace-narrow-inset", compact_heading);
+        let shallow = layout_fraction(root, "workspace-shallow-inset", dense);
+        if workspace {
+            let inset = egui::lerp(24. ..=10., narrow).round() as i8;
+            let vertical = egui::lerp(f32::from(inset)..=4., shallow)
+                .min(4. + size.y - PlayerLayout::MIN_WORKSPACE_HEIGHT)
+                .round() as i8;
+            central = central.frame(
+                egui::Frame::new()
+                    .fill(design::colors(root).background)
+                    .inner_margin(egui::Margin {
+                        right: (inset - TRACK_SCROLL_GUTTER).max(4),
+                        top: vertical,
+                        bottom: vertical,
+                        ..egui::Margin::same(inset)
+                    }),
+            );
         }
+        central.show(root, |ui| {
+            reveal_layout(
+                ui,
+                "workspace-layout",
+                pane.map(|p| (dock, compact_heading, player, p)),
+            );
+            if dense {
+                ui.spacing_mut().item_spacing.y = 4.;
+            }
+            match pane {
+                Some(WorkspacePane::Library) => self.library_screen(ui),
+                Some(WorkspacePane::Playlist) => self.playlist_screen(ui, compact_heading, dense),
+                Some(WorkspacePane::Queue) => self.queue_screen(ui, false),
+                None => {}
+            }
+        });
+        self.animated_transport(root, viewport, transport_rect, player, dock);
         self.settings_ui(&ctx);
         self.error_ui(&ctx);
         self.poll_chat_search(&ctx);
         self.request_visible_media(&ctx);
+    }
+
+    fn animated_transport(
+        &mut self,
+        root: &mut egui::Ui,
+        viewport: egui::Rect,
+        rect: egui::Rect,
+        player: PlayerLayout,
+        dock: bool,
+    ) {
+        let seek_active = matches!(player, PlayerLayout::Mini | PlayerLayout::Full);
+        let seek = layout_fraction(root, "transport-seek", seek_active);
+        let clip = viewport.intersect(rect.with_max_y(rect.bottom().max(rect.top() + 84. * seek)));
+        root.painter()
+            .rect_filled(clip, 0., design::colors(root).background);
+        if player.has_workspace() {
+            let stroke = root.visuals().widgets.noninteractive.bg_stroke;
+            root.painter()
+                .hline(rect.x_range(), rect.top() + stroke.width / 2., stroke);
+        }
+        let mut ui = root.new_child(
+            egui::UiBuilder::new()
+                .id_salt("transport-controls")
+                .max_rect(rect.shrink2(player.margin()))
+                .sense(egui::Sense::click())
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        ui.set_clip_rect(clip);
+        reveal_layout(&mut ui, "transport-layout", player.has_workspace());
+        self.transport(&mut ui, player, dock, seek);
     }
 
     fn pane_switcher(&mut self, ui: &mut egui::Ui, header_visible: bool) {
@@ -432,15 +528,17 @@ impl App {
             tr("Find a chat"),
             Some(&mut self.chat_search_active),
         );
-        let reveal = reveal_progress(ui, "chat-list-mode", self.chat_search_active, 0.17);
-        ui.scope(|ui| {
-            ui.add_space(8. * (1. - reveal));
-            ui.multiply_opacity(egui::lerp(0.3..=1., reveal));
-            self.library_chats(ui);
-        });
+        let duration = if self.chat_search_active { 0.23 } else { 0.18 };
+        let progress = change_progress(ui, "chat-list-mode", self.chat_search_active, duration);
+        self.library_chats(ui, progress);
     }
 
-    fn library_chats(&mut self, ui: &mut egui::Ui) {
+    fn library_chats(&mut self, ui: &mut egui::Ui, progress: f32) {
+        const ART_SIZE: f32 = 40.;
+        const ROW_MARGIN: f32 = 8.;
+        const ROW_HEIGHT: f32 = ART_SIZE + ROW_MARGIN * 2.;
+        const ROW_GAP: f32 = 3.;
+        const STAGGER: f32 = 0.45;
         let mut indices = self
             .state
             .view()
@@ -481,7 +579,24 @@ impl App {
         let chats_scroll = egui::ScrollArea::vertical()
             .id_salt("chat-list")
             .show(ui, |ui| {
-                for i in indices {
+                let clip = ui.clip_rect();
+                let stride = ROW_HEIGHT + ROW_GAP + ui.spacing().item_spacing.y;
+                let first_visible =
+                    ((clip.top() - ui.next_widget_position().y) / stride).floor() as usize;
+                let visible_slots = (clip.height() / stride).ceil().max(1.) as usize;
+                for (row, i) in indices.into_iter().enumerate() {
+                    let delay = STAGGER
+                        * row.saturating_sub(first_visible).min(visible_slots) as f32
+                        / visible_slots as f32;
+                    let phase = ((progress - delay) / (1. - STAGGER)).clamp(0., 1.);
+                    let arrived = egui::emath::easing::cubic_out(phase);
+                    let origin = ui.next_widget_position()
+                        + egui::vec2(ui.available_width() / 2., ROW_HEIGHT / 2.);
+                    let scale = egui::lerp(0.65..=1., arrived);
+                    let transform = egui::emath::TSTransform::new(
+                        origin.to_vec2() * (1. - scale) + egui::vec2(0., -26. * (1. - arrived)),
+                        scale,
+                    );
                     let p = &self.state.view().playlists[i];
                     let id = p.id;
                     let pinned = self.state.view().chat_pins.contains(&id);
@@ -497,22 +612,40 @@ impl App {
                             egui::Color32::TRANSPARENT
                         })
                         .corner_radius(8)
-                        .inner_margin(8.)
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                art(
-                                    ui,
-                                    &p.title,
-                                    self.state.library().playlist_artwork(p.id).path.as_deref(),
-                                    40.,
-                                );
-                                chat_title(ui, &p.title, p.emoji_status.is_some(), 14., 1);
-                                self.chat_emoji(ui, p.emoji_status, 18., None);
-                            });
+                        .inner_margin(ROW_MARGIN);
+                    let draw = |ui: &mut egui::Ui| {
+                        frame
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    art(
+                                        ui,
+                                        &p.title,
+                                        self.state.library().playlist_artwork(p.id).path.as_deref(),
+                                        ART_SIZE,
+                                    );
+                                    chat_title(ui, &p.title, p.emoji_status.is_some(), 14., 1);
+                                    self.chat_emoji(ui, p.emoji_status, 18., None);
+                                });
+                            })
+                            .response
+                            .rect
+                    };
+                    let rect = if phase < 1. {
+                        ui.with_visual_transform(transform, |ui| {
+                            ui.set_clip_rect(transform.inverse() * clip);
+                            ui.multiply_opacity((2. * phase).min(1.));
+                            draw(ui)
                         })
-                        .response;
-                    let response = ui.interact(frame.rect, row_id, egui::Sense::click());
+                        .inner
+                    } else {
+                        ui.scope(draw).inner
+                    };
+                    ui.add_space(ROW_GAP);
+                    if phase == 0. {
+                        continue;
+                    }
+                    let response = ui.interact(transform * rect, row_id, egui::Sense::click());
                     if ui.is_rect_visible(response.rect) {
                         self.image_wanted
                             .push(self.state.library().playlist_artwork(p.id).file);
@@ -533,7 +666,6 @@ impl App {
                             ui.close();
                         }
                     });
-                    ui.add_space(3.);
                 }
             });
         design::middle_scroll(
@@ -590,15 +722,26 @@ impl App {
             }
         }
     }
-    fn transport_buttons(&mut self, ui: &mut egui::Ui, extended: bool) {
-        if extended {
+    fn transport_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        center: egui::Pos2,
+        shuffle: f32,
+        repeat: f32,
+    ) {
+        let gap = ui.spacing().item_spacing.x;
+        let half_width = 22. + 36. + gap;
+        if shuffle > 0. {
+            let point = center - egui::vec2(half_width + 36. + gap, 0.);
+            let mut button = horizontal_slot(ui, "shuffle", point, egui::Vec2::splat(36.));
+            button.multiply_opacity(shuffle);
             let shuffle_hint = if self.state.view().shuffle {
                 tr("Shuffle on · Turn off")
             } else {
                 tr("Shuffle off · Turn on")
             };
             if design::toggle(
-                ui,
+                &mut button,
                 Icon::Shuffle,
                 self.state.view().shuffle,
                 "",
@@ -607,11 +750,17 @@ impl App {
                 self.execute(AppCommand::Shuffle(!self.state.view().shuffle));
             }
         }
-        if button(ui, Icon::Previous, "Previous") {
+        let mut playback = horizontal_slot(
+            ui,
+            "playback",
+            center - egui::vec2(half_width, 0.),
+            egui::vec2(2. * half_width, 44.),
+        );
+        if button(&mut playback, Icon::Previous, "Previous") {
             self.execute(AppCommand::Previous);
         }
         if design::playback_button(
-            ui,
+            &mut playback,
             if self.state.playback().state().paused()
                 || self.state.view().session.current().is_none()
             {
@@ -623,17 +772,22 @@ impl App {
         ) {
             self.execute(AppCommand::Pause(!self.state.playback().state().paused()));
         }
-        if button(ui, Icon::Next, "Next") {
+        if button(&mut playback, Icon::Next, "Next") {
             self.execute(AppCommand::Next);
         }
-        if extended {
+        if repeat > 0. {
+            let point = center + egui::vec2(half_width + gap, 0.);
+            let mut button = horizontal_slot(ui, "repeat", point, egui::Vec2::splat(36.));
+            button.multiply_opacity(repeat);
+            let clip = button.clip_rect();
+            button.set_clip_rect(clip.with_max_x(clip.right().min(point.x + (36. + gap) * repeat)));
             let hint = match self.state.view().repeat {
                 RepeatMode::Off => tr("Repeat off · Repeat all"),
                 RepeatMode::All => tr("Repeat all · Repeat one"),
                 RepeatMode::One => tr("Repeat one · Turn off"),
             };
             if design::toggle(
-                ui,
+                &mut button,
                 Icon::Repeat,
                 self.state.view().repeat != RepeatMode::Off,
                 if self.state.view().repeat == RepeatMode::One {
@@ -661,6 +815,7 @@ impl App {
             },
         ) {
             self.queue_open = !self.queue_open;
+            ui.ctx().request_repaint();
         }
     }
 
@@ -687,207 +842,238 @@ impl App {
         }
     }
 
-    fn compact_transport_controls(&mut self, ui: &mut egui::Ui, dock: bool) {
+    fn transport(&mut self, ui: &mut egui::Ui, player: PlayerLayout, dock: bool, seek: f32) {
+        let area = ui.available_rect_before_wrap();
+        let width = area.width();
         let gap = ui.spacing().item_spacing.x;
-        let buttons = 44. + 5. * (36. + gap) + if dock { 36. + gap } else { 0. };
-        let available = ui.available_width();
-        let slider_width = (available - buttons - gap).min(104.);
-        let show_slider = slider_width >= 72.;
-        let width = buttons + if show_slider { gap + slider_width } else { 0. };
-        ui.horizontal(|ui| {
-            ui.add_space((available - width).max(0.) / 2.);
-            self.transport_buttons(ui, true);
-            self.mute_button(ui);
-            if show_slider {
-                self.volume_slider(ui, slider_width);
-            }
-            if dock {
-                self.queue_button(ui);
-            }
-        });
-    }
+        let button_slot = 36. + gap;
+        let basic_width = 44. + 2. * button_slot;
+        let extended_width = basic_width + 2. * button_slot;
+        let seek_active = matches!(player, PlayerLayout::Mini | PlayerLayout::Full);
+        let expanded = player == PlayerLayout::Full && width >= 798.;
+        let wide = layout_fraction(ui, "transport-wide", expanded);
+        // Keep mute available after shuffle and repeat fold away.
+        let mute = layout_fraction(ui, "transport-mute", width >= extended_width);
+        let repeat = layout_fraction(
+            ui,
+            "transport-repeat",
+            width >= extended_width + button_slot / 2.,
+        );
+        let shuffle = layout_fraction(
+            ui,
+            "transport-shuffle",
+            width >= extended_width + button_slot,
+        );
+        let queue = layout_fraction(ui, "transport-queue", dock && player.has_workspace());
+        let play_width = basic_width + button_slot * (shuffle + repeat);
+        let compact_slider = (width - extended_width - button_slot * (1. + queue) - gap).min(104.);
+        let slider = layout_fraction(ui, "transport-volume", expanded || compact_slider >= 72.);
+        let compact_width =
+            play_width + button_slot * (mute + queue) + (gap + compact_slider.max(72.)) * slider;
+        let compact_left = (width - compact_width).max(0.) / 2.;
+        let metadata_width = ((width - 48.) * 0.25).clamp(60., 300.);
+        let wide_left = 24. + metadata_width + gap;
+        let wide_center =
+            (width - 48. - metadata_width - (144. + 56. * queue) - 24.).max(basic_width);
+        let center_left = wide * wide_left;
+        let center_width = egui::lerp(width..=wide_center, wide);
+        let play_x = area.left()
+            + egui::lerp(
+                (compact_left + button_slot * shuffle + basic_width / 2.)
+                    ..=(wide_left + wide_center / 2.),
+                wide,
+            )
+            .clamp(
+                basic_width / 2.,
+                (width - basic_width / 2.).max(basic_width / 2.),
+            );
+        let play_y = (area.top() + 22. + 8. * seek).min(ui.clip_rect().bottom() - 22.);
+        let right_x = area.left()
+            + egui::lerp(
+                (compact_left + play_width + gap)..=(wide_left + wide_center + gap),
+                wide,
+            );
+        let volume_x = right_x + button_slot * queue;
+        let volume_y = play_y + 12. * wide;
 
-    fn transport(&mut self, ui: &mut egui::Ui, dock: bool, player_only: bool) {
-        let current = self
-            .state
-            .view()
-            .session
-            .current()
-            .map(|t| self.media_track(t.into()));
-        if let Some(t) = &current {
-            self.image_wanted.push(t.image_file);
-            if t.file == 0 {
-                self.track_wanted.push(t.clone());
+        let media = if seek_active || wide > 0. {
+            self.state
+                .view()
+                .session
+                .current()
+                .map(|t| self.media_track(t.into()))
+        } else {
+            None
+        };
+        if let Some(track) = &media {
+            self.image_wanted.push(track.image_file);
+            if track.file == 0 {
+                self.track_wanted.push(track.clone());
             }
         }
-        ui.spacing_mut().item_spacing.y = 4.;
-        ui.add_space(8.);
-        let compact = player_only || ui.available_width() < 798.;
-        let width = ui.available_width() - if compact { 0. } else { 48. };
-        let metadata_width = if compact {
-            0.
-        } else {
-            (width * 0.25).min(300.)
-        };
-        let right_width = if dock { 200. } else { 144. };
-        let center_width = if compact {
-            width
-        } else {
-            width - metadata_width - right_width - 24.
-        };
-        ui.horizontal(|ui| {
-            if !compact {
-                ui.add_space(24.);
-                ui.allocate_ui(egui::vec2(metadata_width, 72.), |ui| {
-                    ui.set_min_width(metadata_width);
-                    ui.horizontal(|ui| {
-                        let t = current.as_ref();
-                        art(
-                            ui,
-                            t.map(|t| t.title.as_str()).unwrap_or("TG"),
-                            t.and_then(|t| t.image_path.as_deref()),
-                            48.,
-                        );
-                        ui.allocate_ui(egui::vec2((metadata_width - 60.).max(60.), 56.), |ui| {
-                            ui.vertical(|ui| {
-                                let title = t
-                                    .map(|t| t.title.clone())
-                                    .unwrap_or_else(|| tr("Choose your soundtrack"));
-                                let artist = t
-                                    .map(|t| t.artist.clone())
-                                    .unwrap_or_else(|| tr("Select a track to get started"));
-                                ui.add(
-                                    egui::Label::new(egui::RichText::new(&title).strong())
-                                        .truncate()
-                                        .show_tooltip_when_elided(false),
-                                );
-                                ui.add(
-                                    egui::Label::new(egui::RichText::new(&artist).weak())
-                                        .truncate()
-                                        .show_tooltip_when_elided(false),
-                                );
-                                if self.state.playback().state().loading() {
-                                    ui.small(tr("Loading track…"));
-                                }
-                            });
-                        });
-                    });
-                });
-            }
-            ui.allocate_ui(egui::vec2(center_width, 72.), |ui| {
-                ui.set_min_width(center_width);
-                ui.vertical_centered(|ui| {
-                    if compact {
-                        self.compact_transport_controls(ui, false);
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.add_space((center_width - 220.).max(0.) / 2.);
-                            self.transport_buttons(ui, true);
-                        });
+        if wide > 0. {
+            let point = egui::pos2(area.left() + 24. - 14. * (1. - wide), play_y + 14.);
+            let mut metadata =
+                horizontal_slot(ui, "metadata", point, egui::vec2(metadata_width, 72.));
+            metadata.multiply_opacity(wide);
+            metadata.set_clip_rect(metadata.clip_rect().with_max_x(
+                (play_x - basic_width / 2. - button_slot * shuffle - gap).max(area.left()),
+            ));
+            metadata.horizontal(|ui| {
+                let track = media.as_ref();
+                art(
+                    ui,
+                    track.map(|t| t.title.as_str()).unwrap_or("TG"),
+                    track.and_then(|t| t.image_path.as_deref()),
+                    48.,
+                );
+                ui.vertical(|ui| {
+                    ui.set_width((metadata_width - 48. - gap).max(0.));
+                    let title = track
+                        .map(|t| t.title.clone())
+                        .unwrap_or_else(|| tr("Choose your soundtrack"));
+                    let artist = track
+                        .map(|t| t.artist.clone())
+                        .unwrap_or_else(|| tr("Select a track to get started"));
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(title).strong())
+                            .truncate()
+                            .show_tooltip_when_elided(false),
+                    );
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(artist).weak())
+                            .truncate()
+                            .show_tooltip_when_elided(false),
+                    );
+                    if self.state.playback().state().loading() {
+                        ui.small(tr("Loading track…"));
                     }
-                    let playback = self.state.playback().state();
-                    let snapshot = self
-                        .player
-                        .as_ref()
-                        .map(|player| player.snapshot())
-                        .unwrap_or_default();
-                    let current = self.state.view().session.current();
-                    let restored = self.restored_position(snapshot);
-                    let duration = if restored.is_some() {
-                        current.map_or(0., |track| track.duration as f64)
-                    } else if playback.loading() {
-                        0.
-                    } else if self.demo {
-                        current.as_ref().map_or(0., |track| track.duration as f64)
-                    } else {
-                        snapshot.duration
-                    };
-                    let has_duration = duration.is_finite() && duration > 0. && current.is_some();
-                    let enabled = restored.is_none() && has_duration;
-                    let position = if let Some(position) = restored {
-                        position
-                    } else if enabled {
-                        let sampled = if snapshot.seeking {
-                            snapshot.position
-                        } else {
-                            snapshot.audio_position.unwrap_or(snapshot.position)
-                        };
-                        sampled.max(0.).min(duration)
-                    } else {
-                        0.
-                    };
-                    let mut preview = self.seek_preview.unwrap_or(position);
-                    ui.horizontal(|ui| {
-                        ui.add_sized(
-                            [42., 28.],
-                            egui::Label::new(egui::RichText::new(clock(preview)).small()),
-                        );
-                        let response = ui
-                            .add_enabled_ui(enabled, |ui| {
-                                ui.push_id(("seek", self.state.playback().generation()), |ui| {
-                                    design::slider(
-                                        ui,
-                                        &mut preview,
-                                        duration.max(0.),
-                                        (center_width - 100.).max(40.),
-                                        tr("Seek"),
-                                        true,
-                                    )
-                                })
-                                .inner
-                            })
-                            .inner;
-                        if enabled
-                            && self.player.is_some()
-                            && !playback.paused()
-                            && !snapshot.seeking
-                            && !response.is_pointer_button_down_on()
-                            && ui.is_rect_visible(response.rect)
-                        {
-                            let rail_pixels = design::slider_rail(response.rect).width()
-                                * ui.ctx().pixels_per_point();
-                            design::repaint_after(ui, seek_repaint_interval(duration, rail_pixels));
-                        }
-                        #[cfg(test)]
-                        {
-                            self.test_seek = Some((response.rect, response.id));
-                        }
-                        if enabled && (response.dragged() || response.is_pointer_button_down_on()) {
-                            self.seek_preview = Some(preview);
-                        }
-                        if enabled
-                            && (response.drag_stopped()
-                                || response.clicked()
-                                || (response.changed() && !response.is_pointer_button_down_on()))
-                        {
-                            self.execute(AppCommand::Seek(preview));
-                        }
-                        ui.small(if has_duration {
-                            clock(duration)
-                        } else {
-                            "—:—".into()
-                        });
-                    });
                 });
             });
-            if !compact {
-                ui.allocate_ui(egui::vec2(right_width, 72.), |ui| {
-                    ui.set_min_width(right_width);
-                    ui.add_space(16.);
-                    ui.horizontal(|ui| {
-                        if dock {
-                            self.queue_button(ui);
-                        }
-                        self.mute_button(ui);
-                        self.volume_slider(
-                            ui,
-                            (right_width - if dock { 96. } else { 48. }).min(104.),
-                        );
-                    });
+        }
+        self.transport_buttons(ui, egui::pos2(play_x, play_y), shuffle, repeat);
+        if queue > 0. {
+            let point = egui::pos2(volume_x - button_slot, volume_y);
+            let mut button = horizontal_slot(ui, "queue", point, egui::Vec2::splat(36.));
+            button.multiply_opacity(queue);
+            self.queue_button(&mut button);
+        }
+        if mute > 0. {
+            let point = egui::pos2(volume_x, volume_y);
+            let mut button = horizontal_slot(ui, "mute", point, egui::Vec2::splat(36.));
+            button.multiply_opacity(mute);
+            self.mute_button(&mut button);
+        }
+        if slider > 0. {
+            let full_width = egui::lerp(compact_slider.max(72.)..=(96. + 8. * queue), wide);
+            let slider_width = egui::lerp(28. ..=full_width, slider);
+            let point = egui::pos2(
+                volume_x + button_slot + (full_width - slider_width) / 2.,
+                volume_y,
+            );
+            let mut volume = horizontal_slot(ui, "volume", point, egui::vec2(slider_width, 28.));
+            volume.multiply_opacity(slider);
+            self.volume_slider(&mut volume, slider_width);
+        }
+        if !seek_active {
+            self.seek_preview = None;
+        }
+        if seek > 0. {
+            let timeline_width = egui::lerp((center_width * 0.55).max(140.)..=center_width, seek);
+            let point = egui::pos2(
+                area.left() + center_left + (center_width - timeline_width) / 2.,
+                play_y + egui::lerp(36. ..=40., seek),
+            );
+            let mut timeline =
+                horizontal_slot(ui, "timeline", point, egui::vec2(timeline_width, 28.));
+            timeline.multiply_opacity(seek);
+            let ui = &mut timeline;
+            let playback = self.state.playback().state();
+            let snapshot = self
+                .player
+                .as_ref()
+                .map(|player| player.snapshot())
+                .unwrap_or_default();
+            let current = self.state.view().session.current();
+            let restored = self.restored_position(snapshot);
+            let duration = if restored.is_some() {
+                current.map_or(0., |track| track.duration as f64)
+            } else if playback.loading() {
+                0.
+            } else if self.demo {
+                current.as_ref().map_or(0., |track| track.duration as f64)
+            } else {
+                snapshot.duration
+            };
+            let has_duration = duration.is_finite() && duration > 0. && current.is_some();
+            let enabled = seek_active && restored.is_none() && has_duration;
+            let position = if let Some(position) = restored {
+                position
+            } else if has_duration {
+                let sampled = if snapshot.seeking {
+                    snapshot.position
+                } else {
+                    snapshot.audio_position.unwrap_or(snapshot.position)
+                };
+                sampled.max(0.).min(duration)
+            } else {
+                0.
+            };
+            let mut preview = self.seek_preview.unwrap_or(position);
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [42., 28.],
+                    egui::Label::new(egui::RichText::new(clock(preview)).small()),
+                );
+                let response = ui
+                    .add_enabled_ui(enabled, |ui| {
+                        ui.push_id(("seek", self.state.playback().generation()), |ui| {
+                            design::slider(
+                                ui,
+                                &mut preview,
+                                duration.max(0.),
+                                (timeline_width - 100.).max(40.),
+                                tr("Seek"),
+                                true,
+                            )
+                        })
+                        .inner
+                    })
+                    .inner;
+                if enabled
+                    && self.player.is_some()
+                    && !playback.paused()
+                    && !snapshot.seeking
+                    && !response.is_pointer_button_down_on()
+                    && ui.is_rect_visible(response.rect)
+                {
+                    let rail_pixels =
+                        design::slider_rail(response.rect).width() * ui.ctx().pixels_per_point();
+                    design::repaint_after(ui, seek_repaint_interval(duration, rail_pixels));
+                }
+                #[cfg(test)]
+                {
+                    self.test_seek = Some((response.rect, response.id));
+                }
+                if enabled && (response.dragged() || response.is_pointer_button_down_on()) {
+                    self.seek_preview = Some(preview);
+                }
+                if enabled
+                    && (response.drag_stopped()
+                        || response.clicked()
+                        || (response.changed() && !response.is_pointer_button_down_on()))
+                {
+                    self.execute(AppCommand::Seek(preview));
+                }
+                ui.small(if has_duration {
+                    clock(duration)
+                } else {
+                    "—:—".into()
                 });
-            }
-        });
+            });
+        }
     }
+
     fn playlist_menu(&mut self, ui: &mut egui::Ui, selected: usize, chat_id: i64, url: &str) {
         if ui
             .add_enabled(!self.demo, egui::Button::new(tr("Open source chat")))
@@ -927,6 +1113,103 @@ impl App {
             self.toggle_chat_pin(chat_id);
             ui.close();
         }
+    }
+
+    fn playlist_heading(
+        &mut self,
+        ui: &mut egui::Ui,
+        title: &str,
+        artwork: Option<&str>,
+        emoji: Option<tg_player_application::model::EmojiStatus>,
+        full: f32,
+        visible: f32,
+    ) {
+        let width = ui.available_width() - f32::from(TRACK_SCROLL_GUTTER) * full;
+        let padding = 16. * full;
+        let full_cover = ui.ctx().animate_value_with_time(
+            egui::Id::new("playlist-cover-size"),
+            if ui.available_width() - f32::from(TRACK_SCROLL_GUTTER) - 32. < 650. {
+                72.
+            } else {
+                112.
+            },
+            0.15,
+        );
+        let cover_size = egui::lerp(32. ..=full_cover, full);
+        let font_size = egui::lerp(18. ..=30., full);
+        let text_x = padding + cover_size + ui.spacing().item_spacing.x + 16. * full;
+        let text_width = (width - text_x - padding).max(0.);
+        let galley = chat_title_galley(
+            ui,
+            title,
+            emoji.is_some(),
+            font_size,
+            if full > 0. { 2 } else { 1 },
+            text_width,
+        );
+        let first_line = galley.rows.first().map_or(0., |row| row.size.y);
+        let title_height = egui::lerp(first_line..=galley.size().y, full);
+        let eyebrow = 22. * full;
+        let inner_height = cover_size.max(title_height + eyebrow);
+        let height = inner_height + padding * 2.;
+        // A short workspace still needs room for its search field and a track row.
+        let room = if visible < 1. {
+            (ui.available_height() - design::ROW_HEIGHT - 60.).max(0.)
+        } else {
+            f32::INFINITY
+        };
+        let clip_height = (height * visible).min(room);
+        if clip_height <= 0. {
+            return;
+        }
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(width, clip_height), egui::Sense::hover());
+        let clip = ui.clip_rect().intersect(rect);
+        ui.painter().with_clip_rect(clip).rect_filled(
+            rect,
+            12. * full,
+            design::colors(ui).panel.gamma_multiply(full * visible),
+        );
+        let mid_y = rect.top() + padding + inner_height / 2.;
+        let mut cover = horizontal_slot(
+            ui,
+            "playlist-cover",
+            egui::pos2(rect.left() + padding, mid_y),
+            egui::Vec2::splat(cover_size),
+        );
+        cover.set_clip_rect(clip);
+        cover.multiply_opacity(visible);
+        art(&mut cover, title, artwork, cover_size);
+        let text_origin = egui::pos2(rect.left() + text_x, mid_y - (title_height + eyebrow) / 2.);
+        if full > 0. {
+            ui.painter().with_clip_rect(clip).text(
+                text_origin,
+                egui::Align2::LEFT_TOP,
+                tr("TELEGRAM PLAYLIST"),
+                egui::FontId::proportional(12.),
+                design::colors(ui).muted.gamma_multiply(full * visible),
+            );
+        }
+        let title_rect = egui::Rect::from_min_size(
+            text_origin + egui::vec2(0., eyebrow),
+            egui::vec2(text_width, title_height),
+        );
+        let mut label = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("playlist-title")
+                .max_rect(title_rect),
+        );
+        label.set_clip_rect(clip);
+        label.multiply_opacity(visible);
+        let mut text = label.new_child(egui::UiBuilder::new().max_rect(title_rect));
+        text.set_clip_rect(clip.with_max_y(clip.bottom().min(title_rect.bottom())));
+        let end = show_chat_title(&mut text, galley);
+        self.chat_emoji(
+            &mut label,
+            emoji,
+            24.,
+            Some(end + egui::vec2(ui.spacing().item_spacing.x, 0.)),
+        );
     }
 
     fn playlist_screen(&mut self, ui: &mut egui::Ui, compact: bool, dense: bool) {
@@ -973,121 +1256,177 @@ impl App {
         let filter_labels = [tr("Music"), tr("Audio files"), tr("Voice messages")];
         let mut play_all = false;
         let mut pin_all = false;
-        if compact && !dense {
-            ui.horizontal(|ui| {
-                art(ui, &title, artwork.as_deref(), 32.);
-                chat_title(ui, &title, emoji_status.is_some(), 18., 1);
-                self.chat_emoji(ui, emoji_status, 24., None);
-            });
-        } else if !compact {
-            egui::Frame::new()
-                .fill(design::colors(ui).panel)
-                .corner_radius(12)
-                .inner_margin(16.)
-                .outer_margin(egui::Margin {
-                    right: TRACK_SCROLL_GUTTER,
-                    ..egui::Margin::ZERO
-                })
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        let cover_size = ui.ctx().animate_value_with_time(
-                            ui.id().with("playlist-cover-size"),
-                            if ui.available_width() < 650. {
-                                72.
-                            } else {
-                                112.
-                            },
-                            0.15,
-                        );
-                        art(ui, &title, artwork.as_deref(), cover_size);
-                        ui.add_space(16.);
-                        ui.vertical(|ui| {
-                            ui.add_space(4.);
-                            ui.small(tr("TELEGRAM PLAYLIST"));
-                            ui.horizontal(|ui| {
-                                let line_end =
-                                    chat_title(ui, &title, emoji_status.is_some(), 30., 2);
-                                let anchor = line_end + egui::vec2(ui.spacing().item_spacing.x, 0.);
-                                self.chat_emoji(ui, emoji_status, 24., Some(anchor));
-                            });
-                        });
+        let full_heading = layout_fraction(ui, "playlist-heading-full", !compact);
+        let show_heading = layout_fraction(ui, "playlist-heading-visible", !dense);
+        if show_heading > 0. {
+            self.playlist_heading(
+                ui,
+                &title,
+                artwork.as_deref(),
+                emoji_status,
+                full_heading,
+                show_heading,
+            );
+        }
+        if full_heading > 0. && !dense {
+            let gap = 18. * full_heading;
+            let area = ui.available_rect_before_wrap();
+            let rect = area.with_min_y(area.top() + gap);
+            let mut actions = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt("playlist-actions")
+                    .max_rect(rect),
+            );
+            actions.multiply_opacity(full_heading);
+            if full_heading < 1. {
+                actions.set_clip_rect(
+                    ui.clip_rect()
+                        .intersect(rect.with_max_y(rect.top() + 44. * full_heading)),
+                );
+            }
+            let row = actions
+                .horizontal_wrapped(|ui| {
+                    let play = ui.add_enabled_ui(can_play, |ui| {
+                        design::playback_button(ui, Icon::Play, "Play all")
                     });
-                });
-            ui.add_space(18.);
-            ui.horizontal_wrapped(|ui| {
-                let play = ui.add_enabled_ui(can_play, |ui| {
-                    design::playback_button(ui, Icon::Play, "Play all")
-                });
-                play_all = play.inner;
-                #[cfg(test)]
-                ui.ctx().data_mut(|data| {
-                    data.insert_temp(egui::Id::new("test-play-all"), play.response.rect)
-                });
-                pin_all = button(ui, Icon::Download, "Save playlist offline");
-                self.sort_playlist(ui);
-                ui.menu_button("…", |ui| {
+                    play_all = play.inner;
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(egui::Id::new("test-play-all"), play.response.rect)
+                    });
+                    pin_all = button(ui, Icon::Download, "Save playlist offline");
+                    self.sort_playlist(ui);
+                    ui.menu_button("…", |ui| {
+                        self.playlist_menu(ui, selected, chat_id, &url);
+                        self.playlist_pin_action(ui, chat_id);
+                    });
+                })
+                .response
+                .rect;
+            ui.add_space(gap + (row.height() + ui.spacing().item_spacing.y) * full_heading);
+        }
+        let inline_filters = !compact && ui.available_width() >= 620.;
+        let inline = layout_fraction(ui, "playlist-filters-inline", inline_filters);
+        let gap = ui.spacing().item_spacing.x;
+        let widths = if inline == 0. {
+            [40.; 3]
+        } else {
+            filter_labels.each_ref().map(|label| {
+                let text = egui::WidgetText::from(label.as_str()).into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Button,
+                );
+                (text.size().x + 2. * ui.spacing().button_padding.x + 2.).ceil()
+            })
+        };
+        let inline_width = widths.iter().sum::<f32>() + 2. * gap;
+        let (toolbar, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.), egui::Sense::hover());
+        let menu_x = toolbar.right() - 40.;
+        let filter_left = toolbar.right() - egui::lerp(40. ..=inline_width, inline);
+        let filter_left = filter_left.max(toolbar.left() + 40. + gap);
+        let mut search = horizontal_slot(
+            ui,
+            "track-toolbar-search",
+            toolbar.left_center(),
+            egui::vec2(filter_left - toolbar.left() - gap, 40.),
+        );
+        search_field(
+            &mut search,
+            &mut self.search,
+            "track-search",
+            tr("Search this playlist"),
+            None,
+        );
+
+        if inline > 0. {
+            let mut slot_left = toolbar.right() - inline_width;
+            for (index, ((label, filter), width)) in filter_labels
+                .iter()
+                .zip(&mut filters)
+                .zip(widths)
+                .enumerate()
+            {
+                let center = egui::lerp((menu_x + 20.)..=(slot_left + width / 2.), inline);
+                let visible_width = egui::lerp(16. ..=width, inline);
+                let mut slot = horizontal_slot(
+                    ui,
+                    ("inline-filter", index),
+                    egui::pos2(center - visible_width / 2., toolbar.center().y),
+                    egui::vec2(visible_width, 36.),
+                );
+                slot.set_clip_rect(ui.clip_rect().intersect(toolbar.with_min_x(filter_left)));
+                slot.multiply_opacity(inline);
+                if !inline_filters {
+                    slot.visuals_mut().disabled_alpha = 1.;
+                    slot.disable();
+                }
+                if slot
+                    .add_sized(
+                        [visible_width, 36.],
+                        egui::Button::selectable(*filter, label.as_str()).truncate(),
+                    )
+                    .clicked()
+                {
+                    *filter = !*filter;
+                }
+                slot_left += width + gap;
+            }
+        }
+        if inline < 1. {
+            let mut menu = horizontal_slot(
+                ui,
+                "playlist-filter-menu",
+                egui::pos2(menu_x, toolbar.center().y),
+                egui::Vec2::splat(40.),
+            );
+            menu.multiply_opacity(1. - inline);
+            if inline_filters {
+                menu.visuals_mut().disabled_alpha = 1.;
+                menu.disable();
+            }
+            let ui = &mut menu;
+            let label = if compact {
+                tr("Playlist options")
+            } else {
+                tr("Filters")
+            };
+            let p = design::colors(ui);
+            egui::containers::menu::MenuButton::from_button(
+                egui::Button::image(Icon::More.image(p.muted, 20.).alt_text(&label))
+                    .min_size(egui::vec2(40., 40.)),
+            )
+            .ui(ui, |ui| {
+                if compact {
+                    play_all = ui
+                        .add_enabled(can_play, egui::Button::new(tr("Play all")))
+                        .clicked();
+                    pin_all = ui.button(tr("Save playlist offline")).clicked();
+                    if play_all || pin_all {
+                        ui.close();
+                    }
                     self.playlist_menu(ui, selected, chat_id, &url);
+                    ui.separator();
+                    self.sort_playlist(ui);
+                }
+                for (filter, label) in filters.iter_mut().zip(&filter_labels) {
+                    ui.checkbox(filter, label.as_str());
+                }
+                if compact {
+                    ui.separator();
                     self.playlist_pin_action(ui, chat_id);
-                });
+                }
+            })
+            .0
+            .on_hover_text(if dense {
+                format!("{title}\n{label}")
+            } else {
+                label
             });
         }
-        ui.horizontal(|ui| {
-            let inline_filters = !compact && ui.available_width() >= 620.;
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if inline_filters {
-                    for (filter, label) in filters.iter_mut().zip(&filter_labels).rev() {
-                        ui.toggle_value(filter, label.as_str());
-                    }
-                } else {
-                    let label = if compact {
-                        tr("Playlist options")
-                    } else {
-                        tr("Filters")
-                    };
-                    let p = design::colors(ui);
-                    egui::containers::menu::MenuButton::from_button(
-                        egui::Button::image(Icon::More.image(p.muted, 20.).alt_text(&label))
-                            .min_size(egui::vec2(40., 40.)),
-                    )
-                    .ui(ui, |ui| {
-                        if compact {
-                            play_all = ui
-                                .add_enabled(can_play, egui::Button::new(tr("Play all")))
-                                .clicked();
-                            pin_all = ui.button(tr("Save playlist offline")).clicked();
-                            if play_all || pin_all {
-                                ui.close();
-                            }
-                            self.playlist_menu(ui, selected, chat_id, &url);
-                            ui.separator();
-                            self.sort_playlist(ui);
-                        }
-                        for (filter, label) in filters.iter_mut().zip(&filter_labels) {
-                            ui.checkbox(filter, label.as_str());
-                        }
-                        if compact {
-                            ui.separator();
-                            self.playlist_pin_action(ui, chat_id);
-                        }
-                    })
-                    .0
-                    .on_hover_text(if dense {
-                        format!("{title}\n{label}")
-                    } else {
-                        label
-                    });
-                }
-                search_field(
-                    ui,
-                    &mut self.search,
-                    "track-search",
-                    tr("Search this playlist"),
-                    None,
-                );
-            });
-        });
-        ui.add_space(if compact { 2. } else { 12. });
+        ui.add_space(egui::lerp(2. ..=12., full_heading));
         if before_filters != filters {
             self.execute(AppCommand::Filters(chat_id, filters));
             self.open_chat(selected);
@@ -1106,9 +1445,14 @@ impl App {
         let notice = (!self.settings_open)
             .then(|| self.inline_notice(ui.ctx(), false))
             .flatten();
-        if !compact || loading || notice.is_some() {
+        if full_heading > 0. || loading || notice.is_some() {
             // Reserve the status line in the full layout to avoid shifting the list while loading.
-            ui.allocate_ui(egui::vec2(ui.available_width(), 24.), |ui| {
+            let height = if loading || notice.is_some() {
+                24.
+            } else {
+                24. * full_heading
+            };
+            ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
                 if let Some(notice) = notice {
                     ui.weak(notice);
                 } else if loading {
@@ -1433,7 +1777,19 @@ fn chat_title(
     size: f32,
     max_rows: usize,
 ) -> egui::Pos2 {
-    let width = ui.available_width()
+    let galley = chat_title_galley(ui, title, emoji, size, max_rows, ui.available_width());
+    show_chat_title(ui, galley)
+}
+
+fn chat_title_galley(
+    ui: &mut egui::Ui,
+    title: &str,
+    emoji: bool,
+    size: f32,
+    max_rows: usize,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let width = width
         - if emoji {
             size.max(24.) + ui.spacing().item_spacing.x
         } else {
@@ -1447,7 +1803,10 @@ fn chat_title(
     );
     job.wrap.max_rows = max_rows;
     job.wrap.break_anywhere = max_rows == 1;
-    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    ui.fonts_mut(|fonts| fonts.layout_job(job))
+}
+
+fn show_chat_title(ui: &mut egui::Ui, galley: std::sync::Arc<egui::Galley>) -> egui::Pos2 {
     let line_end = galley
         .rows
         .last()
@@ -1489,8 +1848,8 @@ fn window_header(
                 egui::vec2(ui.available_width(), design::HEADER_HEIGHT),
                 egui::Sense::hover(),
             );
-            let compact = rect.width() < 300.;
-            let controls_width = if compact { 48. } else { 132. };
+            let expanded = layout_fraction(ui, "window-header-expanded", rect.width() >= 300.);
+            let controls_width = egui::lerp(48. ..=132., expanded);
             let caption = egui::Rect::from_min_max(
                 rect.left_top() + egui::vec2(8., 6.),
                 rect.right_bottom() - egui::vec2(controls_width, 6.),
@@ -1503,7 +1862,7 @@ fn window_header(
             );
             let (menu_rect, action) = application_menu(&mut text_ui, settings_available);
             drag_window_caption(ui, caption.with_min_x(menu_rect.right() + 1.));
-            if let Some(title) = title.filter(|_| !compact) {
+            if let Some(title) = title.filter(|_| expanded > 0.) {
                 let suffix = egui::WidgetText::from(egui::RichText::new("— Gramwave").weak())
                     .into_galley(
                         &text_ui,
@@ -1511,10 +1870,11 @@ fn window_header(
                         f32::INFINITY,
                         egui::TextStyle::Body,
                     );
-                let title_width = (text_ui.available_width()
-                    - suffix.size().x
-                    - text_ui.spacing().item_spacing.x)
-                    .max(0.);
+                let title_width = expanded
+                    * (text_ui.available_width()
+                        - suffix.size().x
+                        - text_ui.spacing().item_spacing.x)
+                        .max(0.);
                 let track = egui::WidgetText::from(egui::RichText::new(title).strong())
                     .into_galley(
                         &text_ui,
@@ -1522,7 +1882,10 @@ fn window_header(
                         title_width,
                         egui::TextStyle::Body,
                     );
+                let opacity = text_ui.opacity();
+                text_ui.multiply_opacity(expanded);
                 text_ui.add(egui::Label::new(track).show_tooltip_when_elided(false));
+                text_ui.set_opacity(opacity);
                 text_ui.add(egui::Label::new(suffix));
             } else {
                 text_ui.strong("Gramwave");
@@ -1537,6 +1900,7 @@ fn window_header(
                     .max_rect(controls_rect)
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
             );
+            controls.set_clip_rect(controls.clip_rect().intersect(controls_rect));
             controls.spacing_mut().item_spacing.x = 4.;
             let maximized = controls.input(|i| i.viewport().maximized.unwrap_or(false));
             let (icon, label) = if maximized {
@@ -1553,8 +1917,13 @@ fn window_header(
                     egui::ViewportCommand::Minimized(true),
                 ),
             ];
-            let count = if compact { 1 } else { commands.len() };
-            for (icon, label, command) in commands.into_iter().take(count) {
+            for (index, (icon, label, command)) in commands.into_iter().enumerate() {
+                if index > 0 {
+                    if expanded == 0. {
+                        break;
+                    }
+                    controls.set_opacity(ui.opacity() * expanded);
+                }
                 if button(&mut controls, icon, label) {
                     ui.ctx().send_viewport_cmd(command);
                 }
@@ -1832,6 +2201,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if button(ui, Icon::Close, "Close queue") {
                         self.queue_open = false;
+                        ui.ctx().request_repaint();
                     }
                 });
             }

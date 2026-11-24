@@ -385,6 +385,63 @@ mod interaction_tests {
     }
 
     #[test]
+    fn playback_controls_travel_across_each_window_breakpoint_in_both_directions() {
+        let mut h = queue_harness(3);
+        let play = |output: egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .find_map(|painted| match &painted.shape {
+                    egui::Shape::Rect(shape)
+                        if shape.corner_radius == egui::CornerRadius::same(22)
+                            && (shape.rect.width() - 44.).abs() < 1. =>
+                    {
+                        assert!(
+                            painted.clip_rect.expand(0.5).contains_rect(shape.rect),
+                            "{:?} clipped by {:?}",
+                            shape.rect,
+                            painted.clip_rect
+                        );
+                        Some(shape.rect)
+                    }
+                    _ => None,
+                })
+                .expect("visible playback button")
+        };
+        for (large, small) in [
+            ([850., 351.], [850., 349.]),
+            ([850., 261.], [850., 259.]),
+            ([850., 151.], [850., 149.]),
+            ([300., 450.], [299., 450.]),
+        ] {
+            h.size = large.into();
+            h.settle();
+            for size in [small, large] {
+                h.size = size.into();
+                h.frame(vec![]);
+                let first = play(h.frame(vec![])).center().y;
+                let second = play(h.frame(vec![])).center().y;
+                h.settle();
+                let final_y = play(h.frame(vec![])).center().y;
+                assert!(
+                    (second - final_y).abs() > 1.
+                        && (first - final_y).abs() > (second - final_y).abs(),
+                    "{size:?}: {first} -> {second} -> {final_y}"
+                );
+            }
+        }
+        h.size = egui::vec2(850., 149.);
+        h.settle();
+        let paused = h.app.state.playback().state().paused();
+        h.size.y = 151.;
+        h.frame(vec![]);
+        let moving = play(h.frame(vec![]));
+        h.click(moving.center());
+        assert_ne!(h.app.state.playback().state().paused(), paused);
+        h.app.shutdown_core().unwrap();
+    }
+
+    #[test]
     fn queue_drag_from_artwork_moves_neighbours_before_committing() {
         let mut h = queue_harness(5);
         let order = queue_order(&h);
@@ -445,6 +502,7 @@ mod interaction_tests {
     fn playlist_heading_wraps_at_word_boundaries() {
         let mut h = Harness::new();
         h.size = egui::vec2(720., 620.);
+        h.settle();
         let title = "Evening piano improvisations from the mountain studio";
         let mut state = h.app.state.view().clone();
         state.playlists[0].title = title.into();
@@ -485,6 +543,7 @@ mod interaction_tests {
     fn playlist_status_follows_the_last_visible_title_row() {
         let mut h = Harness::new();
         h.size = egui::vec2(720., 620.);
+        h.settle();
         h.app.custom_emoji.set_demo();
         let wrapped = "Evening piano improvisations from the mountain studio";
         for (title, rows, elided) in [
@@ -612,8 +671,7 @@ mod interaction_tests {
     fn smallest_player_keeps_basic_playback_controls() {
         let mut h = queue_harness(3);
         h.size = egui::Vec2::from(crate::launch::MIN_WINDOW_SIZE);
-        h.frame(vec![]);
-        h.frame(vec![]);
+        h.settle();
         let first = h.app.state.view().session.current().unwrap().entry_id;
         let center = h.size.to_pos2() / 2.;
         h.click(center + egui::vec2(48., 0.));
@@ -630,13 +688,53 @@ mod interaction_tests {
     }
 
     #[test]
+    fn low_player_drops_secondary_controls_in_steps_as_width_shrinks() {
+        let mut h = Harness::new();
+        for (width, buttons, slider) in [
+            (760., 6, true),
+            (350., 6, false),
+            (270., 5, false),
+            (246., 4, false),
+            (220., 3, false),
+            (760., 6, true),
+        ] {
+            h.size = egui::vec2(width, 130.);
+            h.settle();
+            h.app.test_seek = None;
+            let volume = egui::Id::new("test-volume");
+            h.ctx
+                .data_mut(|data| data.remove::<(egui::Rect, egui::Id)>(volume));
+            h.frame(vec![]);
+            let visible_buttons = h
+                .ctx
+                .interactive_rects_last_pass()
+                .into_iter()
+                .filter(|rect| {
+                    [36., 44.].into_iter().any(|size| {
+                        (rect.width() - size).abs() < 0.5 && (rect.height() - size).abs() < 0.5
+                    })
+                })
+                .count();
+            assert_eq!(visible_buttons, buttons, "width {width}");
+            assert_eq!(
+                h.ctx
+                    .data(|data| data.get_temp::<(egui::Rect, egui::Id)>(volume))
+                    .is_some(),
+                slider,
+                "width {width}"
+            );
+            assert!(h.app.test_seek.is_none());
+        }
+        h.app.shutdown_core().unwrap();
+    }
+
+    #[test]
     fn compact_transport_volume_supports_drag_keyboard_and_mute() {
         let volume_id = egui::Id::new("test-volume");
         for (width, height) in [(760., 190.), (820., 320.), (1200., 190.)] {
             let mut h = Harness::new();
             h.size = egui::vec2(width, height);
-            h.frame(vec![]);
-            h.frame(vec![]);
+            h.settle();
             let (slider, id): (egui::Rect, egui::Id) =
                 h.ctx.data(|data| data.get_temp(volume_id)).unwrap();
             assert!(slider.right() <= width / 2. + 190.);
@@ -663,6 +761,7 @@ mod interaction_tests {
             crate::launch::MIN_WINDOW_SIZE.into(),
         ] {
             h.size = size;
+            h.settle();
             h.ctx
                 .data_mut(|data| data.remove::<(egui::Rect, egui::Id)>(volume_id));
             h.frame(vec![]);
@@ -674,9 +773,172 @@ mod interaction_tests {
     }
 
     #[test]
+    fn transport_volume_changes_position_without_replacing_the_slider() {
+        let mut h = Harness::new();
+        let volume_id = egui::Id::new("test-volume");
+        let volume = |h: &Harness| -> (egui::Rect, egui::Id) {
+            h.ctx.data(|d| d.get_temp(volume_id)).unwrap()
+        };
+        let title_opacity = |frame: egui::FullOutput| {
+            frame.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Choose your soundtrack" => {
+                    Some(text.fallback_color.a())
+                }
+                _ => None,
+            })
+        };
+        h.size.x = 815.;
+        h.settle();
+        let (wide, id) = volume(&h);
+        let rest_alpha = title_opacity(h.frame(vec![])).unwrap();
+        h.size.x = 813.;
+        h.frame(vec![]);
+        let intermediate_alpha = title_opacity(h.frame(vec![])).unwrap();
+        let (moving, moving_id) = volume(&h);
+        h.settle();
+        let (compact, compact_id) = volume(&h);
+        assert_eq!(id, moving_id);
+        assert_eq!(id, compact_id);
+        assert!(compact.center().x < moving.center().x && moving.center().x < wide.center().x);
+        assert!(intermediate_alpha > 0 && intermediate_alpha < rest_alpha);
+        assert!(title_opacity(h.frame(vec![])).is_none());
+        h.size.x = 815.;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let (returning, returning_id) = volume(&h);
+        assert_eq!(id, returning_id);
+        assert!(
+            compact.center().x < returning.center().x && returning.center().x < wide.center().x
+        );
+
+        h.size.y = 151.;
+        h.settle();
+        let (mini, mini_id) = volume(&h);
+        let timeline = h.app.test_seek.unwrap().0;
+        h.size.y = 149.;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let (low, low_id) = volume(&h);
+        assert_eq!(mini_id, low_id);
+        assert_eq!(mini.x_range(), low.x_range());
+        assert!(h.app.test_seek.unwrap().0.width() < timeline.width());
+        h.settle();
+        h.app.test_seek = None;
+        h.ctx
+            .data_mut(|d| d.remove::<(egui::Rect, egui::Id)>(volume_id));
+        h.frame(vec![]);
+        assert_eq!(mini.x_range(), volume(&h).0.x_range());
+        assert!(h.app.test_seek.is_none());
+
+        h.size.x = 361.;
+        h.settle();
+        let (visible, _) = volume(&h);
+        h.size.x = 359.;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let (folding, _) = volume(&h);
+        assert!(folding.width() < visible.width());
+        assert!(folding.width() > 28.);
+        h.settle();
+        h.ctx
+            .data_mut(|d| d.remove::<(egui::Rect, egui::Id)>(volume_id));
+        h.frame(vec![]);
+        assert!(h
+            .ctx
+            .data(|d| d.get_temp::<(egui::Rect, egui::Id)>(volume_id))
+            .is_none());
+        h.app.shutdown_core().unwrap();
+    }
+
+    #[test]
+    fn playlist_filters_slide_into_the_menu_while_search_resizes() {
+        let mut h = Harness::new();
+        let search = |h: &Harness| {
+            h.ctx
+                .read_response(egui::Id::new("track-search"))
+                .unwrap()
+                .rect
+        };
+        let music_x = |output: egui::FullOutput| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Music" => Some(text.pos.x),
+                _ => None,
+            })
+        };
+        h.size = egui::vec2(658., 640.);
+        h.settle();
+        let inline_x = music_x(h.frame(vec![])).unwrap();
+        let inline_width = search(&h).width();
+        h.size.x = 654.;
+        h.frame(vec![]);
+        let shrinking = h.frame(vec![]);
+        assert!(music_x(shrinking).unwrap() > inline_x);
+        let moving_width = search(&h).width();
+        h.settle();
+        let menu_width = search(&h).width();
+        assert!(inline_width < moving_width && moving_width < menu_width);
+        assert!(music_x(h.frame(vec![])).is_none());
+        h.size.x = 658.;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(inline_width < search(&h).width() && search(&h).width() < menu_width);
+        h.app.shutdown_core().unwrap();
+    }
+
+    #[test]
+    fn playlist_heading_shrinks_then_collapses_in_short_windows() {
+        let mut h = Harness::new();
+        let heading = |frame: egui::FullOutput| {
+            frame.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Midnight frequencies" => {
+                    Some(text.visual_bounding_rect().height())
+                }
+                _ => None,
+            })
+        };
+        let search_top = |h: &Harness| {
+            h.ctx
+                .read_response(egui::Id::new("track-search"))
+                .unwrap()
+                .rect
+                .top()
+        };
+        h.size.y = 601.;
+        h.settle();
+        let full = heading(h.frame(vec![])).unwrap();
+        h.size.y = 599.;
+        h.frame(vec![]);
+        let shrinking = heading(h.frame(vec![])).unwrap();
+        h.settle();
+        let compact = heading(h.frame(vec![])).unwrap();
+        assert!(compact < shrinking && shrinking < full);
+
+        h.size.y = 351.;
+        h.settle();
+        let before = search_top(&h);
+        h.size.y = 349.;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let collapsing = search_top(&h);
+        h.settle();
+        let collapsed = search_top(&h);
+        assert!(
+            collapsed < collapsing && collapsing < before,
+            "{before} -> {collapsing} -> {collapsed}"
+        );
+        assert!(heading(h.frame(vec![])).is_none());
+        h.size.y = 351.;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(collapsed < search_top(&h) && search_top(&h) < before);
+        h.app.shutdown_core().unwrap();
+    }
+
+    #[test]
     fn play_all_starts_the_playlist_when_the_search_has_no_results() {
         let mut h = Harness::new();
         h.size.y = 620.;
+        h.settle();
         let count = h.app.playlist_tracks(0).len();
         h.app.search = "nothing matches this".into();
         h.frame(vec![]);
@@ -695,6 +957,7 @@ mod interaction_tests {
     fn playlist_pin_is_last_in_the_menu_after_the_sort_control() {
         let mut h = Harness::new();
         h.size.y = 620.;
+        h.settle();
         let render = |h: &mut Harness| {
             h.time += 0.02;
             let mut output = h.ctx.run_ui(
@@ -770,38 +1033,48 @@ mod interaction_tests {
     fn sidebar_search_reveals_all_chats_then_restores_pinned_chats() {
         let mut h = Harness::new();
         h.app.pane = WorkspacePane::Library;
-        let chat = |output: &egui::FullOutput, title| {
+        h.settle();
+        let title_bounds = |output: &egui::FullOutput, title| {
             output.shapes.iter().find_map(|shape| match &shape.shape {
                 egui::Shape::Text(text) if text.galley.text() == title => {
-                    Some((text.pos.y, text.fallback_color.a()))
+                    Some((text.visual_bounding_rect(), shape.clip_rect))
                 }
                 _ => None,
             })
         };
+        let visible_height = |output: &egui::FullOutput, title| {
+            title_bounds(output, title)
+                .map_or(0., |(text, clip)| text.intersect(clip).height().max(0.))
+        };
         let pinned = h.frame(vec![]);
-        assert!(chat(&pinned, "Saved Messages").is_none());
+        assert_eq!(visible_height(&pinned, "Saved Messages"), 0.);
 
         let search = h.ctx.read_response(egui::Id::new("chat-search")).unwrap();
         h.click(search.rect.center());
-        let (enter_y, enter_opacity) = chat(&h.frame(vec![]), "Saved Messages").unwrap();
+        let dropping = h.frame(vec![]);
+        let first = title_bounds(&dropping, "Midnight frequencies").unwrap().0;
+        assert_eq!(visible_height(&dropping, "Electronic archive"), 0.);
         h.settle();
-        let (rest_y, rest_opacity) = chat(&h.frame(vec![]), "Saved Messages").unwrap();
-        assert!(
-            enter_y > rest_y && enter_opacity < rest_opacity,
-            "enter ({enter_y}, {enter_opacity}), rest ({rest_y}, {rest_opacity})"
-        );
+        h.frame(vec![]);
+        let all = h.frame(vec![]);
+        let landed = title_bounds(&all, "Midnight frequencies").unwrap().0;
+        assert!(first.center().y < landed.center().y && first.width() < landed.width());
+        assert!(visible_height(&all, "Saved Messages") > 0.);
+        let archive = visible_height(&all, "Electronic archive");
+        assert!(archive > 0.);
+        let filtered = h.frame(vec![egui::Event::Text("Electronic".into())]);
+        assert_eq!(visible_height(&filtered, "Electronic archive"), archive);
 
         h.key(egui::Key::Escape);
         let pinned_again = h.frame(vec![]);
-        let (exit_y, exit_opacity) = chat(&pinned_again, "Jazz & coffee").unwrap();
+        assert_eq!(visible_height(&pinned_again, "Saved Messages"), 0.);
+        let falling_pin = title_bounds(&pinned_again, "Jazz & coffee").unwrap().0;
         h.settle();
         let settled = h.frame(vec![]);
-        let (rest_y, rest_opacity) = chat(&settled, "Jazz & coffee").unwrap();
-        assert!(
-            exit_y > rest_y && exit_opacity < rest_opacity,
-            "exit ({exit_y}, {exit_opacity}), rest ({rest_y}, {rest_opacity})"
-        );
-        assert!(chat(&settled, "Saved Messages").is_none());
+        let settled_pin = title_bounds(&settled, "Jazz & coffee").unwrap().0;
+        assert!(settled_pin.center().y > falling_pin.center().y);
+        assert!(settled_pin.width() > falling_pin.width());
+        assert_eq!(visible_height(&settled, "Electronic archive"), 0.);
         h.app.shutdown_core().unwrap();
     }
 
