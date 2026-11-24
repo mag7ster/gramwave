@@ -2373,5 +2373,4 @@ impl App {
 }
 
 #[cfg(test)]
-#[path = "screens/tests.rs"]
 mod tests;

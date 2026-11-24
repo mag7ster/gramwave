@@ -9,7 +9,7 @@ Gramwave is a read-only Telegram music player for Linux, built with Rust 2021 an
 - `src/application/`: desktop presentation controller, control surfaces, and effect execution.
 - `src/adapters/`: TDLib, SQLite, mpv, streaming, offline storage, and desktop integrations.
 - `src/screens.rs`, `src/ui.rs`, `src/design.rs`: interface and styling.
-- `tests/`: integration tests; unit tests usually live beside modules in `tests.rs`.
+- `tests/`: desktop integration tests and workspace architecture checks.
 - `assets/`: SVG icons, desktop entry, and gettext catalogs. `scripts/` contains translation updates and smoke checks.
 
 Read `ARCHITECTURE.md` before changing layer boundaries or persistence.
@@ -29,9 +29,13 @@ Use rustfmt defaults, including four-space indentation. Use `snake_case` for mod
 
 ## Testing Guidelines
 
-Use Rust's built-in `#[test]` framework with descriptive `snake_case` names. Default tests cover queue behavior, headless UI, parsing, and temporary SQLite stores. Add regression coverage for behavioral changes; no numeric coverage threshold is configured.
+Add or extend an automated test when it catches a meaningful failure that existing tests miss. Prioritize queue order and history, session restoration, SQLite data and migrations, cancellation and stale results, and Telegram's read-only behavior. For a reproducible bug, show that the regression test fails before the fix when practical. There is no numeric coverage target.
 
-Run native checks with `cargo test --workspace --locked --features native-tests --lib -- --test-threads=1`; these require libmpv, TDLib, and loopback sockets. UI changes should include demo screenshots in light/dark themes. Authenticated playback needs manual verification.
+Use the narrowest test that can reproduce the failure through the relevant entry point. Keep unit and headless UI tests in a `#[cfg(test)]` module beside the code, using `tests.rs` and topic modules when the suite grows. Put integration tests that exercise package interfaces in that package's `tests/`. Name tests in `snake_case` for the behavior they protect and assert the observable outcome.
+
+Automate UI behavior that matters to users, such as keyboard access, queue interactions, seeking, and controls remaining usable during resize. Check cosmetic changes such as spacing, opacity, and animation motion in the demo. UI changes should include demo screenshots in light and dark themes.
+
+Run native checks with `cargo test --workspace --locked --features native-tests --lib -- --test-threads=1`. These require libmpv, TDLib, and loopback sockets. Run `scripts/check-control.py` and `scripts/check-mpris.py` for desktop integration in a graphical D-Bus session. Authenticated playback needs manual verification. See [Verification](ARCHITECTURE.md#verification) for the full command matrix.
 
 ## Commit & Pull Request Guidelines
 
