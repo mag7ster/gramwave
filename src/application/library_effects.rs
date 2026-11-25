@@ -1,6 +1,6 @@
 //! Execute library effects with native services; decisions live in LibraryCore.
 use crate::{App, Event, RetryAction};
-use tg_player_application::{
+use gramwave_application::{
     core::LibraryPatch,
     library::{LibraryEffect, LibraryEvent, LibraryRetry},
     tasks::JobClass,

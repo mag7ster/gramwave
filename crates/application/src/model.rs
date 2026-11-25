@@ -1,5 +1,5 @@
+pub use gramwave_domain::{MediaKind, QueueEntryId, TrackId};
 use serde::{Deserialize, Serialize};
-pub use tg_player_domain::{MediaKind, QueueEntryId, TrackId};
 impl Track {
     pub fn id(&self) -> TrackId {
         TrackId {
@@ -142,8 +142,8 @@ pub struct State {
     pub last_opened_chat: Option<i64>,
     pub startup_playlist: StartupPlaylist,
     pub last_played_chat: Option<i64>,
-    pub session: tg_player_domain::playback::Session,
-    pub repeat: tg_player_domain::playback::RepeatMode,
+    pub session: gramwave_domain::playback::Session,
+    pub repeat: gramwave_domain::playback::RepeatMode,
     pub shuffle: bool,
     pub volume: f32,
     pub unmuted_volume: f32,
@@ -236,7 +236,7 @@ pub fn default_filters() -> [bool; 3] {
 #[path = "model/tests.rs"]
 mod tests;
 
-impl From<Track> for tg_player_domain::TrackMetadata {
+impl From<Track> for gramwave_domain::TrackMetadata {
     fn from(t: Track) -> Self {
         Self {
             chat: t.chat,
@@ -248,8 +248,8 @@ impl From<Track> for tg_player_domain::TrackMetadata {
         }
     }
 }
-impl From<tg_player_domain::QueueEntry> for Track {
-    fn from(entry: tg_player_domain::QueueEntry) -> Self {
+impl From<gramwave_domain::QueueEntry> for Track {
+    fn from(entry: gramwave_domain::QueueEntry) -> Self {
         Self {
             entry_id: entry.entry_id,
             chat: entry.track.chat,
@@ -262,8 +262,8 @@ impl From<tg_player_domain::QueueEntry> for Track {
         }
     }
 }
-impl From<&tg_player_domain::QueueEntry> for Track {
-    fn from(entry: &tg_player_domain::QueueEntry) -> Self {
+impl From<&gramwave_domain::QueueEntry> for Track {
+    fn from(entry: &gramwave_domain::QueueEntry) -> Self {
         entry.clone().into()
     }
 }

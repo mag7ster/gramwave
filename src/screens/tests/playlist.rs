@@ -31,7 +31,7 @@ fn playlist_heading_wraps_at_word_boundaries() {
     let title = "Evening piano improvisations from the mountain studio";
     let mut state = h.app.state.view().clone();
     state.playlists[0].title = title.into();
-    h.app.state = tg_player_application::AppCore::new(state);
+    h.app.state = gramwave_application::AppCore::new(state);
     let mut output = h.ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, h.size)),
@@ -78,11 +78,11 @@ fn playlist_status_follows_the_last_visible_title_row() {
     ] {
         let mut state = h.app.state.view().clone();
         state.playlists[0].title = title.clone();
-        state.playlists[0].emoji_status = Some(tg_player_application::model::EmojiStatus {
+        state.playlists[0].emoji_status = Some(gramwave_application::model::EmojiStatus {
             id: crate::adapters::emoji::DEMO_ID,
             expires_at: 0,
         });
-        h.app.state = tg_player_application::AppCore::new(state);
+        h.app.state = gramwave_application::AppCore::new(state);
         h.time += 0.1;
         let mut output = h.ctx.run_ui(
             egui::RawInput {
@@ -499,7 +499,7 @@ fn warmed_playlist_covers_are_painted_after_scrolling_in_both_directions() {
 
 #[test]
 fn removing_track_selected_and_all_downloads_preserves_cover_and_cache_schedule() {
-    use tg_player_application::{telegram::AuthorizationState, workflow::AppEvent};
+    use gramwave_application::{telegram::AuthorizationState, workflow::AppEvent};
 
     for removal in ["track", "selected", "all"] {
         let mut h = Harness::new();

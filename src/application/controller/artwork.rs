@@ -1,8 +1,8 @@
 use super::{DesktopApp, PlaylistCacheKey, Track};
 use crate::screens::{artwork_image, TRACK_ARTWORK_SIZE};
 use eframe::egui;
+use gramwave_application::library::LibraryCommand;
 use std::{ops::Range, sync::Arc, time::Instant};
-use tg_player_application::library::LibraryCommand;
 
 const NEARBY_ROWS: usize = 30;
 const SCAN_BATCH: usize = 64;
@@ -169,12 +169,12 @@ impl DesktopApp {
 mod tests {
     use super::*;
     use crate::adapters::telegram::Telegram;
-    use serde_json::json;
-    use std::{thread, time::Duration};
-    use tg_player_application::{
+    use gramwave_application::{
         model::{Playlist, State},
         AppCore,
     };
+    use serde_json::json;
+    use std::{thread, time::Duration};
 
     #[test]
     fn prefetch_prioritizes_a_jump_and_finishes_the_open_playlist() {
@@ -186,7 +186,7 @@ mod tests {
                 filters: [true; 3],
                 done: [true; 3],
                 tracks: (1..=TRACKS)
-                    .map(|message| tg_player_application::model::Track {
+                    .map(|message| gramwave_application::model::Track {
                         chat: 42,
                         message,
                         ..Default::default()

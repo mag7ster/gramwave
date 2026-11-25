@@ -34,7 +34,7 @@ impl App {
         &self,
         snapshot: crate::application::ports::PlayerSnapshot,
     ) -> Option<f64> {
-        use tg_player_application::playback::PlaybackState;
+        use gramwave_application::playback::PlaybackState;
         let position_ms = self.state.view().session.position_ms();
         let loaded = matches!(
             self.state.playback().state(),
@@ -46,14 +46,14 @@ impl App {
     fn process_player_events(&mut self) {
         let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
         for event in events {
-            if event == tg_player_application::ports::PlaybackEvent::Loaded {
+            if event == gramwave_application::ports::PlaybackEvent::Loaded {
                 if let Some((id, path)) = self.local_playback.take() {
                     self.core_event(
-                        tg_player_application::workflow::AppEvent::LocalPlaybackUsed { id, path },
+                        gramwave_application::workflow::AppEvent::LocalPlaybackUsed { id, path },
                     );
                 }
             }
-            self.core_event(tg_player_application::workflow::AppEvent::Player(event));
+            self.core_event(gramwave_application::workflow::AppEvent::Player(event));
         }
     }
 
@@ -194,8 +194,7 @@ impl App {
                     });
             });
         if changed {
-            let mut settings =
-                tg_player_application::persistence::Settings::from(self.state.view());
+            let mut settings = gramwave_application::persistence::Settings::from(self.state.view());
             settings.light = light;
             settings.filters = filters;
             settings.cache_policy = cache_policy;
@@ -550,7 +549,7 @@ impl App {
                         self.options
                             .screenshot
                             .clone()
-                            .unwrap_or_else(|| "/tmp/tg-player-preview.png".into()),
+                            .unwrap_or_else(|| "/tmp/gramwave-preview.png".into()),
                         &bytes,
                         image.width() as u32,
                         image.height() as u32,

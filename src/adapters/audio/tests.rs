@@ -246,11 +246,11 @@ fn slow_property_source_does_not_hold_snapshot_mutex() {
 fn player_port_reports_invalid_commands_and_a_closed_worker() {
     use super::Player;
     use crate::application::ports::{PlayerBackend, PlayerCommand};
+    use gramwave_application::AppError;
     use std::sync::{
         atomic::{AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     };
-    use tg_player_application::AppError;
     let (sender, commands) = mpsc::channel();
     let (_, events) = mpsc::channel();
     let mut player = Player {

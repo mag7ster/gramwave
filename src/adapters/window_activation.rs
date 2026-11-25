@@ -15,9 +15,9 @@ use winit::window::Window;
 
 pub(crate) fn app_id(demo: bool) -> &'static str {
     if demo {
-        "tgplayer-demo"
+        "gramwave-demo"
     } else {
-        "tgplayer"
+        "gramwave"
     }
 }
 

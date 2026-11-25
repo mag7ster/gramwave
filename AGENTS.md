@@ -43,4 +43,4 @@ History uses imperative, capitalized subjects such as “Fix…” or “Add…�
 
 ## Security & Configuration
 
-Never commit credentials, sessions, SQLite databases, or cached media. Account data lives under `$XDG_DATA_HOME/tg-player`. Preserve read-only Telegram behavior and loopback-only streaming.
+Never commit credentials, sessions, SQLite databases, or cached media. Account data lives under `$XDG_DATA_HOME/gramwave`. Preserve read-only Telegram behavior and loopback-only streaming.

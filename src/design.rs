@@ -1,11 +1,11 @@
 use eframe::egui;
 fastframe_icons::icons! {
  pub enum Icon {
-prefix:"tgplayer-",directory:"../assets/",Play=>lucide "play",Pause=>lucide "pause",Next => "next",Previous => "previous",More=>lucide "ellipsis",Download => "download",Trash=>lucide "trash-2",Queue => "queue",Settings=>lucide "settings",Search=>lucide "search",Close=>lucide "x",Shuffle => "shuffle",Repeat => "repeat",Volume=>lucide "volume-2",Muted=>lucide "volume-x",Minimize=>lucide "minus",Maximize=>lucide "square",Restore=>lucide "copy"}
+prefix:"gramwave-",directory:"../assets/",Play=>lucide "play",Pause=>lucide "pause",Next => "next",Previous => "previous",More=>lucide "ellipsis",Download => "download",Trash=>lucide "trash-2",Queue => "queue",Settings=>lucide "settings",Search=>lucide "search",Close=>lucide "x",Shuffle => "shuffle",Repeat => "repeat",Volume=>lucide "volume-2",Muted=>lucide "volume-x",Minimize=>lucide "minus",Maximize=>lucide "square",Restore=>lucide "copy"}
 }
 pub const ROW_HEIGHT: f32 = 60.;
 pub const HEADER_HEIGHT: f32 = 44.;
-pub const APP_ICON: &[u8] = include_bytes!("../assets/tgplayer.svg");
+pub const APP_ICON: &[u8] = include_bytes!("../assets/gramwave.svg");
 pub const GREEN: egui::Color32 = egui::Color32::from_rgb(82, 214, 154);
 pub struct Palette {
     pub background: egui::Color32,

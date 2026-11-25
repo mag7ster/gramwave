@@ -2,16 +2,16 @@ use crate::{
     adapters::{media_loader, telegram::Telegram},
     model::Track,
 };
+use gramwave_application::{
+    ports::{OfflinePublication, OfflineStorage},
+    telegram::{GatewayFuture, TelegramFile, TelegramGateway},
+    AppError,
+};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
-};
-use tg_player_application::{
-    ports::{OfflinePublication, OfflineStorage},
-    telegram::{GatewayFuture, TelegramFile, TelegramGateway},
-    AppError,
 };
 use tokio_util::sync::CancellationToken;
 #[derive(Default)]
@@ -52,7 +52,7 @@ pub(crate) async fn download(
     generation: u64,
     progress: &Progress,
     cancel: &CancellationToken,
-) -> Result<tg_player_application::offline::PublishedFile, AppError> {
+) -> Result<gramwave_application::offline::PublishedFile, AppError> {
     let t = media_loader::resolve_async(downloader, track, cancel).await?;
     tokio::fs::create_dir_all(dir)
         .await
@@ -91,17 +91,14 @@ pub(crate) async fn download(
             cancel,
         )
         .await?;
-    Ok(tg_player_application::offline::PublishedFile {
+    Ok(gramwave_application::offline::PublishedFile {
         path,
         size: file.size,
         remote_id,
     })
 }
 
-pub(crate) fn recover_metadata(
-    root: &Path,
-    data: &mut tg_player_application::offline::OfflineData,
-) {
+pub(crate) fn recover_metadata(root: &Path, data: &mut gramwave_application::offline::OfflineData) {
     let Ok(root) = root.canonicalize() else {
         return;
     };
@@ -124,7 +121,7 @@ pub(crate) fn recover_metadata(
                 copy.last_used = [metadata.accessed(), metadata.modified()]
                     .into_iter()
                     .filter_map(Result::ok)
-                    .map(tg_player_application::offline::unix_seconds)
+                    .map(gramwave_application::offline::unix_seconds)
                     .max()
                     .unwrap_or_default();
             }
@@ -134,7 +131,7 @@ pub(crate) fn recover_metadata(
 
 pub(crate) async fn release_temporary_copy(
     tg: &Telegram,
-    copy: &tg_player_application::offline::OfflineCopy,
+    copy: &gramwave_application::offline::OfflineCopy,
     root: &Path,
 ) -> Result<(), AppError> {
     use serde_json::json;
@@ -242,7 +239,7 @@ fn same_audio(root: &Path, local: &str, source: &str) -> std::io::Result<bool> {
 
 async fn wait_for_download(
     downloader: &Telegram,
-    track: &tg_player_application::media::MediaTrack,
+    track: &gramwave_application::media::MediaTrack,
     generation: u64,
     progress: &Progress,
     cancel: &CancellationToken,
@@ -408,7 +405,7 @@ mod tests {
             }
             _ => panic!("Unexpected request {request}"),
         });
-        let copy = tg_player_application::offline::OfflineCopy {
+        let copy = gramwave_application::offline::OfflineCopy {
             track: Track {
                 chat: 1,
                 message: 2,
@@ -553,7 +550,7 @@ mod tests {
         let tg = Telegram::mock_rpc(
             |_| json!({"@type":"file","id":90,"size":5,"local":{"downloaded_size":1}}),
         );
-        let track = tg_player_application::media::MediaTrack {
+        let track = gramwave_application::media::MediaTrack {
             file: 90,
             ..Default::default()
         };

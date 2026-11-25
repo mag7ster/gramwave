@@ -1,8 +1,8 @@
 mod common;
 use common::TempDir;
-use tg_player::adapters::storage::Store;
-use tg_player_application::model::{Playlist, State, Track};
-use tg_player_application::{
+use gramwave::adapters::storage::Store;
+use gramwave_application::model::{Playlist, State, Track};
+use gramwave_application::{
     commands::AppCommand, persistence::ChangeSet, workflow::Effect, AppCore,
 };
 // Snapshot input only constructs migration fixtures; the production port accepts ChangeSet.
@@ -12,12 +12,12 @@ trait FixtureSave {
 }
 impl FixtureSave for Store {
     fn save_volume(&self, volume: f32, unmuted: f32) -> Result<(), String> {
-        let settings = tg_player_application::persistence::Settings {
+        let settings = gramwave_application::persistence::Settings {
             volume,
             unmuted_volume: unmuted,
             ..Default::default()
         };
-        self.apply(tg_player_application::persistence::ChangeSet {
+        self.apply(gramwave_application::persistence::ChangeSet {
             settings: Some(settings),
             ..Default::default()
         })
@@ -26,7 +26,7 @@ impl FixtureSave for Store {
         for p in &mut state.playlists {
             p.ensure_entry_ids();
         }
-        self.apply(tg_player_application::persistence::ChangeSet::between(
+        self.apply(gramwave_application::persistence::ChangeSet::between(
             None, &state,
         ))
     }
@@ -88,7 +88,7 @@ fn repeated_chat_ids_in_saved_library_order_load_once() {
 
 #[test]
 fn old_channel_direct_messages_stay_in_storage_but_out_of_chat_search() {
-    use tg_player_application::model::PersonalChat;
+    use gramwave_application::model::PersonalChat;
     const DIRECT_MESSAGES: i64 = -2_100_000_000_000;
     let dir = TempDir::new();
     let path = dir.path().join("db");
@@ -159,7 +159,7 @@ fn recent_chat_edits_survive_sqlite_restart() {
 }
 #[test]
 fn queue_jump_backwards_and_forwards_survive_sqlite_restart() {
-    use tg_player::domain::RepeatMode;
+    use gramwave::domain::RepeatMode;
     let dir = TempDir::new();
     let path = dir.path().join("db");
     let (mut store, mut state) = Store::open(&path).unwrap();
@@ -209,7 +209,7 @@ fn migration_is_repeatable_preserves_duplicates_history_and_source() {
         message: 100,
         ..Default::default()
     };
-    let mut state = tg_player_application::legacy::LegacyImport {
+    let mut state = gramwave_application::legacy::LegacyImport {
         queue_version: 2,
         ..Default::default()
     };
@@ -365,7 +365,7 @@ fn backup_includes_wal_and_legacy_offline_paths_and_is_not_overwritten() {
     assert_eq!(state.volume, 32.);
     assert_eq!(state.session.current().unwrap().entry_id.0, 9);
     assert_eq!(
-        store.offline().path(tg_player::domain::TrackId {
+        store.offline().path(gramwave::domain::TrackId {
             chat: 42,
             message: 7
         }),
@@ -402,7 +402,7 @@ fn corrupt_and_newer_databases_never_become_empty_libraries() {
 }
 #[test]
 fn session_deltas_do_not_touch_library_or_offline_jobs() {
-    use tg_player_application::{commands::AppCommand, workflow::Effect, AppCore};
+    use gramwave_application::{commands::AppCommand, workflow::Effect, AppCore};
     let dir = TempDir::new();
     let path = dir.path().join("db");
     let (store, state) = Store::open(&path).unwrap();
@@ -473,7 +473,7 @@ fn library_occurrence_ids_and_order_survive_reorder_of_duplicates() {
 
 #[test]
 fn deletion_jobs_survive_restart_without_removing_a_new_copy() {
-    use tg_player_application::{offline::OfflineCore, persistence::ChangeSet};
+    use gramwave_application::{offline::OfflineCore, persistence::ChangeSet};
     let dir = TempDir::new();
     let path = dir.path().join("db");
     let (mut store, _) = Store::open(&path).unwrap();
@@ -520,7 +520,7 @@ fn deletion_jobs_survive_restart_without_removing_a_new_copy() {
 
 #[test]
 fn offline_page_jobs_and_cursor_roll_back_and_retry_together() {
-    use tg_player_application::{offline::OfflineCore, persistence::ChangeSet};
+    use gramwave_application::{offline::OfflineCore, persistence::ChangeSet};
     let dir = TempDir::new();
     let path = dir.path().join("db");
     let (mut store, _) = Store::open(&path).unwrap();
@@ -571,7 +571,7 @@ fn offline_page_jobs_and_cursor_roll_back_and_retry_together() {
 
 #[test]
 fn one_completion_touches_only_two_records_in_large_backlog() {
-    use tg_player_application::{
+    use gramwave_application::{
         offline::{OfflineCore, OfflineData},
         persistence::ChangeSet,
     };
@@ -634,7 +634,7 @@ fn one_completion_touches_only_two_records_in_large_backlog() {
 
 #[test]
 fn v3_migration_backs_up_wal_and_retries_without_losing_offline_state() {
-    use tg_player_application::offline::OfflineCore;
+    use gramwave_application::offline::OfflineCore;
     let dir = TempDir::new();
     let path = dir.path().join("db");
     let (mut store, mut expected) = Store::open(&path).unwrap();
@@ -672,7 +672,7 @@ fn v3_migration_backs_up_wal_and_retries_without_losing_offline_state() {
             ..Default::default()
         }],
     );
-    core.exclude(tg_player::domain::TrackId {
+    core.exclude(gramwave::domain::TrackId {
         chat: 42,
         message: 17,
     });
@@ -692,7 +692,7 @@ fn v3_migration_backs_up_wal_and_retries_without_losing_offline_state() {
         },
         "removing-file".into(),
     );
-    core.remove(tg_player::domain::TrackId {
+    core.remove(gramwave::domain::TrackId {
         chat: 42,
         message: 202,
     });
@@ -777,7 +777,7 @@ fn v3_migration_backs_up_wal_and_retries_without_losing_offline_state() {
 
 #[test]
 fn offline_enqueue_order_survives_restart_and_coalesced_requeue() {
-    use tg_player_application::{
+    use gramwave_application::{
         offline::{OfflineCore, OfflineData},
         persistence::ChangeSet,
     };
@@ -906,7 +906,7 @@ fn split_legacy_track_and_session_paths_survive_pure_metadata_migration() {
         CREATE TABLE library(id INTEGER PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE tracks(playlist INTEGER NOT NULL,position INTEGER NOT NULL,chat INTEGER NOT NULL,message INTEGER NOT NULL,value TEXT NOT NULL,PRIMARY KEY(playlist,position));")
         .unwrap();
-    let settings = tg_player_application::persistence::Settings {
+    let settings = gramwave_application::persistence::Settings {
         volume: 32.,
         api_id: "12345".into(),
         ..Default::default()
@@ -968,7 +968,7 @@ fn split_legacy_track_and_session_paths_survive_pure_metadata_migration() {
             (10, "/offline/document"),
         ] {
             assert_eq!(
-                data.path(tg_player::domain::TrackId { chat: 42, message }),
+                data.path(gramwave::domain::TrackId { chat: 42, message }),
                 Some(path)
             );
         }
@@ -1000,7 +1000,7 @@ fn split_legacy_track_and_session_paths_survive_pure_metadata_migration() {
 
 #[test]
 fn committed_cache_handoff_and_demoted_audio_survive_sqlite_restart() {
-    use tg_player_application::{
+    use gramwave_application::{
         offline::{OfflineCopy, OfflineData},
         persistence::ChangeSet,
         ports::Repository,

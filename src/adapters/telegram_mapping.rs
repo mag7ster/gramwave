@@ -1,6 +1,6 @@
+use gramwave_application::media::MediaTrack as Track;
+use gramwave_application::model::{Caption, CaptionEmoji, CaptionLink, EmojiStatus};
 use serde::Deserialize;
-use tg_player_application::media::MediaTrack as Track;
-use tg_player_application::model::{Caption, CaptionEmoji, CaptionLink, EmojiStatus};
 
 pub(super) fn telegram_int64(value: &serde_json::Value) -> Option<i64> {
     value
@@ -150,9 +150,9 @@ fn local_path(file: &serde_json::Value) -> Option<String> {
         .flatten()
 }
 
-use tg_player_application::telegram::TelegramFile;
+use gramwave_application::telegram::TelegramFile;
 #[cfg(any(feature = "telegram", test))]
-use tg_player_application::telegram::{AuthorizationState as AuthState, TelegramUpdate};
+use gramwave_application::telegram::{AuthorizationState as AuthState, TelegramUpdate};
 #[cfg(any(feature = "telegram", test))]
 pub(crate) fn auth_state(v: &serde_json::Value) -> AuthState {
     match v["@type"].as_str().unwrap_or("") {
@@ -204,8 +204,8 @@ struct RemoteFile {
 }
 
 impl FileReply {
-    pub(super) fn decode(v: &serde_json::Value) -> Result<Self, tg_player_application::AppError> {
-        let error = || tg_player_application::AppError::Protocol("Invalid Telegram file".into());
+    pub(super) fn decode(v: &serde_json::Value) -> Result<Self, gramwave_application::AppError> {
+        let error = || gramwave_application::AppError::Protocol("Invalid Telegram file".into());
         let file = Self::deserialize(v).map_err(|_| error())?;
         if file.id <= 0 {
             return Err(error());
@@ -230,8 +230,8 @@ impl FileReply {
 }
 fn personal_chat_list(
     list: &serde_json::Value,
-) -> Option<tg_player_application::telegram::PersonalChatList> {
-    use tg_player_application::telegram::PersonalChatList;
+) -> Option<gramwave_application::telegram::PersonalChatList> {
+    use gramwave_application::telegram::PersonalChatList;
     match list["@type"].as_str()? {
         "chatListMain" => Some(PersonalChatList::Main),
         "chatListArchive" => Some(PersonalChatList::Archive),
@@ -315,7 +315,7 @@ mod tests {
     use super::*;
     fn apply_message_deletions(state: &mut crate::model::State, value: &serde_json::Value) {
         let mut app = crate::App::new_at(std::path::PathBuf::new(), true);
-        app.state = tg_player_application::AppCore::new(std::mem::take(state));
+        app.state = gramwave_application::AppCore::new(std::mem::take(state));
         let (tx, rx) = std::sync::mpsc::channel();
         app.updates = Some(rx);
         tx.send(super::update(value.clone()).unwrap()).unwrap();

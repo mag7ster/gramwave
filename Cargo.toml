@@ -1,5 +1,5 @@
 [package]
-name = "tg-player"
+name = "gramwave"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -17,8 +17,8 @@ telegram = ["dep:tdlib-rs"]
 vulkan = ["eframe/wgpu_no_default_features", "dep:wgpu"]
 
 [dependencies]
-tg-player-domain = { path = "crates/domain" }
-tg-player-application = { path = "crates/application" }
+gramwave-domain = { path = "crates/domain" }
+gramwave-application = { path = "crates/application" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "fs", "io-util", "macros", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

@@ -1,5 +1,5 @@
 use crate::tr;
-use tg_player_application::notice::Notice;
+use gramwave_application::notice::Notice;
 
 pub(crate) fn notice_text(notice: Notice) -> String {
     match notice {

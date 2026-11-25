@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
-use tg_player_domain::TrackId;
+use gramwave_domain::TrackId;
 
 pub enum LibraryCommand {
     Connected(u64),

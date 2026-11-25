@@ -29,7 +29,7 @@ fn workspace_enforces_dependency_direction_and_screens_have_no_io() {
         "rusqlite",
         "tdlib-rs",
         "libloading",
-        "tg-player-application",
+        "gramwave-application",
     ] {
         assert!(!domain.contains(forbidden), "domain depends on {forbidden}");
     }

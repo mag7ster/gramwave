@@ -60,8 +60,7 @@ mod regression {
         {
             let t = &restored.playlists[0].tracks[0];
             assert_eq!((t.chat, t.message), (42, 100));
-            let media =
-                tg_player_application::AppCore::new(restored.clone()).media_track(t.clone());
+            let media = gramwave_application::AppCore::new(restored.clone()).media_track(t.clone());
             assert_eq!((media.file, media.image_file), (0, 0));
             assert!(media.cached.is_none());
         }
@@ -88,7 +87,7 @@ mod regression {
                 .unwrap_err();
             assert!(matches!(
                 error,
-                tg_player_application::AppError::Telegram { .. }
+                gramwave_application::AppError::Telegram { .. }
             ));
         }
     }
@@ -96,7 +95,7 @@ mod regression {
 
 #[test]
 fn async_resolution_preserves_telegram_codes_and_cancellation() {
-    use tg_player_application::AppError;
+    use gramwave_application::AppError;
     use tokio_util::sync::CancellationToken;
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let tg = Telegram::mock_rpc(|_| json!({"@type":"error","code":429,"message":"FLOOD_WAIT_3"}));

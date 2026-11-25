@@ -4,13 +4,13 @@ use crate::{
     tr, App, Event,
 };
 use eframe::egui;
+use gramwave_application::{
+    persistence::CachePolicy, playback::PlaybackState, tasks::JobClass,
+    telegram::AuthorizationState, AppError,
+};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
-};
-use tg_player_application::{
-    persistence::CachePolicy, playback::PlaybackState, tasks::JobClass,
-    telegram::AuthorizationState, AppError,
 };
 
 #[derive(Clone, Copy)]
@@ -725,12 +725,12 @@ pub(crate) fn cache_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::telegram::Telegram;
-    use serde_json::{json, Value};
-    use std::{cell::Cell, rc::Rc, sync::mpsc};
-    use tg_player_application::{
+    use gramwave_application::{
         ports::{PlaybackEvent, PlayerBackend, PlayerCommand, PlayerSnapshot},
         workflow::AppEvent,
     };
+    use serde_json::{json, Value};
+    use std::{cell::Cell, rc::Rc, sync::mpsc};
 
     struct Player(Rc<Cell<bool>>);
     impl PlayerBackend for Player {
@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn local_and_offline_playback_release_audio_cache_after_loading() {
-        use tg_player_application::commands::AppCommand;
+        use gramwave_application::commands::AppCommand;
         let (mut app, _, _) = setup(false);
         let track = app.state.view().playlists[0].tracks[0].clone();
         let loading = app.state.command(AppCommand::StartSession(vec![track], 0));

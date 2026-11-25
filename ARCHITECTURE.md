@@ -1,7 +1,7 @@
 # Gramwave architecture
 
-The Cargo workspace has three packages. `tg-player-domain` depends only on serde
-and rand. `tg-player-application` depends on domain and supplies commands, ports,
+The Cargo workspace has three packages. `gramwave-domain` depends only on serde
+and rand. `gramwave-application` depends on domain and supplies commands, ports,
 `AppCore`, explicit persistence records, download policies and the task scheduler.
 The desktop package supplies egui, native services and bootstrap. Domain cannot
 import application or desktop, and application cannot import desktop adapters.

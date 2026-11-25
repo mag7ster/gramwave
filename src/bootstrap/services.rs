@@ -5,8 +5,8 @@ use crate::{
     launch::LaunchOptions,
 };
 use fastframe_shell::Waker;
+use gramwave_application::{tasks::Scheduler, telegram::TelegramUpdate, AppCore};
 use std::{path::PathBuf, sync::mpsc};
-use tg_player_application::{tasks::Scheduler, telegram::TelegramUpdate, AppCore};
 
 pub(crate) struct Services {
     pub wake: Waker,
@@ -71,7 +71,7 @@ impl Services {
         let media = desktop.then(|| {
             let wake = wake.clone();
             fastframe_now_playing::NowPlaying::start(
-                fastframe_now_playing::App::new("tgplayer", "Gramwave"),
+                fastframe_now_playing::App::new("gramwave", "Gramwave"),
                 move || wake.wake(),
             )
         });
@@ -100,7 +100,7 @@ fn data_root() -> PathBuf {
         .unwrap_or_else(|| {
             PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")
         })
-        .join("tg-player")
+        .join("gramwave")
 }
 
 pub(crate) struct Connection {

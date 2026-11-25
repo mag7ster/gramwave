@@ -90,7 +90,7 @@ fn queue_harness(count: i64) -> Harness {
     h.app.set_queue_panel_open(true);
     h.app.execute(AppCommand::StartSession(
         (1..=count)
-            .map(|message| tg_player_application::model::Track {
+            .map(|message| gramwave_application::model::Track {
                 message,
                 title: format!("Track {message}"),
                 artist: "Artist".into(),

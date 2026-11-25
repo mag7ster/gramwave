@@ -1,10 +1,10 @@
 use crate::{adapters::telegram_mapping::track, model::Playlist, telegram::Telegram};
+use gramwave_application::{
+    library::ChatCatalog, media::MediaPlaylist, telegram::is_channel_direct_messages, AppError,
+};
 use serde_json::{json, Value};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use tg_player_application::{
-    library::ChatCatalog, media::MediaPlaylist, telegram::is_channel_direct_messages, AppError,
-};
 fn response(v: Value) -> Result<Value, AppError> {
     if v["@type"] == "error" {
         Err(AppError::Telegram {
@@ -53,7 +53,7 @@ pub(super) fn chat_response(
         .ok_or_else(|| AppError::Protocol("Invalid chat metadata".into()))
 }
 
-pub use tg_player_application::media::MediaPatch as Changes;
+pub use gramwave_application::media::MediaPatch as Changes;
 
 async fn refresh_async<F: std::future::Future<Output = Result<Value, AppError>>>(
     p: Playlist,
@@ -344,8 +344,8 @@ pub(crate) async fn offline_page(
     kind: usize,
     cursor: i64,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<tg_player_application::telegram::MediaPage, AppError> {
-    use tg_player_application::telegram::TelegramGateway;
+) -> Result<gramwave_application::telegram::MediaPage, AppError> {
+    use gramwave_application::telegram::TelegramGateway;
     let kind = match kind {
         0 => crate::domain::MediaKind::Audio,
         1 => crate::domain::MediaKind::Document,

@@ -1,6 +1,6 @@
 use super::{telegram::Telegram, telegram_mapping::telegram_int64};
+use gramwave_application::AppError;
 use serde_json::json;
-use tg_player_application::AppError;
 use tokio_util::sync::CancellationToken;
 
 fn username_uri(username: &str) -> Option<String> {

@@ -232,13 +232,13 @@ fn scrollbars_stay_outside_the_rows_and_menus() {
     state.playlists.extend((5..30).map(|id| crate::Playlist {
         id,
         title: format!("Chat {id}"),
-        personal: tg_player_application::model::PersonalChat {
+        personal: gramwave_application::model::PersonalChat {
             lists: [true, false],
             ..Default::default()
         },
         ..Default::default()
     }));
-    h.app.state = tg_player_application::AppCore::new(state);
+    h.app.state = gramwave_application::AppCore::new(state);
     h.app.chat_search_active = true;
     for width in [1240., 900.] {
         h.size.x = width;
@@ -420,7 +420,7 @@ fn recent_chats_follow_sidebar_search_and_can_be_removed_or_cleared() {
         ..Default::default()
     });
     state.recent_chats.push(99);
-    h.app.state = tg_player_application::AppCore::new(state);
+    h.app.state = gramwave_application::AppCore::new(state);
     let all = h.frame(vec![]);
     assert!(positions(&all, "Recent").is_empty());
     assert!(positions(&all, "Saved public channel").is_empty());

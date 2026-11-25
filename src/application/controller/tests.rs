@@ -13,19 +13,19 @@ fn playlist_search_resolves_the_selected_duplicate_occurrence() {
         (5, "Match document"),
     ]
     .into_iter()
-    .map(|(message, title)| tg_player_application::model::Track {
+    .map(|(message, title)| gramwave_application::model::Track {
         chat: 42,
         message,
         title: title.into(),
         kind: if message == 5 {
-            tg_player_domain::MediaKind::Document
+            gramwave_domain::MediaKind::Document
         } else {
-            tg_player_domain::MediaKind::Audio
+            gramwave_domain::MediaKind::Audio
         },
         ..Default::default()
     })
     .collect();
-    app.state = tg_player_application::AppCore::new(State {
+    app.state = gramwave_application::AppCore::new(State {
         playlists: vec![Playlist {
             id: 42,
             tracks,
@@ -86,7 +86,7 @@ fn ui_commands_use_injected_player_without_system_services() {
         fn command(
             &self,
             command: crate::application::ports::PlayerCommand,
-        ) -> Result<(), tg_player_application::AppError> {
+        ) -> Result<(), gramwave_application::AppError> {
             self.0.borrow_mut().push(command);
             Ok(())
         }
@@ -117,10 +117,10 @@ fn shutdown_applies_completed_publications_before_its_final_flush() {
     struct Finishing {
         tx: mpsc::Sender<Event>,
         id: crate::domain::TrackId,
-        request: tg_player_application::tasks::RequestId,
+        request: gramwave_application::tasks::RequestId,
     }
     impl PlayerBackend for Finishing {
-        fn command(&self, _: PlayerCommand) -> Result<(), tg_player_application::AppError> {
+        fn command(&self, _: PlayerCommand) -> Result<(), gramwave_application::AppError> {
             Ok(())
         }
         fn drain(&self) -> Vec<PlaybackEvent> {
@@ -129,10 +129,10 @@ fn shutdown_applies_completed_publications_before_its_final_flush() {
         fn snapshot(&self) -> PlayerSnapshot {
             Default::default()
         }
-        fn shutdown(&mut self, _: Duration) -> Result<(), tg_player_application::AppError> {
+        fn shutdown(&mut self, _: Duration) -> Result<(), gramwave_application::AppError> {
             self.tx
                 .send(Event::Application(
-                    tg_player_application::workflow::AppEvent::OfflineDownloaded {
+                    gramwave_application::workflow::AppEvent::OfflineDownloaded {
                         request: self.request,
                         id: self.id,
                         result: Ok("ready-file".into()),
@@ -151,7 +151,7 @@ fn shutdown_applies_completed_publications_before_its_final_flush() {
         .pump(std::time::Instant::now(), true)
         .into_iter()
         .find_map(|effect| match effect {
-            tg_player_application::workflow::Effect::DownloadOffline { operation, .. } => {
+            gramwave_application::workflow::Effect::DownloadOffline { operation, .. } => {
                 Some(operation.key())
             }
             _ => None,
@@ -176,7 +176,7 @@ fn shutdown_roundtrips_queue_and_position_even_without_replaying_after_restart()
     };
     struct Sample;
     impl PlayerBackend for Sample {
-        fn command(&self, _: PlayerCommand) -> Result<(), tg_player_application::AppError> {
+        fn command(&self, _: PlayerCommand) -> Result<(), gramwave_application::AppError> {
             Ok(())
         }
         fn drain(&self) -> Vec<PlaybackEvent> {
@@ -223,7 +223,7 @@ fn shutdown_roundtrips_queue_and_position_even_without_replaying_after_restart()
 #[test]
 fn remembers_the_opened_playlist_independently_of_the_playing_queue() {
     use crate::{adapters::storage::Store, application::control::Request, bootstrap::Services};
-    use tg_player_application::persistence::ChangeSet;
+    use gramwave_application::persistence::ChangeSet;
 
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("library.sqlite");

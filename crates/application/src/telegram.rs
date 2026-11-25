@@ -2,8 +2,8 @@ use crate::{
     error::AppError,
     media::{MediaPlaylist, MediaTrack},
 };
+use gramwave_domain::{MediaKind, TrackId};
 use std::{future::Future, pin::Pin};
-use tg_player_domain::{MediaKind, TrackId};
 use tokio_util::sync::CancellationToken;
 pub type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, AppError>> + Send + 'a>>;
 #[derive(Clone, Debug, Default, PartialEq)]

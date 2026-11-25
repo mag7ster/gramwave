@@ -25,7 +25,7 @@ pub enum Effect {
         operation: Operation,
         path: String,
     },
-    OfflineFailed(tg_player_domain::TrackId, AppError),
+    OfflineFailed(gramwave_domain::TrackId, AppError),
     Authenticate {
         operation: Operation,
         request: crate::telegram::AuthRequest,
@@ -62,15 +62,15 @@ pub enum AppEvent {
     },
     OfflineDownloaded {
         request: RequestId,
-        id: tg_player_domain::TrackId,
+        id: gramwave_domain::TrackId,
         result: Result<crate::offline::PublishedFile, AppError>,
     },
     OfflineHandoffFinished {
-        id: tg_player_domain::TrackId,
+        id: gramwave_domain::TrackId,
         path: String,
     },
     LocalPlaybackUsed {
-        id: tg_player_domain::TrackId,
+        id: gramwave_domain::TrackId,
         path: String,
     },
     OfflineRemoved {
@@ -114,7 +114,7 @@ impl AppCore {
         self.library.cancel_operations();
     }
 
-    pub(crate) fn offline_source_changed(&mut self, id: tg_player_domain::TrackId) {
+    pub(crate) fn offline_source_changed(&mut self, id: gramwave_domain::TrackId) {
         self.invalidate_track(id);
         self.offline.cancel_attempt(id);
         self.offline.source_changed(id);
@@ -126,7 +126,7 @@ impl AppCore {
         &self.auth
     }
 
-    pub(crate) fn invalidate_track(&mut self, id: tg_player_domain::TrackId) {
+    pub(crate) fn invalidate_track(&mut self, id: gramwave_domain::TrackId) {
         self.library.invalidate_track(id);
     }
     pub fn playback(&self) -> &crate::playback::PlaybackCore {
@@ -572,7 +572,7 @@ impl AppCore {
             effects.push(Effect::Persist(Box::new(changes)));
         }
     }
-    pub(crate) fn revision(&self, id: tg_player_domain::TrackId) -> u64 {
+    pub(crate) fn revision(&self, id: gramwave_domain::TrackId) -> u64 {
         self.library.revision(id)
     }
 }

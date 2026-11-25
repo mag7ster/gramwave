@@ -1,4 +1,5 @@
 use crate::model::{Playlist, State};
+use gramwave_application::persistence::ChangeSet;
 use std::{
     collections::{HashSet, VecDeque},
     path::Path,
@@ -6,10 +7,9 @@ use std::{
     thread::JoinHandle,
     time::Duration,
 };
-use tg_player_application::persistence::ChangeSet;
 type Outcome = Result<(), String>;
 enum Request {
-    CommitBarrier(tokio::sync::oneshot::Sender<Result<(), tg_player_application::AppError>>),
+    CommitBarrier(tokio::sync::oneshot::Sender<Result<(), gramwave_application::AppError>>),
     Changes(Box<ChangeSet>),
     Flush(mpsc::Sender<Outcome>),
     Stop(mpsc::Sender<Outcome>),
@@ -27,7 +27,7 @@ struct Shared {
 pub struct Store {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
-    offline: tg_player_application::offline::OfflineData,
+    offline: gramwave_application::offline::OfflineData,
 }
 
 fn document(db: &rusqlite::Connection, key: &str, value: &impl serde::Serialize) -> Outcome {
@@ -133,7 +133,7 @@ fn backup(db: &rusqlite::Connection, path: &Path, target_version: u32) -> Outcom
 }
 fn write_offline(
     db: &rusqlite::Connection,
-    delta: &tg_player_application::offline::OfflineDelta,
+    delta: &gramwave_application::offline::OfflineDelta,
 ) -> Outcome {
     fn records<T: serde::Serialize>(
         db: &rusqlite::Connection,
@@ -203,7 +203,7 @@ fn write_offline(
 fn read_offline(
     db: &rusqlite::Connection,
     version: u32,
-) -> Result<tg_player_application::offline::OfflineData, String> {
+) -> Result<gramwave_application::offline::OfflineData, String> {
     fn rows<T: serde::de::DeserializeOwned>(
         db: &rusqlite::Connection,
         table: &str,
@@ -219,7 +219,7 @@ fn read_offline(
         })
         .collect()
     }
-    Ok(tg_player_application::offline::OfflineData {
+    Ok(gramwave_application::offline::OfflineData {
         copies: rows(db, "offline_copies")?,
         removing: rows(db, "offline_removal_jobs")?,
         pending: rows(db, "offline_jobs")?,
@@ -359,7 +359,7 @@ impl Store {
                     Err(rusqlite::Error::QueryReturnedNoRows) => None,
                     Err(e) => return Err(e.to_string()),
                 };
-                let imported: tg_player_application::legacy::LegacyImport = match &original {
+                let imported: gramwave_application::legacy::LegacyImport = match &original {
                     Some(s) => serde_json::from_str(s)
                         .map_err(|e| format!("decode legacy library: {e}"))?,
                     None => Default::default(),
@@ -382,7 +382,7 @@ impl Store {
                 read_offline(&db, version)?
             } else {
                 let mut offline =
-                    tg_player_application::offline::OfflineCore::new(Default::default());
+                    gramwave_application::offline::OfflineCore::new(Default::default());
                 if let Ok(value) = read_document(&db, "offline") {
                     let tracks: Vec<crate::model::Track> = serde_json::from_str(&value)
                         .map_err(|e| format!("read legacy downloads: {e}"))?;
@@ -392,7 +392,7 @@ impl Store {
                 }
                 fn collect(
                     value: &serde_json::Value,
-                    offline: &mut tg_player_application::offline::OfflineCore,
+                    offline: &mut gramwave_application::offline::OfflineCore,
                 ) {
                     match value {
                         serde_json::Value::Array(values) => {
@@ -495,7 +495,7 @@ impl Store {
                     Request::Changes(changes) => write_changes(&mut db, &changes),
                     Request::CommitBarrier(reply) => {
                         let _ = reply.send(failure.clone().map_or(Ok(()), |error| {
-                            Err(tg_player_application::AppError::Storage(error))
+                            Err(gramwave_application::AppError::Storage(error))
                         }));
                         continue;
                     }
@@ -550,7 +550,7 @@ impl Store {
         self.shared.wake.notify_one();
         Ok(())
     }
-    pub fn offline(&self) -> tg_player_application::offline::OfflineData {
+    pub fn offline(&self) -> gramwave_application::offline::OfflineData {
         self.offline.clone()
     }
     pub fn apply(&self, changes: ChangeSet) -> Outcome {
@@ -607,27 +607,27 @@ impl Repository for Store {
     fn commit_barrier(
         &self,
     ) -> Result<
-        tokio::sync::oneshot::Receiver<Result<(), tg_player_application::AppError>>,
-        tg_player_application::AppError,
+        tokio::sync::oneshot::Receiver<Result<(), gramwave_application::AppError>>,
+        gramwave_application::AppError,
     > {
         let (send, receive) = tokio::sync::oneshot::channel();
         self.enqueue(Request::CommitBarrier(send))
-            .map_err(tg_player_application::AppError::Storage)?;
+            .map_err(gramwave_application::AppError::Storage)?;
         Ok(receive)
     }
-    fn apply(&self, changes: ChangeSet) -> Result<(), tg_player_application::AppError> {
+    fn apply(&self, changes: ChangeSet) -> Result<(), gramwave_application::AppError> {
         self.apply(changes)
-            .map_err(tg_player_application::AppError::Storage)
+            .map_err(gramwave_application::AppError::Storage)
     }
-    fn flush(&self, timeout: Duration) -> Result<(), tg_player_application::AppError> {
+    fn flush(&self, timeout: Duration) -> Result<(), gramwave_application::AppError> {
         self.flush_timeout(timeout)
-            .map_err(tg_player_application::AppError::Storage)
+            .map_err(gramwave_application::AppError::Storage)
     }
-    fn shutdown(&mut self, timeout: Duration) -> Result<(), tg_player_application::AppError> {
+    fn shutdown(&mut self, timeout: Duration) -> Result<(), gramwave_application::AppError> {
         self.shutdown_timeout(timeout)
-            .map_err(tg_player_application::AppError::Storage)
+            .map_err(gramwave_application::AppError::Storage)
     }
-    fn error(&self) -> Option<tg_player_application::AppError> {
-        self.error().map(tg_player_application::AppError::Storage)
+    fn error(&self) -> Option<gramwave_application::AppError> {
+        self.error().map(gramwave_application::AppError::Storage)
     }
 }

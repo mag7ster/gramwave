@@ -124,7 +124,7 @@ fn chat_focus_scrolls_through_pins_without_opening_them() {
         });
         state.chat_pins.push(id);
     }
-    h.app.state = tg_player_application::AppCore::new(state);
+    h.app.state = gramwave_application::AppCore::new(state);
     h.settle();
     focus(&mut h, Id::new(CHAT_SEARCH_TRIGGER));
     h.key(Key::Tab);

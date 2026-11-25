@@ -1,5 +1,5 @@
 use crate::{adapters::source_chat, tr, App, Event};
-use tg_player_application::tasks::JobClass;
+use gramwave_application::tasks::JobClass;
 
 impl App {
     pub(crate) fn open_source_chat(&mut self, chat: i64, url: &str) {

@@ -1,7 +1,7 @@
 //! Explicit persistence contracts. Runtime media never enters a settings record.
 use crate::model::{Playlist, StartupPlaylist, State, Track};
+use gramwave_domain::{RepeatMode, Session};
 use serde::{Deserialize, Serialize};
-use tg_player_domain::{RepeatMode, Session};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

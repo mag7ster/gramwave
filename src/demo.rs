@@ -1,10 +1,10 @@
 //! Deterministic, account-free visual fixtures; only --demo activates them.
 use crate::{tr, App, Playlist, RepeatMode, RetryAction, State};
-use tg_player_application::model::Track;
+use gramwave_application::model::Track;
 pub fn state() -> State {
     State { playlists: (0..5).map(|i| Playlist {
         id: i, title: ["Midnight frequencies", "Saved Messages", "Jazz & coffee", "Electronic archive", "Music · Favorites"][i as usize].into(),
-        personal: tg_player_application::model::PersonalChat {
+        personal: gramwave_application::model::PersonalChat {
             lists: [i != 3, i == 3],
             saved_messages: i == 1,
         },
@@ -24,7 +24,7 @@ pub fn configure(app: &mut App) {
     let mut state = app.state.view().clone();
     state.light = app.options.light;
     app.state =
-        tg_player_application::AppCore::with_offline(state, app.state.offline().data().clone());
+        gramwave_application::AppCore::with_offline(state, app.state.offline().data().clone());
     app.opened_chat = Some(0);
     if let Some(scenario) = app.options.scenario.clone() {
         apply(app, &scenario);
@@ -33,7 +33,7 @@ pub fn configure(app: &mut App) {
 pub fn apply(app: &mut App, scenario: &str) {
     let mut state = app.state.view().clone();
     let tracks = state.playlists[0].tracks.clone();
-    let mut offline = tg_player_application::offline::OfflineCore::new(app.state.offline().data());
+    let mut offline = gramwave_application::offline::OfflineCore::new(app.state.offline().data());
     match scenario {
         "playing" | "paused" | "loading" | "error" => {
             state.session.start(&tracks, 0, true);
@@ -55,12 +55,12 @@ pub fn apply(app: &mut App, scenario: &str) {
         "settings" => app.settings_open = true,
         "offline-storage" => {
             app.settings_open = true;
-            let now = tg_player_application::offline::unix_seconds(std::time::SystemTime::now());
+            let now = gramwave_application::offline::unix_seconds(std::time::SystemTime::now());
             let mut data = offline.data();
             for (chat, count) in [(0, 3), (2, 8), (4, 1)] {
                 for track in state.playlists[chat].tracks.iter().take(count) {
                     data.copies
-                        .push(tg_player_application::offline::OfflineCopy {
+                        .push(gramwave_application::offline::OfflineCopy {
                             track: track.clone(),
                             path: format!("demo-{}-{}", track.chat, track.message),
                             cached: false,
@@ -71,7 +71,7 @@ pub fn apply(app: &mut App, scenario: &str) {
                         });
                 }
             }
-            offline = tg_player_application::offline::OfflineCore::new(data);
+            offline = gramwave_application::offline::OfflineCore::new(data);
         }
         "resumed" => {
             state.session.start(&tracks, 1, false);
@@ -87,7 +87,7 @@ pub fn apply(app: &mut App, scenario: &str) {
             app.pane = crate::screens::WorkspacePane::Library;
         }
         "emojis" => {
-            use tg_player_application::model::{Caption, CaptionEmoji, EmojiStatus};
+            use gramwave_application::model::{Caption, CaptionEmoji, EmojiStatus};
             let id = crate::adapters::emoji::DEMO_ID;
             state.playlists[0].title = "Midnight frequencies 🌙".into();
             state.playlists[0].emoji_status = Some(EmojiStatus { id, expires_at: 0 });
@@ -109,12 +109,12 @@ pub fn apply(app: &mut App, scenario: &str) {
         }
         _ => {}
     }
-    app.state = tg_player_application::AppCore::with_offline(state, offline.data());
+    app.state = gramwave_application::AppCore::with_offline(state, offline.data());
     if scenario == "artwork" {
         artwork(app);
     }
     if matches!(scenario, "playing" | "paused" | "loading" | "error") {
-        use tg_player_application::{
+        use gramwave_application::{
             commands::AppCommand, ports::PlaybackEvent, workflow::AppEvent,
         };
         app.state.command(AppCommand::Play(tracks[0].clone()));
@@ -127,7 +127,7 @@ pub fn apply(app: &mut App, scenario: &str) {
 }
 
 fn artwork(app: &mut App) {
-    use tg_player_application::{
+    use gramwave_application::{
         library::LibraryCommand,
         media::{MediaPlaylist, MediaTrack},
     };

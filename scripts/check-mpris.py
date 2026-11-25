@@ -5,9 +5,9 @@ import pathlib
 import subprocess
 import time
 
-binary = pathlib.Path(os.environ.get("TG_PLAYER_BINARY", pathlib.Path(__file__).resolve().parents[1] / "target/debug/tg-player"))
+binary = pathlib.Path(os.environ.get("GRAMWAVE_BINARY", pathlib.Path(__file__).resolve().parents[1] / "target/debug/gramwave"))
 app = subprocess.Popen([str(binary), "--demo", "--desktop-integrations", "--scenario=playing"])
-base = ["gdbus", "call", "--session", "--dest", "org.mpris.MediaPlayer2.tgplayer",
+base = ["gdbus", "call", "--session", "--dest", "org.mpris.MediaPlayer2.gramwave",
         "--object-path", "/org/mpris/MediaPlayer2", "--method"]
 player = "org.mpris.MediaPlayer2.Player"
 

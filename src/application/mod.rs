@@ -1,6 +1,6 @@
 pub mod commands;
 pub mod ports;
-pub use tg_player_application::tasks;
+pub use gramwave_application::tasks;
 
 pub(crate) mod cache;
 pub(crate) mod control;

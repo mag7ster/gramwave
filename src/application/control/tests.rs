@@ -17,7 +17,7 @@ fn playlist_selection_rebuilds_queue_and_previous_returns_to_preceding_row() {
     apply(&mut app, Request::Select { row: 2 });
     let tracks = app.playlist_tracks(0);
     app.state
-        .command(tg_player_application::commands::AppCommand::Insert(
+        .command(gramwave_application::commands::AppCommand::Insert(
             tracks[8].metadata(),
             true,
         ));
@@ -98,7 +98,7 @@ fn list_and_select_share_filters_search_and_sort_and_current_row_toggles_pause()
         id
     );
     app.state
-        .command(tg_player_application::commands::AppCommand::Filters(
+        .command(gramwave_application::commands::AppCommand::Filters(
             0, [false; 3],
         ));
     assert_eq!(apply(&mut app, Request::Playlist { offset: 0 })["total"], 0);
@@ -115,7 +115,7 @@ fn pagination_handles_large_unicode_and_escaped_metadata_without_leaking_state()
         track.artist = track.title.clone();
     }
     fixture.api_hash = "private-api-hash".into();
-    app.state = tg_player_application::AppCore::new(fixture);
+    app.state = gramwave_application::AppCore::new(fixture);
     let mut offset = 0;
     let mut rows = Vec::new();
     loop {
@@ -189,7 +189,7 @@ fn previous_restarts_after_three_seconds_then_switches() {
         fn command(
             &self,
             command: crate::application::ports::PlayerCommand,
-        ) -> Result<(), tg_player_application::AppError> {
+        ) -> Result<(), gramwave_application::AppError> {
             if let crate::application::ports::PlayerCommand::Seek(position) = command {
                 self.seeks.borrow_mut().push(position.to_string());
                 self.position.set(position);

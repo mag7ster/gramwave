@@ -1,6 +1,6 @@
 use super::{json, Telegram, Value};
+use gramwave_application::{persistence::CachePolicy, AppError};
 use std::sync::Arc;
-use tg_player_application::{persistence::CachePolicy, AppError};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -474,7 +474,7 @@ mod tests {
     #[cfg(all(feature = "native-tests", feature = "telegram"))]
     #[tokio::test]
     async fn native_tdlib_inspects_synthetic_files_without_an_account() {
-        use tg_player_application::telegram::{AuthRequest, TelegramGateway, TelegramParameters};
+        use gramwave_application::telegram::{AuthRequest, TelegramGateway, TelegramParameters};
 
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("telegram");

@@ -2,7 +2,7 @@ use super::*;
 
 use crate::application::ports::{PlaybackEvent, PlayerBackend, PlayerCommand, PlayerSnapshot};
 use crate::Track;
-use tg_player_application::AppError;
+use gramwave_application::AppError;
 
 struct Clock(PlayerSnapshot);
 
@@ -145,11 +145,11 @@ fn focused_volume_slider_remains_keyboard_operable_after_resize() {
 #[test]
 fn restored_track_fetches_artwork_without_starting_playback() {
     use crate::adapters::telegram::Telegram;
-    use serde_json::json;
-    use tg_player_application::{
+    use gramwave_application::{
         library::LibraryCommand,
         model::{Playlist, State},
     };
+    use serde_json::json;
 
     let mut h = Harness::new();
     let track = Track {
@@ -169,7 +169,7 @@ fn restored_track_fetches_artwork_without_starting_playback() {
     };
     state.session.start(&[track.metadata()], 0, false);
     state.session.set_position_ms(37_000);
-    h.app.state = tg_player_application::AppCore::new(state);
+    h.app.state = gramwave_application::AppCore::new(state);
 
     let cover = tempfile::NamedTempFile::new().unwrap();
     let path = cover.path().to_string_lossy().into_owned();

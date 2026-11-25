@@ -1,3 +1,7 @@
+use gramwave_application::{
+    telegram::{AuthRequest, GatewayFuture, MediaPage, TelegramGateway, TelegramUpdate},
+    AppError,
+};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -6,10 +10,6 @@ use std::{
         mpsc, Arc, Mutex,
     },
     time::{Duration, Instant},
-};
-use tg_player_application::{
-    telegram::{AuthRequest, GatewayFuture, MediaPage, TelegramGateway, TelegramUpdate},
-    AppError,
 };
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -39,7 +39,7 @@ type Resolutions = Arc<
     Mutex<
         HashMap<
             crate::domain::TrackId,
-            Arc<tokio::sync::OnceCell<tg_player_application::media::MediaTrack>>,
+            Arc<tokio::sync::OnceCell<gramwave_application::media::MediaTrack>>,
         >,
     >,
 >;
@@ -738,7 +738,7 @@ impl TelegramGateway for Telegram {
         &'a self,
         id: crate::domain::TrackId,
         cancel: &'a CancellationToken,
-    ) -> GatewayFuture<'a, tg_player_application::media::MediaTrack> {
+    ) -> GatewayFuture<'a, gramwave_application::media::MediaTrack> {
         Box::pin(async move {
             let cell = self.resolved.lock().unwrap().entry(id).or_default().clone();
             cell.get_or_try_init(|| async {
@@ -764,7 +764,7 @@ impl TelegramGateway for Telegram {
         &'a self,
         id: i64,
         cancel: &'a CancellationToken,
-    ) -> GatewayFuture<'a, tg_player_application::telegram::TelegramFile> {
+    ) -> GatewayFuture<'a, gramwave_application::telegram::TelegramFile> {
         Box::pin(async move { Ok(self.get_file(id, cancel).await?.into_file()) })
     }
     fn authenticate<'a>(

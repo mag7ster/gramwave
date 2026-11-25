@@ -1,1 +1,1 @@
-pub use tg_player_application::ports::*;
+pub use gramwave_application::ports::*;

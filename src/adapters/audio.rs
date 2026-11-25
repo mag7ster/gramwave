@@ -1,4 +1,5 @@
 pub use crate::application::ports::PlaybackEvent;
+use gramwave_application::AppError;
 use rsmpv::{EndFileReason, Event, Mpv};
 use std::{
     sync::{
@@ -8,7 +9,6 @@ use std::{
     thread,
     time::Duration,
 };
-use tg_player_application::AppError;
 
 struct NativePlayer {
     mpv: Mpv,
@@ -379,7 +379,7 @@ impl PlayerBackend for Player {
     fn command(
         &self,
         command: crate::application::ports::PlayerCommand,
-    ) -> Result<(), tg_player_application::AppError> {
+    ) -> Result<(), gramwave_application::AppError> {
         use crate::application::ports::PlayerCommand;
         match command {
             PlayerCommand::Load { path, start_ms } => {
@@ -394,7 +394,7 @@ impl PlayerBackend for Player {
             }
             PlayerCommand::Volume(volume) => self.try_cmd(&["set", "volume", &volume.to_string()]),
         }
-        .map_err(tg_player_application::AppError::Player)
+        .map_err(gramwave_application::AppError::Player)
     }
     fn drain(&self) -> Vec<PlaybackEvent> {
         self.drain()
@@ -405,9 +405,9 @@ impl PlayerBackend for Player {
     fn is_idle(&self) -> bool {
         self.active_load.load(Ordering::Acquire) == 0
     }
-    fn shutdown(&mut self, timeout: Duration) -> Result<(), tg_player_application::AppError> {
+    fn shutdown(&mut self, timeout: Duration) -> Result<(), gramwave_application::AppError> {
         self.shutdown(timeout)
-            .map_err(tg_player_application::AppError::Player)
+            .map_err(gramwave_application::AppError::Player)
     }
 }
 #[cfg(test)]

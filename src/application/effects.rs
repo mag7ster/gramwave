@@ -1,5 +1,5 @@
 use crate::{App, Event};
-use tg_player_application::{
+use gramwave_application::{
     tasks::JobClass,
     workflow::{AppEvent, Effect, PreparedPlayback},
     AppError,
@@ -21,7 +21,7 @@ impl App {
         }
         self.run_effects(effects);
     }
-    pub(crate) fn core_command(&mut self, command: tg_player_application::commands::AppCommand) {
+    pub(crate) fn core_command(&mut self, command: gramwave_application::commands::AppCommand) {
         let snapshot = self
             .player
             .as_ref()
@@ -132,7 +132,7 @@ impl App {
                         JobClass::Background,
                         operation.clone(),
                         async move {
-                            use tg_player_application::ports::OfflineStorage;
+                            use gramwave_application::ports::OfflineStorage;
                             let result = async {
                                 if let Some(barrier) = barrier {
                                     barrier?
@@ -182,7 +182,7 @@ impl App {
                             JobClass::Interactive,
                             operation.clone(),
                             async move {
-                                use tg_player_application::telegram::TelegramGateway;
+                                use gramwave_application::telegram::TelegramGateway;
                                 let result = tg.authenticate(auth_request, &operation.cancel).await;
                                 Event::Application(AppEvent::Authenticated { request, result })
                             },
@@ -201,7 +201,7 @@ impl App {
                     }
                 }
                 Effect::AuthorizationChanged(state) => {
-                    use tg_player_application::telegram::AuthorizationState;
+                    use gramwave_application::telegram::AuthorizationState;
                     self.password.clear();
                     match state {
                         AuthorizationState::Code { timeout, .. } => {
@@ -213,7 +213,7 @@ impl App {
                         AuthorizationState::Ready => {
                             if let Some(chat) = self.opened_chat {
                                 self.library_command(
-                                    tg_player_application::library::LibraryCommand::Open {
+                                    gramwave_application::library::LibraryCommand::Open {
                                         chat,
                                         refresh: true,
                                     },
@@ -237,8 +237,8 @@ impl App {
                     }
                 }
                 Effect::ParametersRequested => {
-                    self.submit_auth(tg_player_application::telegram::AuthRequest::Parameters(
-                        tg_player_application::telegram::TelegramParameters {
+                    self.submit_auth(gramwave_application::telegram::AuthRequest::Parameters(
+                        gramwave_application::telegram::TelegramParameters {
                             api_id: self.state.view().api_id.parse().unwrap_or(0),
                             api_hash: self.state.view().api_hash.clone(),
                             database: self.root.join("telegram").to_string_lossy().into(),
@@ -272,7 +272,7 @@ impl App {
                         .offline()
                         .local_path(
                             track.id(),
-                            tg_player_application::offline::unix_seconds(
+                            gramwave_application::offline::unix_seconds(
                                 std::time::SystemTime::now(),
                             ),
                             self.state.view().cache_policy.days,
@@ -298,7 +298,7 @@ impl App {
                 }
                 Effect::Player(command) => {
                     if let Some(player) = &self.player {
-                        if let tg_player_application::ports::PlayerCommand::Load { path, .. } =
+                        if let gramwave_application::ports::PlayerCommand::Load { path, .. } =
                             &command
                         {
                             use super::cache::CachePlayback;
@@ -327,14 +327,14 @@ impl App {
                         let result = player.command(command);
                         if let Err(error) = result {
                             self.core_event(AppEvent::Player(
-                                tg_player_application::ports::PlaybackEvent::Failed(error),
+                                gramwave_application::ports::PlaybackEvent::Failed(error),
                             ));
                         }
                     }
                 }
                 Effect::ClearSeek => self.seek_preview = None,
                 Effect::Notice(message) => {
-                    use tg_player_application::notice::Notice;
+                    use gramwave_application::notice::Notice;
                     self.status = super::notices::notice_text(message);
                     if matches!(message, Notice::OfflineSaved | Notice::OfflineInterrupted) {
                         self.set_inline_notice(self.status.clone(), true);

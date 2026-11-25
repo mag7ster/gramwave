@@ -48,7 +48,7 @@ pub trait Repository {
 
 #[derive(Clone, Debug)]
 pub struct OfflinePublication {
-    pub track: tg_player_domain::TrackId,
+    pub track: gramwave_domain::TrackId,
     pub attempt: u64,
     pub source: String,
     pub size: u64,

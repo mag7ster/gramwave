@@ -1,10 +1,10 @@
 use crate::{application, streaming, telegram, tr, Track};
 use eframe::egui;
+use gramwave_application::telegram::TelegramUpdate;
+use gramwave_application::AppCore;
 #[cfg(test)]
 use std::time::Duration;
 use std::{path::PathBuf, sync::mpsc};
-use tg_player_application::telegram::TelegramUpdate;
-use tg_player_application::AppCore;
 
 mod artwork;
 pub(crate) enum Event {
@@ -12,28 +12,28 @@ pub(crate) enum Event {
     Cache {
         connection: u64,
         job: super::cache::CacheJob,
-        result: Result<crate::telegram::CacheReport, tg_player_application::AppError>,
+        result: Result<crate::telegram::CacheReport, gramwave_application::AppError>,
         offline_sizes: Option<std::collections::HashMap<String, u64>>,
     },
-    Application(tg_player_application::workflow::AppEvent),
+    Application(gramwave_application::workflow::AppEvent),
     CacheHandoff {
         id: crate::domain::TrackId,
         path: String,
-        result: Result<(), tg_player_application::AppError>,
+        result: Result<(), gramwave_application::AppError>,
     },
-    Error(tg_player_application::AppError),
+    Error(gramwave_application::AppError),
     Link(String),
     SourceChatError(String),
     ForgetArtwork(String),
     Emoji(
-        tg_player_application::tasks::RequestId,
+        gramwave_application::tasks::RequestId,
         Vec<(i64, crate::adapters::emoji::EmojiAsset)>,
     ),
 }
 pub(crate) enum RetryAction {
-    Playback(tg_player_application::model::Track),
+    Playback(gramwave_application::model::Track),
     Chat(i64),
-    Offline(tg_player_application::model::Track),
+    Offline(gramwave_application::model::Track),
     Catalog,
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -64,7 +64,7 @@ pub(crate) struct DesktopApp {
     pub(crate) test_play_buttons: std::collections::BTreeMap<i64, egui::Rect>,
     #[cfg(test)]
     pub(crate) test_queue_rows: std::collections::BTreeMap<
-        tg_player_domain::QueueEntryId,
+        gramwave_domain::QueueEntryId,
         (egui::Rect, egui::Rect, egui::Id),
     >,
     #[cfg(test)]
@@ -267,13 +267,13 @@ impl DesktopApp {
     }
     pub(crate) fn library_command(
         &mut self,
-        command: tg_player_application::library::LibraryCommand,
+        command: gramwave_application::library::LibraryCommand,
     ) {
         let effects = self.state.library_command(command);
         self.run_effects(effects);
     }
     pub(crate) fn connect(&mut self) {
-        self.core_command(tg_player_application::commands::AppCommand::Connect);
+        self.core_command(gramwave_application::commands::AppCommand::Connect);
     }
     pub(crate) fn connect_native(&mut self) {
         self.qr.clear();
@@ -291,7 +291,7 @@ impl DesktopApp {
                     }
                     Err(error) => self.error = error,
                 }
-                self.library_command(tg_player_application::library::LibraryCommand::Connected(
+                self.library_command(gramwave_application::library::LibraryCommand::Connected(
                     connection.telegram.connection,
                 ));
                 self.tg = Some(connection.telegram);
@@ -308,7 +308,7 @@ impl DesktopApp {
         } else {
             String::new()
         };
-        self.library_command(tg_player_application::library::LibraryCommand::Search {
+        self.library_command(gramwave_application::library::LibraryCommand::Search {
             query,
             now: std::time::Instant::now(),
             force: false,
@@ -318,7 +318,7 @@ impl DesktopApp {
         }
     }
     pub(crate) fn request_visible_media(&mut self, ctx: &egui::Context) {
-        use tg_player_application::library::LibraryCommand;
+        use gramwave_application::library::LibraryCommand;
         let artwork_view = self.artwork_view.take();
         if self.settings_open {
             return;
@@ -367,14 +367,14 @@ impl DesktopApp {
         }
     }
     pub(crate) fn retry_chat_search(&mut self) {
-        self.library_command(tg_player_application::library::LibraryCommand::Search {
+        self.library_command(gramwave_application::library::LibraryCommand::Search {
             query: self.chat_query.clone(),
             now: std::time::Instant::now(),
             force: true,
         });
     }
     pub(crate) fn sync(&mut self) {
-        self.library_command(tg_player_application::library::LibraryCommand::RefreshCatalog);
+        self.library_command(gramwave_application::library::LibraryCommand::RefreshCatalog);
     }
     pub(crate) fn open_chat(&mut self, index: usize) {
         self.load_chat(index, true);
@@ -384,11 +384,11 @@ impl DesktopApp {
             return;
         };
         if refresh {
-            self.core_command(tg_player_application::commands::AppCommand::OpenPlaylist(
+            self.core_command(gramwave_application::commands::AppCommand::OpenPlaylist(
                 chat,
             ));
         } else {
-            self.library_command(tg_player_application::library::LibraryCommand::Open {
+            self.library_command(gramwave_application::library::LibraryCommand::Open {
                 chat,
                 refresh: false,
             });
@@ -396,7 +396,7 @@ impl DesktopApp {
     }
     pub(crate) fn play(&mut self, track: impl Into<Track>) {
         let track: Track = track.into();
-        self.core_command(tg_player_application::commands::AppCommand::Play(
+        self.core_command(gramwave_application::commands::AppCommand::Play(
             track.into(),
         ));
     }
@@ -417,12 +417,12 @@ impl DesktopApp {
             None => {}
         }
     }
-    pub(crate) fn start_session<T: Clone + Into<tg_player_application::model::Track>>(
+    pub(crate) fn start_session<T: Clone + Into<gramwave_application::model::Track>>(
         &mut self,
         tracks: &[T],
         index: usize,
     ) {
-        self.core_command(tg_player_application::commands::AppCommand::StartSession(
+        self.core_command(gramwave_application::commands::AppCommand::StartSession(
             tracks.iter().cloned().map(Into::into).collect(),
             index,
         ));
@@ -525,7 +525,7 @@ impl DesktopApp {
         }
     }
     pub(crate) fn set_paused(&mut self, value: bool) {
-        self.core_command(tg_player_application::commands::AppCommand::Pause(value));
+        self.core_command(gramwave_application::commands::AppCommand::Pause(value));
     }
     pub(crate) fn toggle_mute(&mut self) {
         self.set_volume(if self.state.view().volume == 0. {
@@ -535,10 +535,10 @@ impl DesktopApp {
         });
     }
     pub(crate) fn set_volume(&mut self, value: f32) {
-        self.core_command(tg_player_application::commands::AppCommand::Volume(value));
+        self.core_command(gramwave_application::commands::AppCommand::Volume(value));
     }
-    pub(crate) fn pin(&mut self, track: impl Into<tg_player_application::model::Track>) {
-        self.core_command(tg_player_application::commands::AppCommand::SaveTrack(
+    pub(crate) fn pin(&mut self, track: impl Into<gramwave_application::model::Track>) {
+        self.core_command(gramwave_application::commands::AppCommand::SaveTrack(
             track.into(),
         ));
     }
@@ -546,7 +546,7 @@ impl DesktopApp {
         let Some(tg) = self.tg.clone() else { return };
         let (chat, message) = (t.chat, t.message);
         self.async_event(
-            tg_player_application::tasks::JobClass::Interactive,
+            gramwave_application::tasks::JobClass::Interactive,
             0,
             async move {
                 match tg.message_link(chat, message, &Default::default()).await {
@@ -557,7 +557,7 @@ impl DesktopApp {
             Event::Error,
         );
     }
-    pub(crate) fn media_track(&self, track: tg_player_application::model::Track) -> Track {
+    pub(crate) fn media_track(&self, track: gramwave_application::model::Track) -> Track {
         let mut view: Track = self.state.media_track(track).into();
         view.pinned = self.state.offline().path(view.id()).map(str::to_owned);
         view
@@ -566,7 +566,7 @@ impl DesktopApp {
         self.state.library().artwork_path(id)
     }
     pub(crate) fn toggle_chat_pin(&mut self, id: i64) {
-        self.core_command(tg_player_application::commands::AppCommand::ToggleChatPin(
+        self.core_command(gramwave_application::commands::AppCommand::ToggleChatPin(
             id,
         ));
     }
@@ -592,10 +592,10 @@ impl DesktopApp {
             processed += 1;
             match update {
                 TelegramUpdate::Authorization(state) => self.core_event(
-                    tg_player_application::workflow::AppEvent::Authorization(state),
+                    gramwave_application::workflow::AppEvent::Authorization(state),
                 ),
                 update => self.library_command(
-                    tg_player_application::library::LibraryCommand::Source(update),
+                    gramwave_application::library::LibraryCommand::Source(update),
                 ),
             }
         }
@@ -623,7 +623,7 @@ impl DesktopApp {
                     if result.is_ok() {
                         self.handoff_retry.remove(&path);
                         self.core_event(
-                            tg_player_application::workflow::AppEvent::OfflineHandoffFinished {
+                            gramwave_application::workflow::AppEvent::OfflineHandoffFinished {
                                 id,
                                 path,
                             },

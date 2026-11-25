@@ -5,7 +5,7 @@ use crate::{
     tasks::{Operation, RequestId},
     AppError,
 };
-use tg_player_domain::QueueEntryId;
+use gramwave_domain::QueueEntryId;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PlaybackState {
@@ -92,7 +92,7 @@ impl PlaybackCore {
 pub(crate) enum PlaybackMutation {
     Volume(f32),
     Shuffle(bool),
-    Repeat(tg_player_domain::RepeatMode),
+    Repeat(gramwave_domain::RepeatMode),
     Start(Vec<Track>, usize),
     Insert(Track, bool),
     MoveQueueRow(usize, QueueEntryId, usize),
@@ -153,7 +153,7 @@ impl PlaybackCore {
             PlaybackMutation::Remove(index) => state.session.remove(index),
             PlaybackMutation::Clear => {
                 state.session.clear();
-                state.repeat = tg_player_domain::RepeatMode::Off;
+                state.repeat = gramwave_domain::RepeatMode::Off;
             }
             PlaybackMutation::Jump(id) => {
                 let index = state

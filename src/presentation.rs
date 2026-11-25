@@ -1,5 +1,5 @@
 //! Desktop-only row model. Persistent application metadata never contains these file paths.
-use tg_player_application::{
+use gramwave_application::{
     media::MediaTrack,
     model::{Caption, Track as Metadata},
 };
@@ -7,14 +7,14 @@ use tg_player_application::{
 pub(crate) struct Track {
     pub library_id: u64,
     pub playlist_number: usize,
-    pub entry_id: tg_player_domain::QueueEntryId,
+    pub entry_id: gramwave_domain::QueueEntryId,
     pub chat: i64,
     pub message: i64,
     pub title: String,
     pub artist: String,
     pub caption: Option<Caption>,
     pub duration: u64,
-    pub kind: tg_player_domain::MediaKind,
+    pub kind: gramwave_domain::MediaKind,
     pub file: i64,
     pub cached: Option<String>,
     pub image_file: i64,
@@ -22,8 +22,8 @@ pub(crate) struct Track {
     pub pinned: Option<String>,
 }
 impl Track {
-    pub fn id(&self) -> tg_player_domain::TrackId {
-        tg_player_domain::TrackId {
+    pub fn id(&self) -> gramwave_domain::TrackId {
+        gramwave_domain::TrackId {
             chat: self.chat,
             message: self.message,
         }
@@ -80,13 +80,13 @@ impl From<Track> for Metadata {
         t.transport().into()
     }
 }
-impl From<tg_player_domain::QueueEntry> for Track {
-    fn from(t: tg_player_domain::QueueEntry) -> Self {
+impl From<gramwave_domain::QueueEntry> for Track {
+    fn from(t: gramwave_domain::QueueEntry) -> Self {
         Metadata::from(t).into()
     }
 }
-impl From<&tg_player_domain::QueueEntry> for Track {
-    fn from(t: &tg_player_domain::QueueEntry) -> Self {
+impl From<&gramwave_domain::QueueEntry> for Track {
+    fn from(t: &gramwave_domain::QueueEntry) -> Self {
         Metadata::from(t).into()
     }
 }

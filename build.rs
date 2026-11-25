@@ -6,8 +6,8 @@ fn main() {
 }
 #[cfg(feature = "telegram")]
 fn telegram() {
-    println!("cargo:rerun-if-env-changed=TG_PLAYER_TDLIB_DIR");
-    let local = std::env::var_os("TG_PLAYER_TDLIB_DIR").map(std::path::PathBuf::from);
+    println!("cargo:rerun-if-env-changed=GRAMWAVE_TDLIB_DIR");
+    let local = std::env::var_os("GRAMWAVE_TDLIB_DIR").map(std::path::PathBuf::from);
     let lib = local
         .as_ref()
         .map(|path| path.join("lib"))
@@ -17,7 +17,7 @@ fn telegram() {
     if !lib.join("libtdjson.so.1.8.61").exists() {
         assert!(
             local.is_none(),
-            "TG_PLAYER_TDLIB_DIR must contain lib/libtdjson.so.1.8.61"
+            "GRAMWAVE_TDLIB_DIR must contain lib/libtdjson.so.1.8.61"
         );
         tdlib_rs::build::build(None);
     }
@@ -32,7 +32,7 @@ fn telegram() {
             std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
                 .join(".local/share")
         });
-    let native = base.join("tg-player/native");
+    let native = base.join("gramwave/native");
     if native.is_dir() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", native.display());
     }

@@ -4,11 +4,11 @@ use crate::{
     workflow::Effect,
     AppError,
 };
+use gramwave_domain::TrackId;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
-use tg_player_domain::TrackId;
 #[derive(Default)]
 pub(crate) struct OfflineWork {
     pub generation: u64,

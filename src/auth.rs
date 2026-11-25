@@ -1,6 +1,6 @@
 use crate::{design, tr, App};
 use eframe::egui;
-use tg_player_application::telegram::{AuthRequest, AuthorizationState};
+use gramwave_application::telegram::{AuthRequest, AuthorizationState};
 #[derive(Debug, PartialEq)]
 enum Phase {
     Setup,
@@ -67,7 +67,7 @@ pub(crate) fn friendly_error(error: &str) -> String {
 impl App {
     pub(crate) fn submit_auth(&mut self, request: AuthRequest) {
         self.auth_error.clear();
-        self.core_command(tg_player_application::commands::AppCommand::Authenticate(
+        self.core_command(gramwave_application::commands::AppCommand::Authenticate(
             request,
         ));
     }
@@ -102,7 +102,7 @@ ui.add(egui::TextEdit::singleline(&mut self.api_hash_input).password(true).margi
 if ui.add_enabled(credentials(&self.api_id_input,&self.api_hash_input),egui::Button::new(egui::RichText::new(tr("Continue")).color(egui::Color32::BLACK)).fill(design::GREEN).corner_radius(20).min_size(egui::vec2(ui.available_width(),40.))).clicked()||(enter&&credentials(&self.api_id_input,&self.api_hash_input)){
 self.api_id_input=self.api_id_input.trim().into();
 self.api_hash_input=self.api_hash_input.trim().into();
-let mut settings=tg_player_application::persistence::Settings::from(self.state.view());
+let mut settings=gramwave_application::persistence::Settings::from(self.state.view());
 settings.api_id=self.api_id_input.clone();settings.api_hash=self.api_hash_input.clone();
 self.execute(crate::application::commands::AppCommand::Settings(settings));
 self.execute(crate::application::commands::AppCommand::Connect);

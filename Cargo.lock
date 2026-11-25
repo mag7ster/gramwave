@@ -1827,6 +1827,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "gramwave"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "eframe",
+ "egui_extras",
+ "fastframe-emoji",
+ "fastframe-fonts",
+ "fastframe-i18n",
+ "fastframe-icons",
+ "fastframe-instance",
+ "fastframe-now-playing",
+ "fastframe-shell",
+ "fastframe-titlebar",
+ "flate2",
+ "futures-util",
+ "getrandom 0.3.4",
+ "gramwave-application",
+ "gramwave-domain",
+ "http-range-header",
+ "image",
+ "ksni",
+ "qrcode",
+ "raw-window-handle",
+ "rsmpv",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tdlib-rs",
+ "tempfile",
+ "tlottie",
+ "tokio",
+ "tokio-util",
+ "url",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "gramwave-application"
+version = "0.1.0"
+dependencies = [
+ "gramwave-domain",
+ "indexmap 2.14.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "gramwave-domain"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "guillotiere"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4334,71 +4399,6 @@ dependencies = [
  "once_cell",
  "rustix 1.1.6",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tg-player"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "eframe",
- "egui_extras",
- "fastframe-emoji",
- "fastframe-fonts",
- "fastframe-i18n",
- "fastframe-icons",
- "fastframe-instance",
- "fastframe-now-playing",
- "fastframe-shell",
- "fastframe-titlebar",
- "flate2",
- "futures-util",
- "getrandom 0.3.4",
- "http-range-header",
- "image",
- "ksni",
- "qrcode",
- "raw-window-handle",
- "rsmpv",
- "rusqlite",
- "serde",
- "serde_json",
- "tdlib-rs",
- "tempfile",
- "tg-player-application",
- "tg-player-domain",
- "tlottie",
- "tokio",
- "tokio-util",
- "url",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-wlr",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "tg-player-application"
-version = "0.1.0"
-dependencies = [
- "indexmap 2.14.2",
- "serde",
- "serde_json",
- "tg-player-domain",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "tg-player-domain"
-version = "0.1.0"
-dependencies = [
- "rand",
- "serde",
- "serde_json",
 ]
 
 [[package]]

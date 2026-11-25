@@ -7,14 +7,14 @@ use eframe::egui::{
     text::{CCursor, LayoutJob},
     Color32, FontId, Rect, Vec2,
 };
+use gramwave_application::{
+    model::{Caption, CaptionLink, EmojiStatus},
+    tasks::{JobClass, Operation, RequestId},
+};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
-use tg_player_application::{
-    model::{Caption, CaptionLink, EmojiStatus},
-    tasks::{JobClass, Operation, RequestId},
 };
 
 const FRAME_BUDGET: usize = 64 * 1024 * 1024;
@@ -511,7 +511,7 @@ impl App {
         self.tg.as_ref().filter(|_| {
             !self.quitting
                 && *self.state.auth().state()
-                    == tg_player_application::telegram::AuthorizationState::Ready
+                    == gramwave_application::telegram::AuthorizationState::Ready
         })
     }
 
@@ -570,7 +570,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tg_player_application::model::CaptionEmoji;
+    use gramwave_application::model::CaptionEmoji;
 
     #[test]
     fn bundled_emoji_font_draws_joined_color_emoji() {

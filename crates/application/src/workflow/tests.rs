@@ -79,7 +79,7 @@ fn startup_uses_the_loaded_track_chat_even_after_stopping() {
     assert_eq!(reopened.startup_chat(), Some(3));
 }
 
-fn download(core: &mut AppCore, id: tg_player_domain::TrackId) -> RequestId {
+fn download(core: &mut AppCore, id: gramwave_domain::TrackId) -> RequestId {
     core.pump(Instant::now(), true)
         .into_iter()
         .find_map(|effect| match effect {
@@ -402,7 +402,7 @@ fn offline_plays_keep_the_same_file_fresh_and_clear_only_cached_audio() {
 fn playlist_completion_follows_enabled_filters_and_saved_copies() {
     let first = track(1);
     let mut voice = track(2);
-    voice.kind = tg_player_domain::MediaKind::Voice;
+    voice.kind = gramwave_domain::MediaKind::Voice;
     let mut playlist = crate::model::Playlist {
         id: first.chat,
         filters: [true, false, false],

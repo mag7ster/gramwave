@@ -1,8 +1,8 @@
 fn main() -> std::process::ExitCode {
-    if let Some(code) = tg_player::run_cli() {
+    if let Some(code) = gramwave::run_cli() {
         return code;
     }
-    match tg_player::run() {
+    match gramwave::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");

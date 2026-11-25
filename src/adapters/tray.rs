@@ -143,7 +143,7 @@ fn activation_token() -> Option<String> {
 
 impl ksni::Tray for Item {
     fn id(&self) -> String {
-        "tgplayer".into()
+        "gramwave".into()
     }
 
     fn title(&self) -> String {

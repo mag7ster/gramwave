@@ -1,5 +1,5 @@
 use crate::model::Track;
-use tg_player_domain::{QueueEntryId, RepeatMode};
+use gramwave_domain::{QueueEntryId, RepeatMode};
 pub enum AppCommand {
     Connect,
     Retry,
@@ -7,7 +7,7 @@ pub enum AppCommand {
     Authenticate(crate::telegram::AuthRequest),
     SaveTrack(Track),
     SavePlaylist(i64, [bool; 3]),
-    RemoveOffline(tg_player_domain::TrackId, String),
+    RemoveOffline(gramwave_domain::TrackId, String),
     CancelOffline,
     RemoveOfflinePlaylists(Vec<i64>),
     PruneAudioCache,

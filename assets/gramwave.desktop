@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=TG Player
+Name=Gramwave
 Comment=Listen to music from your Telegram chats
-Exec=tg-player
-Icon=tgplayer
+Exec=gramwave
+Icon=gramwave
 Terminal=false
 Categories=AudioVideo;Audio;Player;
-StartupWMClass=tg-player
+StartupWMClass=gramwave

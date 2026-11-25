@@ -1,11 +1,11 @@
 [package]
-name = "tg-player-application"
+name = "gramwave-application"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
 [dependencies]
-tg-player-domain = { path = "../domain" }
+gramwave-domain = { path = "../domain" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 indexmap = "2"

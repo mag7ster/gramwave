@@ -1,6 +1,6 @@
 use crate::model::Track;
+use gramwave_domain::TrackId;
 use serde::{Deserialize, Serialize};
-use tg_player_domain::TrackId;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OfflineCopy {

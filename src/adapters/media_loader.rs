@@ -1,5 +1,5 @@
 use crate::{model::Track, telegram::Telegram};
-use tg_player_application::media::MediaTrack;
+use gramwave_application::media::MediaTrack;
 
 // File IDs are connection-local; only runtime fields may refresh an existing queue entry.
 #[cfg(test)]
@@ -10,8 +10,8 @@ pub(crate) async fn resolve_async(
     tg: &Telegram,
     old: &Track,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<MediaTrack, tg_player_application::AppError> {
-    use tg_player_application::telegram::TelegramGateway;
+) -> Result<MediaTrack, gramwave_application::AppError> {
+    use gramwave_application::telegram::TelegramGateway;
     let resolved = tg.message(old.id(), cancel).await?;
     let mut track = MediaTrack::from(old.clone());
     track.file = resolved.file;

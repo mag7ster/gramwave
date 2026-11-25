@@ -1,6 +1,6 @@
 use crate::{design, tr, App};
 use eframe::egui;
-use tg_player_application::{commands::AppCommand, model::StartupPlaylist, persistence::Settings};
+use gramwave_application::{commands::AppCommand, model::StartupPlaylist, persistence::Settings};
 
 impl App {
     pub(crate) fn startup_settings_ui(&mut self, ui: &mut egui::Ui) {

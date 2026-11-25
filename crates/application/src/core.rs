@@ -2,8 +2,8 @@ use crate::{
     model::{Playlist, State, Track},
     persistence::{ChangeSet, Settings},
 };
+use gramwave_domain::{QueueEntryId, RepeatMode};
 use std::collections::HashSet;
-use tg_player_domain::{QueueEntryId, RepeatMode};
 
 #[derive(Default)]
 pub struct LibraryPatch {

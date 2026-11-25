@@ -14,7 +14,7 @@ const PREFIX: &str = "control-v1:";
 const TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) fn slot(demo: bool) -> Slot {
-    let slot = Slot::new("org.tgplayer.App");
+    let slot = Slot::new("org.gramwave.App");
     if demo {
         slot.scoped("demo")
     } else {
@@ -24,7 +24,7 @@ pub(crate) fn slot(demo: bool) -> Slot {
 
 #[derive(Parser)]
 #[command(
-    bin_name = "tg-player [--demo] --ctl",
+    bin_name = "gramwave [--demo] --ctl",
     no_binary_name = true,
     arg_required_else_help = true,
     disable_help_subcommand = true

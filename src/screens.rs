@@ -2,9 +2,9 @@ use crate::application::commands::AppCommand;
 use crate::{design, tr, App, RepeatMode};
 use design::{button, Icon};
 use eframe::egui;
+use gramwave_domain::{playback::QueueTimeline, QueueEntryId};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-use tg_player_domain::{playback::QueueTimeline, QueueEntryId};
 
 mod keyboard;
 mod queue_scroll;
@@ -276,7 +276,7 @@ impl App {
         let needs_auth = self.options.preview_auth.is_some()
             || (!self.demo
                 && *self.state.auth().state()
-                    != tg_player_application::telegram::AuthorizationState::Ready);
+                    != gramwave_application::telegram::AuthorizationState::Ready);
         let header_visible = fastframe_titlebar::visible(&ctx);
         if header_visible {
             let action = window_header(
@@ -1275,7 +1275,7 @@ impl App {
         ui: &mut egui::Ui,
         title: &str,
         artwork: Option<&str>,
-        emoji: Option<tg_player_application::model::EmojiStatus>,
+        emoji: Option<gramwave_application::model::EmojiStatus>,
         full: f32,
         visible: f32,
     ) {

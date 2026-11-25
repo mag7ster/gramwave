@@ -16,8 +16,6 @@ channels, groups, private chats and Saved Messages in a dedicated desktop app.
 The player does not send messages or mark them as read. It currently supports
 one Telegram account and has an English interface.
 
-The executable and data directory are named `tg-player`.
-
 ## Build and run
 
 You need a recent stable Rust toolchain and the libmpv development package
@@ -37,7 +35,7 @@ sudo dnf install mpv-devel openssl-libs zlib-ng-compat libcxx libcxxabi llvm-lib
 cargo run --release --locked
 ```
 
-Choose a renderer when building the release executable at `target/release/tg-player`.
+Choose a renderer when building the release executable at `target/release/gramwave`.
 
 - Vulkan (default): `cargo build --release --locked`
 - OpenGL: `cargo build --release --locked --no-default-features --features mpv,telegram`
@@ -50,7 +48,7 @@ Choose a renderer when building the release executable at `target/release/tg-pla
    password if requested.
 
 Your session is saved for future launches. Account data and downloaded music live
-in `$XDG_DATA_HOME/tg-player`, or `~/.local/share/tg-player` by default. Keep this
+in `$XDG_DATA_HOME/gramwave`, or `~/.local/share/gramwave` by default. Keep this
 directory private.
 
 Closing the window keeps playback in the tray when a tray host is available.

@@ -1,9 +1,9 @@
 pub mod adapters;
 pub mod application;
 use adapters::{discovery, media_loader, streaming, telegram};
-use tg_player_application::model;
-pub use tg_player_domain as domain;
-use tg_player_domain::playback;
+use gramwave_application::model;
+pub use gramwave_domain as domain;
+use gramwave_domain::playback;
 #[cfg(test)]
 mod artwork_tests;
 mod auth;

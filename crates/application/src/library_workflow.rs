@@ -222,10 +222,7 @@ impl AppCore {
                 } => {
                     if !from_cache {
                         for &message in &messages {
-                            self.offline_source_changed(tg_player_domain::TrackId {
-                                chat,
-                                message,
-                            });
+                            self.offline_source_changed(gramwave_domain::TrackId { chat, message });
                         }
                         self.handle(CoreCommand::Delete(chat, messages));
                     }

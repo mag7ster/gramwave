@@ -111,7 +111,7 @@ mod lazy_tests {
         let temp = tempfile::tempdir().unwrap();
         let (mut store, state) =
             crate::adapters::storage::Store::open(&temp.path().join("db")).unwrap();
-        use tg_player_application::{
+        use gramwave_application::{
             library::{LibraryCommand, LibraryEffect, LibraryEvent},
             workflow::Effect,
             AppCore,
@@ -199,7 +199,7 @@ mod refresh_tests {
                 "getMessages" => { assert_eq!(v["message_ids"],json!([200,100])); Ok(json!({"next_from_message_id":0,"messages":[message(200,"Edited title"),null]})) },
                 other => panic!("Unexpected RPC {other}")
             }
-        }, |changes| tg_player_application::core::LibraryPatch::from(changes).apply(&mut displayed,&HashSet::new())).unwrap();
+        }, |changes| gramwave_application::core::LibraryPatch::from(changes).apply(&mut displayed,&HashSet::new())).unwrap();
         assert_eq!(
             displayed
                 .tracks
@@ -234,7 +234,7 @@ mod refresh_tests {
                     }
                 },
                 |changes| {
-                    tg_player_application::core::LibraryPatch::from(changes)
+                    gramwave_application::core::LibraryPatch::from(changes)
                         .apply(&mut displayed, &HashSet::new())
                 },
             );
@@ -265,7 +265,7 @@ mod refresh_tests {
                     json!({"next_from_message_id":0,"messages":[message(400,"New"),message(200,"Old title")]})
                 })
             },
-            |changes| tg_player_application::core::LibraryPatch::from(changes).apply(&mut displayed, &HashSet::new()),
+            |changes| gramwave_application::core::LibraryPatch::from(changes).apply(&mut displayed, &HashSet::new()),
         )
         .unwrap();
         assert_eq!(searches, vec![0, 400]);
@@ -301,7 +301,7 @@ mod refresh_tests {
                     json!({"next_from_message_id":0,"messages":[]})
                 })
             },
-            |changes| tg_player_application::core::LibraryPatch::from(changes)
+            |changes| gramwave_application::core::LibraryPatch::from(changes)
                 .apply(&mut displayed, &HashSet::new())
         )
         .is_err());
@@ -318,7 +318,7 @@ mod refresh_tests {
             removed: vec![100],
             ..Default::default()
         };
-        tg_player_application::core::LibraryPatch::from(changes)
+        gramwave_application::core::LibraryPatch::from(changes)
             .apply(&mut displayed, &HashSet::from([100, 200]));
         assert_eq!(displayed.tracks.len(), 1);
         assert_eq!(displayed.tracks[0].title, "Live edit");
