@@ -4,7 +4,7 @@ use crate::{
     core::{AppCore, CoreCommand},
     model::Track,
     persistence::ChangeSet,
-    ports::{PlaybackEvent, PlayerCommand, PlayerSnapshot},
+    ports::{PlaybackEvent, PlayerCommand, PlayerSnapshot, QueuedPlayback},
     tasks::{Operation, RequestId},
     AppError,
 };
@@ -46,6 +46,7 @@ pub enum Effect {
         revision: u64,
     },
     Player(PlayerCommand),
+    PlaybackAdvanced(String),
     Prefetch(Track),
     Persist(Box<ChangeSet>),
     Notice(crate::notice::Notice),
@@ -131,6 +132,44 @@ impl AppCore {
     }
     pub fn playback(&self) -> &crate::playback::PlaybackCore {
         &self.playback
+    }
+    pub fn next_local_playback(&self) -> Option<QueuedPlayback> {
+        use crate::playback::PlaybackState;
+        use gramwave_domain::RepeatMode;
+        if !matches!(
+            self.playback.state,
+            PlaybackState::Playing | PlaybackState::Paused
+        ) {
+            return None;
+        }
+        let session = &self.state.session;
+        let current = session.current()?;
+        let next = if self.state.repeat == RepeatMode::One {
+            current
+        } else {
+            session.remaining().first().or_else(|| {
+                // A shuffled repeat cycle is decided when the current track ends.
+                if self.state.repeat == RepeatMode::All && !self.state.shuffle {
+                    session.snapshot().first()
+                } else {
+                    None
+                }
+            })?
+        };
+        let path = self
+            .offline
+            .local_path(
+                next.id(),
+                crate::offline::unix_seconds(std::time::SystemTime::now()),
+                self.state.cache_policy.days,
+            )
+            .map(str::to_owned)
+            .or_else(|| self.library.runtime_media(next.id())?.cached.clone())?;
+        Some(QueuedPlayback {
+            entry_id: next.entry_id,
+            revision: self.revision(next.id()),
+            path,
+        })
     }
     pub fn command(&mut self, command: AppCommand) -> Vec<Effect> {
         let mut effects = Vec::new();
@@ -542,8 +581,36 @@ impl AppCore {
                     }
                 }
             }
-            AppEvent::Player(PlaybackEvent::Loaded) => {
-                if self.playback.state.loading() {
+            AppEvent::Player(event @ (PlaybackEvent::Loaded | PlaybackEvent::Advanced(_))) => {
+                let advanced = if let PlaybackEvent::Advanced(next) = event {
+                    if self.playback.state.loading() || self.state.session.current().is_none() {
+                        return effects;
+                    }
+                    if self.next_local_playback().as_ref() != Some(&next) {
+                        return self.command(AppCommand::Advance(true));
+                    }
+                    self.playback.target = self.handle(CoreCommand::Advance(true));
+                    self.playback.revision = next.revision;
+                    if let Some(track) = &self.playback.target {
+                        self.offline.mark_used(
+                            track.id(),
+                            &next.path,
+                            crate::offline::unix_seconds(std::time::SystemTime::now()),
+                        );
+                    }
+                    if let Some(next) = self.state.session.remaining().first() {
+                        effects.push(Effect::Prefetch(next.into()));
+                    }
+                    effects.extend([
+                        Effect::PlaybackAdvanced(next.path),
+                        Effect::ClearSeek,
+                        Effect::Notice(crate::notice::Notice::Clear),
+                    ]);
+                    true
+                } else {
+                    false
+                };
+                if advanced || self.playback.state.loading() {
                     let chat = self.state.session.current().map(|track| track.chat);
                     if chat.is_some() && self.state.last_played_chat != chat {
                         let mut settings = crate::persistence::Settings::from(&self.state);

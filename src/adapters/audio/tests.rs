@@ -30,6 +30,88 @@ mod playback_tests {
     }
 
     #[test]
+    fn native_queue_next_replaces_the_old_candidate_and_plays_from_zero() {
+        use crate::application::ports::PlayerCommand;
+        use gramwave_domain::QueueEntryId;
+        use std::time::Instant;
+
+        let player = Player::with_audio_output(Some("null"), Default::default()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = |name| {
+            let path = temp.path().join(name);
+            write_wav(&path, 32_000);
+            path.to_str().unwrap().to_owned()
+        };
+        player.command(PlayerCommand::Pause(true)).unwrap();
+        player
+            .command(PlayerCommand::Load {
+                path: path("current.wav"),
+                start_ms: 2_500,
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !player.drain().contains(&PlaybackEvent::Loaded) {
+            assert!(Instant::now() < deadline, "initial file did not load");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for (id, name) in [(2, "removed.wav"), (3, "next.wav")] {
+            player
+                .command(PlayerCommand::QueueNext(Some(QueuedPlayback {
+                    entry_id: QueueEntryId(id),
+                    revision: 0,
+                    path: path(name),
+                })))
+                .unwrap();
+        }
+        player.command(PlayerCommand::Pause(false)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        'transition: loop {
+            for event in player.drain() {
+                match event {
+                    PlaybackEvent::Advanced(next) => {
+                        assert_eq!(next.entry_id, QueueEntryId(3));
+                        assert!(player.snapshot().position < 1.);
+                        break 'transition;
+                    }
+                    PlaybackEvent::Finished | PlaybackEvent::Failed(_) => {
+                        panic!("expected mpv to advance on its own, got {event:?}")
+                    }
+                    _ => {}
+                }
+            }
+            assert!(Instant::now() < deadline, "queued file did not load");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let corrupt = temp.path().join("corrupt.wav");
+        std::fs::write(&corrupt, b"invalid audio").unwrap();
+        player
+            .command(PlayerCommand::QueueNext(Some(QueuedPlayback {
+                entry_id: QueueEntryId(4),
+                revision: 0,
+                path: corrupt.to_str().unwrap().to_owned(),
+            })))
+            .unwrap();
+        player.command(PlayerCommand::Seek(3.5)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let events = player.drain();
+            assert!(events.iter().all(|event| !matches!(
+                event,
+                PlaybackEvent::Advanced(_) | PlaybackEvent::Failed(_)
+            )));
+            if events.contains(&PlaybackEvent::Finished) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "unplayable candidate blocked EOF"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
     fn native_load_resumes_at_checkpoint_and_normal_load_starts_at_zero() {
         use crate::application::ports::PlayerCommand;
         use std::time::Instant;

@@ -1,5 +1,6 @@
 use crate::{App, Event};
 use gramwave_application::{
+    ports::PlayerCommand,
     tasks::JobClass,
     workflow::{AppEvent, Effect, PreparedPlayback},
     AppError,
@@ -33,6 +34,7 @@ impl App {
         self.wake.wake();
     }
     pub(crate) fn run_effects(&mut self, effects: Vec<Effect>) {
+        let mut advanced = false;
         for effect in effects {
             match effect {
                 Effect::Library(effect) => self.run_library_effect(effect),
@@ -297,33 +299,12 @@ impl App {
                     }
                 }
                 Effect::Player(command) => {
+                    match &command {
+                        PlayerCommand::Load { path, .. } => self.set_playback_path(path),
+                        PlayerCommand::Stop => self.queued_playback = None,
+                        _ => {}
+                    }
                     if let Some(player) = &self.player {
-                        if let gramwave_application::ports::PlayerCommand::Load { path, .. } =
-                            &command
-                        {
-                            use super::cache::CachePlayback;
-                            let offline = self
-                                .state
-                                .view()
-                                .session
-                                .current()
-                                .filter(|entry| {
-                                    self.state
-                                        .offline()
-                                        .copies
-                                        .get(&entry.id())
-                                        .is_some_and(|copy| copy.path == *path)
-                                })
-                                .map(|entry| (entry.id(), path.clone()));
-                            self.cache_playback = if offline.is_some() {
-                                CachePlayback::Offline
-                            } else if std::path::Path::new(path).is_absolute() {
-                                CachePlayback::Local
-                            } else {
-                                CachePlayback::Stream
-                            };
-                            self.local_playback = offline;
-                        }
                         let result = player.command(command);
                         if let Err(error) = result {
                             self.core_event(AppEvent::Player(
@@ -331,6 +312,18 @@ impl App {
                             ));
                         }
                     }
+                }
+                Effect::PlaybackAdvanced(path) => {
+                    advanced = true;
+                    self.set_playback_path(&path);
+                    self.local_playback = None;
+                    self.error.clear();
+                    self.error_retry = self
+                        .state
+                        .view()
+                        .session
+                        .current()
+                        .map(|track| crate::RetryAction::Playback(track.into()));
                 }
                 Effect::ClearSeek => self.seek_preview = None,
                 Effect::Notice(message) => {
@@ -442,6 +435,38 @@ impl App {
                 }
             }
         }
+        if let Some(player) = &self.player {
+            let next = self.state.next_local_playback();
+            if advanced || next != self.queued_playback {
+                let _ = player.command(PlayerCommand::QueueNext(next.clone()));
+                self.queued_playback = next;
+            }
+        }
+    }
+
+    fn set_playback_path(&mut self, path: &str) {
+        use super::cache::CachePlayback;
+        let offline = self
+            .state
+            .view()
+            .session
+            .current()
+            .filter(|entry| {
+                self.state
+                    .offline()
+                    .copies
+                    .get(&entry.id())
+                    .is_some_and(|copy| copy.path == path)
+            })
+            .map(|entry| (entry.id(), path.to_owned()));
+        self.cache_playback = if offline.is_some() {
+            CachePlayback::Offline
+        } else if std::path::Path::new(path).is_absolute() {
+            CachePlayback::Local
+        } else {
+            CachePlayback::Stream
+        };
+        self.local_playback = offline;
     }
 }
 

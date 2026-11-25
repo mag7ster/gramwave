@@ -1,4 +1,5 @@
 pub use crate::application::ports::PlaybackEvent;
+use crate::application::ports::QueuedPlayback;
 use gramwave_application::AppError;
 use rsmpv::{EndFileReason, Event, Mpv};
 use std::{
@@ -16,6 +17,7 @@ struct NativePlayer {
     waiting_for_entry: std::cell::Cell<bool>,
     started_entry: std::cell::Cell<Option<i64>>,
     ready_entry: std::cell::Cell<Option<i64>>,
+    next_entry: std::cell::RefCell<Option<(i64, QueuedPlayback)>>,
     command_errors: std::cell::RefCell<Vec<String>>,
 }
 impl NativePlayer {
@@ -26,6 +28,7 @@ impl NativePlayer {
             ("terminal", "no"),
             ("audio-display", "no"),
             ("idle", "yes"),
+            ("prefetch-playlist", "yes"),
         ] {
             builder = builder
                 .set_property(name, value)
@@ -44,19 +47,24 @@ impl NativePlayer {
             waiting_for_entry: Default::default(),
             started_entry: Default::default(),
             ready_entry: Default::default(),
+            next_entry: Default::default(),
             command_errors: Default::default(),
         })
     }
     fn cmd(&self, args: &[&str], start_ms: Option<u64>) {
-        let result = start_ms.map_or(Ok(()), |ms| {
-            let start = if ms == 0 {
-                "none".into()
-            } else {
-                (ms as f64 / 1000.).to_string()
-            };
-            self.try_cmd(&["set", "options/start", &start])
-        });
-        if let Err(error) = result.and_then(|()| self.try_cmd(args)) {
+        let result = if let Some(ms) = start_ms.filter(|ms| *ms > 0) {
+            let start = format!("start={}", ms as f64 / 1000.);
+            let mut args = args.to_vec();
+            if rsmpv::client_api_version() >= (2, 3) {
+                // mpv 0.38 added an insertion index before the per-file options.
+                args.push("-1");
+            }
+            args.push(&start);
+            self.try_cmd(&args)
+        } else {
+            self.try_cmd(args)
+        };
+        if let Err(error) = result {
             self.command_errors.borrow_mut().push(error);
         }
     }
@@ -66,10 +74,12 @@ impl NativePlayer {
         if args.first() == Some(&"loadfile") {
             let _ = self.drain();
             self.ready_entry.set(None);
+            self.next_entry.take();
         }
         if args.first() == Some(&"stop") {
             self.active_entry.set(None);
             self.waiting_for_entry.set(false);
+            self.next_entry.take();
         }
         self.mpv.command(args).map_err(|error| error.to_string())?;
         if args.first() == Some(&"loadfile") {
@@ -78,6 +88,38 @@ impl NativePlayer {
             self.waiting_for_entry.set(entry.is_none());
         }
         Ok(())
+    }
+    fn queue_next(&self, next: Option<QueuedPlayback>) {
+        let Some(active) = self.active_entry.get() else {
+            return;
+        };
+        if self.is_next_entry(active)
+            || self.mpv.command(&["playlist-clear"]).is_err()
+            || self.mpv.get_property::<i64>("playlist/0/id").ok() != Some(active)
+        {
+            return;
+        }
+        self.next_entry.take();
+        let Some(next) = next.filter(|next| std::path::Path::new(&next.path).is_file()) else {
+            return;
+        };
+        if self
+            .mpv
+            .command(&["loadfile", &next.path, "append"])
+            .is_ok()
+        {
+            if let Ok(id) = self.mpv.get_property::<i64>("playlist/1/id") {
+                self.next_entry.replace(Some((id, next)));
+            } else {
+                let _ = self.mpv.command(&["playlist-clear"]);
+            }
+        }
+    }
+    fn is_next_entry(&self, id: i64) -> bool {
+        self.next_entry
+            .borrow()
+            .as_ref()
+            .is_some_and(|(entry, _)| *entry == id)
     }
     pub fn drain(&self) -> Vec<PlaybackEvent> {
         let mut events: Vec<_> = self
@@ -100,11 +142,26 @@ impl NativePlayer {
                     }
                     if current {
                         self.active_entry.set(None);
+                        if self.is_next_entry(playlist_entry_id) {
+                            // The speculative file failed before loading. Resolve it normally.
+                            self.next_entry.take();
+                            events.push(PlaybackEvent::Finished);
+                            continue;
+                        }
                     }
                     match reason {
-                        EndFileReason::Eof => events.push(PlaybackEvent::Finished),
+                        EndFileReason::Eof => {
+                            if let Some((id, _)) = self.next_entry.borrow().as_ref() {
+                                self.active_entry.set(Some(*id));
+                            } else {
+                                events.push(PlaybackEvent::Finished);
+                            }
+                        }
                         EndFileReason::Stop => events.push(PlaybackEvent::Stopped),
                         EndFileReason::Error => {
+                            if self.next_entry.take().is_some() {
+                                let _ = self.mpv.command(&["stop"]);
+                            }
                             let message = error
                                 .map(|error| error.to_string())
                                 .unwrap_or_else(|| "mpv playback failed".into());
@@ -120,7 +177,16 @@ impl NativePlayer {
                     self.started_entry.set(Some(playlist_entry_id));
                 }
                 Event::FileLoaded if self.started_entry.get() == self.active_entry.get() => {
-                    events.push(PlaybackEvent::Loaded);
+                    if self
+                        .active_entry
+                        .get()
+                        .is_some_and(|id| self.is_next_entry(id))
+                    {
+                        let (_, next) = self.next_entry.take().unwrap();
+                        events.push(PlaybackEvent::Advanced(next));
+                    } else {
+                        events.push(PlaybackEvent::Loaded);
+                    }
                 }
                 Event::PlaybackRestart if self.started_entry.get() == self.active_entry.get() => {
                     self.ready_entry.set(self.active_entry.get());
@@ -159,8 +225,14 @@ fn publish_snapshot(
 }
 struct Request {
     generation: u64,
-    args: Vec<String>,
-    start_ms: Option<u64>,
+    action: PlayerAction,
+}
+enum PlayerAction {
+    Command {
+        args: Vec<String>,
+        start_ms: Option<u64>,
+    },
+    QueueNext(Option<QueuedPlayback>),
 }
 
 pub struct Player {
@@ -203,17 +275,39 @@ impl Player {
                 let mut generation = 0;
                 let mut snapshot = crate::application::ports::PlayerSnapshot::default();
                 loop {
+                    let mut events = Vec::new();
                     let commanded = match commands.try_recv() {
                         Ok(request) => {
                             generation = request.generation;
-                            let strings: Vec<_> = request.args.iter().map(String::as_str).collect();
-                            native.cmd(&strings, request.start_ms);
+                            match request.action {
+                                PlayerAction::Command { args, start_ms } => {
+                                    let strings: Vec<_> = args.iter().map(String::as_str).collect();
+                                    native.cmd(&strings, start_ms);
+                                }
+                                PlayerAction::QueueNext(next) => {
+                                    events = native.drain();
+                                    native.queue_next(next);
+                                }
+                            }
                             true
                         }
                         Err(mpsc::TryRecvError::Disconnected) => break,
                         Err(mpsc::TryRecvError::Empty) => false,
                     };
-                    let events = native.drain();
+                    events.extend(native.drain());
+                    if native
+                        .active_entry
+                        .get()
+                        .is_some_and(|id| native.is_next_entry(id))
+                        && native.flag("idle-active")
+                    {
+                        // EOF can race with editing mpv's playlist. Fall back if it went idle.
+                        events.extend(native.drain());
+                        if native.next_entry.take().is_some() {
+                            native.active_entry.set(None);
+                            events.push(PlaybackEvent::Finished);
+                        }
+                    }
                     if native.active_entry.get().is_none()
                         && !native.waiting_for_entry.get()
                         && native.flag("idle-active")
@@ -298,19 +392,13 @@ impl Player {
         if is_load {
             self.active_load.store(generation, Ordering::Release);
         }
-        let result = self
-            .sender
-            .as_ref()
-            .ok_or("mpv is closed".to_owned())
-            .and_then(|sender| {
-                sender
-                    .send(Request {
-                        generation,
-                        args: args.iter().map(|s| (*s).into()).collect(),
-                        start_ms,
-                    })
-                    .map_err(|e| e.to_string())
-            });
+        let result = self.send(Request {
+            generation,
+            action: PlayerAction::Command {
+                args: args.iter().map(|s| (*s).into()).collect(),
+                start_ms,
+            },
+        });
         if result.is_err() && is_load {
             let _ = self.active_load.compare_exchange(
                 generation,
@@ -319,7 +407,14 @@ impl Player {
                 Ordering::Acquire,
             );
         }
-        result?;
+        result
+    }
+    fn send(&self, request: Request) -> Result<(), String> {
+        self.sender
+            .as_ref()
+            .ok_or("mpv is closed".to_owned())?
+            .send(request)
+            .map_err(|error| error.to_string())?;
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
@@ -385,6 +480,10 @@ impl PlayerBackend for Player {
             PlayerCommand::Load { path, start_ms } => {
                 self.submit(&["loadfile", &path, "replace"], Some(start_ms))
             }
+            PlayerCommand::QueueNext(next) => self.send(Request {
+                generation: self.generation.load(Ordering::Acquire),
+                action: PlayerAction::QueueNext(next),
+            }),
             PlayerCommand::Pause(paused) => {
                 self.try_cmd(&["set", "pause", if paused { "yes" } else { "no" }])
             }

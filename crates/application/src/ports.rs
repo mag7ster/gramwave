@@ -1,6 +1,7 @@
 #[derive(Debug, PartialEq)]
 pub enum PlaybackEvent {
     Loaded,
+    Advanced(QueuedPlayback),
     Finished,
     Stopped,
     Failed(crate::AppError),
@@ -8,10 +9,17 @@ pub enum PlaybackEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {
     Load { path: String, start_ms: u64 },
+    QueueNext(Option<QueuedPlayback>),
     Pause(bool),
     Stop,
     Seek(f64),
     Volume(f32),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuedPlayback {
+    pub entry_id: gramwave_domain::QueueEntryId,
+    pub revision: u64,
+    pub path: String,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlayerSnapshot {

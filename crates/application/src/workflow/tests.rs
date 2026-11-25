@@ -10,6 +10,46 @@ fn track(message: i64) -> Track {
 }
 
 #[test]
+fn native_advance_preserves_queue_occurrences_and_rechecks_queue_edits() {
+    let repeated = track(1);
+    let third = track(3);
+    let mut state = State::default();
+    state.session.start(
+        &[repeated.clone(), repeated.clone(), third.clone()],
+        0,
+        false,
+    );
+    let first = state.session.current().unwrap().entry_id;
+    let second = state.session.remaining()[0].entry_id;
+    let mut core = AppCore::new(state);
+    core.playback.state = crate::playback::PlaybackState::Playing;
+    for (track, path) in [(repeated, "repeated.ogg"), (third, "third.ogg")] {
+        let mut media = crate::media::MediaTrack::from(track);
+        media.cached = Some(path.into());
+        core.library.cache_track(&media);
+    }
+    let next = core.next_local_playback().unwrap();
+    assert_eq!(next.entry_id, second);
+    let effects = core.event(AppEvent::Player(PlaybackEvent::Advanced(next)));
+    assert_eq!(core.view().session.current().unwrap().entry_id, second);
+    assert_eq!(core.view().session.history()[0].entry_id, first);
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PlaybackAdvanced(_))));
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Player(_) | Effect::PreparePlayback { .. })));
+
+    let stale = core.next_local_playback().unwrap();
+    core.command(AppCommand::Insert(track(4), true));
+    let effects = core.event(AppEvent::Player(PlaybackEvent::Advanced(stale)));
+    assert_eq!(core.view().session.current().unwrap().message, 4);
+    assert!(effects.iter().any(
+        |effect| matches!(effect, Effect::PreparePlayback { track, .. } if track.message == 4)
+    ));
+}
+
+#[test]
 fn startup_uses_the_loaded_track_chat_even_after_stopping() {
     use crate::{
         model::{Playlist, StartupPlaylist},

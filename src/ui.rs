@@ -44,9 +44,11 @@ impl App {
     }
 
     fn process_player_events(&mut self) {
+        use gramwave_application::ports::PlaybackEvent;
         let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
+        let generation = self.state.playback().generation();
         for event in events {
-            if event == gramwave_application::ports::PlaybackEvent::Loaded {
+            if event == PlaybackEvent::Loaded {
                 if let Some((id, path)) = self.local_playback.take() {
                     self.core_event(
                         gramwave_application::workflow::AppEvent::LocalPlaybackUsed { id, path },
@@ -54,6 +56,9 @@ impl App {
                 }
             }
             self.core_event(gramwave_application::workflow::AppEvent::Player(event));
+            if self.state.playback().generation() != generation {
+                break;
+            }
         }
     }
 
@@ -518,6 +523,7 @@ impl App {
 
     pub fn background(&mut self, ctx: &egui::Context, window_present: bool) -> Option<Duration> {
         self.process(ctx);
+        self.process_player_events();
         self.process_control();
         let now = std::time::Instant::now();
         let cache = self.maintain_cache(now);
