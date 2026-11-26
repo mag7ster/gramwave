@@ -1,5 +1,6 @@
 //! CLI client and bridge to the existing private single-instance channel.
 use crate::application::control::{Pending, Reply, Request, REPLY_LIMIT};
+use crate::identity::{APP_ID, APP_NAME, IS_RELEASE};
 use crate::{domain::model::QueueEntryId, RepeatMode};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use fastframe_instance::Slot;
@@ -14,7 +15,11 @@ const PREFIX: &str = "control-v1:";
 const TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) fn slot(demo: bool) -> Slot {
-    let slot = Slot::new("org.gramwave.App");
+    let slot = Slot::new(if IS_RELEASE {
+        "org.gramwave.App"
+    } else {
+        "org.gramwave.Dev"
+    });
     if demo {
         slot.scoped("demo")
     } else {
@@ -24,7 +29,7 @@ pub(crate) fn slot(demo: bool) -> Slot {
 
 #[derive(Parser)]
 #[command(
-    bin_name = "gramwave [--demo] --ctl",
+    bin_name = format!("{APP_ID} [--demo] --ctl"),
     no_binary_name = true,
     arg_required_else_help = true,
     disable_help_subcommand = true
@@ -143,11 +148,11 @@ pub(crate) fn bridge(
                 deadline: Instant::now() + TIMEOUT,
                 reply,
             })
-            .map_err(|_| "Gramwave control is busy or unavailable".to_owned())?;
+            .map_err(|_| format!("{APP_NAME} control is busy or unavailable"))?;
         wake();
         receiver
             .recv_timeout(TIMEOUT)
-            .map_err(|_| "Gramwave did not process the command within 3 seconds".to_owned())
+            .map_err(|_| format!("{APP_NAME} did not process the command within 3 seconds"))
     })();
     let reply = result.unwrap_or_else(Reply::failure);
     let encoded = serde_json::to_string(&reply).expect("serializable control reply");
@@ -166,13 +171,12 @@ fn send(slot: &Slot, args: &[String]) -> Reply {
             serde_json::to_string(&request).map_err(|e| e.to_string())?
         );
         let response = slot.send(&request).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => "Gramwave is not running; start the app first".to_owned(),
-            std::io::ErrorKind::PermissionDenied => "Control unavailable: check socket permissions and restart Gramwave with the updated binary".to_owned(),
-            _ => format!("Cannot contact Gramwave: {e}"),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => format!("{APP_NAME} is not running; start the app first"),
+            std::io::ErrorKind::PermissionDenied => format!("Control unavailable: check socket permissions and restart {APP_NAME} with the updated binary"),
+            _ => format!("Cannot contact {APP_NAME}: {e}"),
         })?;
         serde_json::from_str(&response).map_err(|_| {
-            "The running Gramwave does not support this CLI; restart it with the updated binary"
-                .to_owned()
+            format!("The running {APP_NAME} does not support this CLI; restart it with the updated binary")
         })
     })();
     result.unwrap_or_else(Reply::failure)

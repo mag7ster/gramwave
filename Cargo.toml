@@ -5,6 +5,10 @@ edition = "2021"
 license = "MIT"
 description = "Gramwave, a read-only Telegram music player for Linux"
 
+[[bin]]
+name = "gramwave-dev"
+path = "src/main.rs"
+
 [workspace]
 members = ["crates/domain", "crates/application"]
 resolver = "2"
@@ -12,6 +16,7 @@ resolver = "2"
 [features]
 default = ["mpv", "download-tdlib", "vulkan"]
 native-tests = ["mpv"]
+release-branding = []
 mpv = ["dep:rsmpv"]
 telegram = ["dep:tdlib-rs"]
 download-tdlib = ["telegram", "tdlib-rs/download-tdlib"]

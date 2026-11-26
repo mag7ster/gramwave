@@ -1,10 +1,11 @@
+use crate::identity::APP_ID;
 use clap::Parser;
 use std::{path::PathBuf, sync::OnceLock};
 
 pub(crate) const MIN_WINDOW_SIZE: [f32; 2] = [220., 96.];
 
 #[derive(Clone, Debug, Default, Parser)]
-#[command(name = "gramwave", version, about)]
+#[command(name = APP_ID, version, about)]
 pub struct LaunchOptions {
     #[arg(long)]
     pub demo: bool,

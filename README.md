@@ -55,13 +55,17 @@ sudo dnf install mpv-devel openssl-libs zlib-ng-compat libcxx libcxxabi llvm-lib
 cargo run --release --locked
 ```
 
-Choose a renderer when building the release executable at `target/release/gramwave`.
+Choose a renderer when building the optimized local executable at
+`target/release/gramwave-dev`.
 
 - Vulkan (default): `cargo build --release --locked`
 - OpenGL: `cargo build --release --locked --no-default-features --features mpv,download-tdlib`
 
 To build with an installed TDLib 1.8.61, set `GRAMWAVE_TDLIB_DIR` to its
 installation prefix and enable `mpv,telegram,vulkan` with `--no-default-features`.
+
+Local builds are called **Gramwave Dev**. The Homebrew formula enables
+`release-branding` and installs the executable as `gramwave`.
 
 ## Connect Telegram
 
@@ -70,9 +74,10 @@ installation prefix and enable `mpv,telegram,vulkan` with `--no-default-features
 3. Sign in with a QR code or your phone number; enter your two-step verification
    password if requested.
 
-Your session is saved for future launches. Account data and downloaded music live
-in `$XDG_DATA_HOME/gramwave`, or `~/.local/share/gramwave` by default. Keep this
-directory private.
+Your session is saved for future launches. **Gramwave** stores account data and
+downloads in `$XDG_DATA_HOME/gramwave` (`~/.local/share/gramwave` by default).
+**Gramwave Dev** uses the separate `gramwave-dev` directory under the same data
+home. Keep both directories private.
 
 Closing the window keeps playback in the tray when a tray host is available.
 Use **Quit** in the tray menu or **Ctrl+Shift+Q** to exit completely.

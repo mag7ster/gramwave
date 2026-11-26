@@ -1,4 +1,5 @@
 use crate::application::commands::AppCommand;
+use crate::identity::APP_NAME;
 use crate::{design, tr, App};
 use design::{button, Icon};
 use eframe::egui;
@@ -302,7 +303,7 @@ impl App {
                     reveal_layout(ui, "auth-layout", compact);
                     ui.add_space(if compact { 6. } else { 50. });
                     ui.vertical_centered(|ui| {
-                        ui.heading(egui::RichText::new("Gramwave").size(32.));
+                        ui.heading(egui::RichText::new(APP_NAME).size(32.));
                         ui.weak(tr("Your Telegram. Your soundtrack."));
                     });
                     ui.add_space(if compact { 6. } else { 28. });
@@ -627,7 +628,7 @@ fn application_menu(
     ui: &mut egui::Ui,
     settings_available: bool,
 ) -> (egui::Rect, Option<ApplicationMenuAction>) {
-    let label = tr("Gramwave menu");
+    let label = tr("{app} menu").replace("{app}", APP_NAME);
     let (response, menu) = ui
         .scope(|ui| {
             ui.spacing_mut().button_padding = egui::Vec2::splat(6.);
@@ -640,7 +641,10 @@ fn application_menu(
             .ui(ui, |ui| {
                 let action = if settings_available && ui.button(tr("Settings")).clicked() {
                     Some(ApplicationMenuAction::Settings)
-                } else if ui.button(tr("Quit Gramwave")).clicked() {
+                } else if ui
+                    .button(tr("Quit {app}").replace("{app}", APP_NAME))
+                    .clicked()
+                {
                     Some(ApplicationMenuAction::Quit)
                 } else {
                     None
@@ -756,13 +760,14 @@ fn window_header(
             let (menu_rect, action) = application_menu(&mut text_ui, settings_available);
             drag_window_caption(ui, caption.with_min_x(menu_rect.right() + 1.));
             if let Some(title) = title.filter(|_| expanded > 0.) {
-                let suffix = egui::WidgetText::from(egui::RichText::new("— Gramwave").weak())
-                    .into_galley(
-                        &text_ui,
-                        Some(egui::TextWrapMode::Extend),
-                        f32::INFINITY,
-                        egui::TextStyle::Body,
-                    );
+                let suffix =
+                    egui::WidgetText::from(egui::RichText::new(format!("— {APP_NAME}")).weak())
+                        .into_galley(
+                            &text_ui,
+                            Some(egui::TextWrapMode::Extend),
+                            f32::INFINITY,
+                            egui::TextStyle::Body,
+                        );
                 let title_width = expanded
                     * (text_ui.available_width()
                         - suffix.size().x
@@ -781,7 +786,7 @@ fn window_header(
                 text_ui.set_opacity(opacity);
                 text_ui.add(egui::Label::new(suffix));
             } else {
-                text_ui.strong("Gramwave");
+                text_ui.strong(APP_NAME);
             }
 
             let controls_rect = egui::Rect::from_min_max(

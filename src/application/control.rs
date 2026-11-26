@@ -118,7 +118,7 @@ impl App {
     }
     fn apply_control(&mut self, request: Request) -> Result<Value, String> {
         if self.quitting {
-            return Err("Gramwave is shutting down".into());
+            return Err(format!("{} is shutting down", crate::identity::APP_NAME));
         }
         let command = match request {
             Request::Status => return Ok(self.control_status()),

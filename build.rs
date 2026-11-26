@@ -39,8 +39,12 @@ fn telegram() {
             std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
                 .join(".local/share")
         });
-    let native = base.join("gramwave/native");
-    if native.is_dir() {
+    let release = cfg!(feature = "release-branding");
+    let profile = if release { "gramwave" } else { "gramwave-dev" };
+    let native = base.join(profile).join("native");
+    println!("cargo:rerun-if-env-changed=XDG_DATA_HOME");
+    println!("cargo:rerun-if-env-changed=HOME");
+    if !release || native.is_dir() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", native.display());
     }
 }

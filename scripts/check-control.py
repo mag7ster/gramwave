@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 
-binary = pathlib.Path(os.environ.get("GRAMWAVE_BINARY", pathlib.Path(__file__).resolve().parents[1] / "target/debug/gramwave"))
+binary = pathlib.Path(os.environ.get("GRAMWAVE_BINARY", pathlib.Path(__file__).resolve().parents[1] / "target/debug/gramwave-dev"))
 
 
 with tempfile.TemporaryDirectory(prefix="gramwave-control-") as runtime:

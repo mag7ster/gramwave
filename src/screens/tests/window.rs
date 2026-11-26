@@ -30,10 +30,10 @@ fn window_header_keeps_the_app_name_visible_after_a_long_track_title() {
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(texts(None), [("Gramwave".into(), false)]);
+    assert_eq!(texts(None), [(APP_NAME.into(), false)]);
     assert_eq!(
         texts(Some(&long)),
-        [(long.clone(), true), ("— Gramwave".into(), false)]
+        [(long.clone(), true), (format!("— {APP_NAME}"), false)]
     );
 }
 

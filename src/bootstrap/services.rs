@@ -2,6 +2,7 @@
 use crate::{
     adapters::{storage, streaming, telegram, tray::Tray},
     application::ports::{PlayerBackend, Repository},
+    identity::{APP_ID, APP_NAME},
     launch::LaunchOptions,
 };
 use fastframe_shell::Waker;
@@ -71,7 +72,7 @@ impl Services {
         let media = desktop.then(|| {
             let wake = wake.clone();
             fastframe_now_playing::NowPlaying::start(
-                fastframe_now_playing::App::new("gramwave", "Gramwave"),
+                fastframe_now_playing::App::new(APP_ID, APP_NAME),
                 move || wake.wake(),
             )
         });
@@ -100,7 +101,7 @@ fn data_root() -> PathBuf {
         .unwrap_or_else(|| {
             PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")
         })
-        .join("gramwave")
+        .join(APP_ID)
 }
 
 pub(crate) struct Connection {

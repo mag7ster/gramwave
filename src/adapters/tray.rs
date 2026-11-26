@@ -143,11 +143,11 @@ fn activation_token() -> Option<String> {
 
 impl ksni::Tray for Item {
     fn id(&self) -> String {
-        "gramwave".into()
+        crate::identity::APP_ID.into()
     }
 
     fn title(&self) -> String {
-        "Gramwave".into()
+        crate::identity::APP_NAME.into()
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {

@@ -110,7 +110,7 @@ pub fn run() -> eframe::Result {
             }
         };
         eframe::run_native(
-            "Gramwave",
+            crate::identity::APP_NAME,
             eframe::NativeOptions {
                 viewport,
                 #[cfg(feature = "vulkan")]

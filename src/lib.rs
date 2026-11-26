@@ -11,6 +11,7 @@ mod bootstrap;
 mod design;
 mod emoji;
 mod i18n;
+mod identity;
 mod screens;
 mod ui;
 use i18n::tr;

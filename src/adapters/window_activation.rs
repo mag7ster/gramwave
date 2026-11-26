@@ -14,10 +14,10 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::{
 use winit::window::Window;
 
 pub(crate) fn app_id(demo: bool) -> &'static str {
-    if demo {
-        "gramwave-demo"
-    } else {
-        "gramwave"
+    match (demo, crate::identity::IS_RELEASE) {
+        (true, true) => "gramwave-demo",
+        (true, false) => "gramwave-dev-demo",
+        (false, _) => crate::identity::APP_ID,
     }
 }
 

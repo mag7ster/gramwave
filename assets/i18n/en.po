@@ -289,7 +289,7 @@ msgid "GiB"
 msgstr ""
 
 #: src/screens.rs:1271
-msgid "Gramwave menu"
+msgid "{app} menu"
 msgstr ""
 
 #: src/application/cache.rs:563
@@ -540,7 +540,7 @@ msgid "Quit"
 msgstr ""
 
 #: src/screens.rs:1284
-msgid "Quit Gramwave"
+msgid "Quit {app}"
 msgstr ""
 
 #: src/screens.rs:599
