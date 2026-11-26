@@ -36,8 +36,8 @@ HOMEBREW_GRAMWAVE_TELEGRAM_CONFIG="$GRAMWAVE_TELEGRAM_CONFIG" \
   brew install --build-from-source mag7ster/gramwave/gramwave
 ```
 
-TDLib comes from a prebuilt tdlib-rs archive.
-The TDLib binaries require glibc 2.38 or later. Homebrew can
+The tap supplies its own TDLib bottle and an audio-focused libmpv bottle with
+ALSA, PulseAudio and PipeWire outputs. Homebrew can
 [provide its own glibc](https://docs.brew.sh/Homebrew-on-Linux) on older Linux
 distributions. To update, run
 `brew update` and `brew upgrade mag7ster/gramwave/gramwave`. For the launcher
