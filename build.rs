@@ -8,19 +8,26 @@ fn main() {
 fn telegram() {
     println!("cargo:rerun-if-env-changed=GRAMWAVE_TDLIB_DIR");
     let local = std::env::var_os("GRAMWAVE_TDLIB_DIR").map(std::path::PathBuf::from);
+    assert!(
+        local.is_some() || cfg!(feature = "download-tdlib"),
+        "Set GRAMWAVE_TDLIB_DIR to a prefix containing lib/libtdjson.so.1.8.61"
+    );
     let lib = local
         .as_ref()
         .map(|path| path.join("lib"))
         .unwrap_or_else(|| {
             std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("tdlib/lib")
         });
-    if !lib.join("libtdjson.so.1.8.61").exists() {
-        assert!(
-            local.is_none(),
-            "GRAMWAVE_TDLIB_DIR must contain lib/libtdjson.so.1.8.61"
-        );
+    let tdjson = lib.join("libtdjson.so.1.8.61");
+    #[cfg(feature = "download-tdlib")]
+    if local.is_none() && !tdjson.is_file() {
         tdlib_rs::build::build(None);
     }
+    assert!(
+        tdjson.is_file(),
+        "TDLib library not found at {}",
+        tdjson.display()
+    );
     println!("cargo:rustc-link-search=native={}", lib.display());
     println!("cargo:rustc-link-lib=dylib=tdjson");
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());

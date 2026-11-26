@@ -16,6 +16,22 @@ channels, groups, private chats and Saved Messages in a dedicated desktop app.
 The player does not send messages or mark them as read. It currently supports
 one Telegram account and has an English interface.
 
+## Install with Homebrew
+
+On Linux, add the Gramwave tap and install the player:
+
+```sh
+brew trust --tap mag7ster/gramwave
+brew tap mag7ster/gramwave
+brew install mag7ster/gramwave/gramwave
+gramwave
+```
+
+Homebrew builds Gramwave and TDLib from source. To update, run `brew update`
+and `brew upgrade mag7ster/gramwave/gramwave`. For the launcher to appear in a
+desktop menu, the session needs Homebrew's `bin` on `PATH` and Homebrew's
+`share` in `XDG_DATA_DIRS`.
+
 ## Build and run
 
 You need a recent stable Rust toolchain and the libmpv development package
@@ -38,7 +54,10 @@ cargo run --release --locked
 Choose a renderer when building the release executable at `target/release/gramwave`.
 
 - Vulkan (default): `cargo build --release --locked`
-- OpenGL: `cargo build --release --locked --no-default-features --features mpv,telegram`
+- OpenGL: `cargo build --release --locked --no-default-features --features mpv,download-tdlib`
+
+To build with an installed TDLib 1.8.61, set `GRAMWAVE_TDLIB_DIR` to its
+installation prefix and enable `mpv,telegram,vulkan` with `--no-default-features`.
 
 ## Connect Telegram
 

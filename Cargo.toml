@@ -10,10 +10,11 @@ members = ["crates/domain", "crates/application"]
 resolver = "2"
 
 [features]
-default = ["mpv", "telegram", "vulkan"]
+default = ["mpv", "download-tdlib", "vulkan"]
 native-tests = ["mpv"]
 mpv = ["dep:rsmpv"]
 telegram = ["dep:tdlib-rs"]
+download-tdlib = ["telegram", "tdlib-rs/download-tdlib"]
 vulkan = ["eframe/wgpu_no_default_features", "dep:wgpu"]
 
 [dependencies]
@@ -27,7 +28,7 @@ clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.3"
 tempfile = "3"
 futures-util = "0.3"
-tdlib-rs = { version = "=1.4.0", optional = true, features = ["download-tdlib"] }
+tdlib-rs = { version = "=1.4.0", optional = true }
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "links", "wayland", "x11"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -60,5 +61,5 @@ wgpu = { version = "30.0", default-features = false, features = ["vulkan"], opti
 winit = { version = "0.30", default-features = false }
 
 [build-dependencies]
-tdlib-rs = { version = "=1.4.0", optional = true, features = ["download-tdlib"] }
+tdlib-rs = { version = "=1.4.0", optional = true }
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4", features = ["build"] }
