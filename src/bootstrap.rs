@@ -82,10 +82,7 @@ pub fn run() -> eframe::Result {
     demo::configure(&mut app);
     app.show_requested = show;
     app.control = Some(control_rx);
-    if !app.demo
-        && app.state.view().api_id.parse::<i32>().is_ok()
-        && app.state.view().api_hash.len() == 32
-    {
+    if !app.demo && crate::auth::TELEGRAM_CREDENTIALS.is_some() {
         app.connect();
     }
     let shutdown_error = app.shutdown_error.clone();

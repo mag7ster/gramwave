@@ -6,6 +6,20 @@ mod queue;
 mod transport;
 mod window;
 
+#[test]
+fn disconnected_auth_screen_uses_build_configuration() {
+    let mut h = Harness::new();
+    h.app.options.preview_auth = Some("disconnected".into());
+    h.settle();
+    let action = if crate::auth::TELEGRAM_CREDENTIALS.is_some() {
+        "Reconnect"
+    } else {
+        "Build instructions"
+    };
+    assert!(!menu_text(&mut h, action).is_empty());
+    assert!(menu_text(&mut h, "API hash").is_empty());
+}
+
 struct Harness {
     app: App,
     ctx: egui::Context,

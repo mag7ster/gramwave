@@ -1,9 +1,43 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     fastframe_i18n::build::compile_catalogs("assets/i18n");
+    let credentials = if cfg!(feature = "telegram") {
+        telegram_credentials()
+    } else {
+        "None".into()
+    };
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("telegram_credentials.rs"), credentials)
+        .expect("write generated Telegram credentials");
     #[cfg(feature = "telegram")]
     telegram();
 }
+
+fn telegram_credentials() -> String {
+    const CONFIG: &str = "GRAMWAVE_TELEGRAM_CONFIG";
+    println!("cargo:rerun-if-env-changed={CONFIG}");
+    let Some(path) = std::env::var_os(CONFIG) else {
+        return "None".into();
+    };
+    let path = std::path::PathBuf::from(path);
+    println!("cargo:rerun-if-changed={}", path.display());
+    let contents = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("Cannot read {CONFIG} file {}: {error}", path.display()));
+    let mut fields = contents.split_whitespace();
+    let id = fields.next().and_then(|value| value.parse::<i32>().ok());
+    let hash = fields.next();
+    match (id, hash, fields.next()) {
+        (Some(id), Some(hash), None)
+            if id > 0 && hash.len() == 32 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            format!("Some(({id}, {hash:?}))")
+        }
+        _ => panic!(
+            "Invalid {CONFIG} file. Supply a positive API ID and a 32-digit hexadecimal API hash."
+        ),
+    }
+}
+
 #[cfg(feature = "telegram")]
 fn telegram() {
     println!("cargo:rerun-if-env-changed=GRAMWAVE_TDLIB_DIR");

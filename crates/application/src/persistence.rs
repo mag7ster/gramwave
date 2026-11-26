@@ -39,8 +39,6 @@ pub struct Settings {
     pub shuffle: bool,
     pub volume: f32,
     pub unmuted_volume: f32,
-    pub api_id: String,
-    pub api_hash: String,
     pub light: bool,
     pub queue_panel_open: bool,
     pub cache_policy: CachePolicy,
@@ -63,8 +61,6 @@ impl From<&State> for Settings {
             shuffle: s.shuffle,
             volume: s.volume,
             unmuted_volume: s.unmuted_volume,
-            api_id: s.api_id.clone(),
-            api_hash: s.api_hash.clone(),
             light: s.light,
             queue_panel_open: s.queue_panel_open,
             cache_policy: s.cache_policy,
@@ -83,8 +79,6 @@ impl Settings {
         s.shuffle = self.shuffle;
         s.volume = self.volume;
         s.unmuted_volume = self.unmuted_volume;
-        s.api_id = self.api_id;
-        s.api_hash = self.api_hash;
         s.light = self.light;
         s.queue_panel_open = self.queue_panel_open;
         s.cache_policy = self.cache_policy.normalized();

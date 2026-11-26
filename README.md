@@ -18,7 +18,7 @@ one Telegram account and has an English interface.
 
 ## Install with Homebrew
 
-On Linux, add the Gramwave tap and install the player:
+On Linux x86_64, add the Gramwave tap and install the player.
 
 ```sh
 brew trust --tap mag7ster/gramwave
@@ -27,8 +27,16 @@ brew install mag7ster/gramwave/gramwave
 gramwave
 ```
 
-Homebrew installs a prebuilt Gramwave bottle on compatible Linux x86_64 systems
-and builds from source elsewhere. TDLib comes from a prebuilt tdlib-rs archive.
+Homebrew installs a prebuilt Gramwave bottle on compatible Linux x86_64 systems.
+For a source build on x86_64, set up Telegram credentials under [Build and run](#build-and-run)
+and pass the file path to Homebrew.
+
+```sh
+HOMEBREW_GRAMWAVE_TELEGRAM_CONFIG="$GRAMWAVE_TELEGRAM_CONFIG" \
+  brew install --build-from-source mag7ster/gramwave/gramwave
+```
+
+TDLib comes from a prebuilt tdlib-rs archive.
 The TDLib binaries require glibc 2.38 or later. Homebrew can
 [provide its own glibc](https://docs.brew.sh/Homebrew-on-Linux) on older Linux
 distributions. To update, run
@@ -48,7 +56,32 @@ Telegram Desktop. Video emoji use FFmpeg with the `libvpx-vp9` decoder for
 transparency. Without that decoder the player shows a thumbnail or the associated
 Unicode emoji.
 
-On Fedora:
+To enable Telegram login in a local build, create an application and obtain its
+API ID and API hash. Store them in a private file outside both Git repositories.
+Put the API ID on the first line and the API hash on the second line. Use an
+editor to keep the values out of your shell history. [Telegram API credentials](https://my.telegram.org/apps)
+
+```sh
+gramwave_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/gramwave"
+mkdir -p -m 700 "$gramwave_config_dir"
+chmod 700 "$gramwave_config_dir"
+(umask 077; touch "$gramwave_config_dir/telegram.conf")
+chmod 600 "$gramwave_config_dir/telegram.conf"
+${EDITOR:-vi} "$gramwave_config_dir/telegram.conf"
+```
+
+Add this export to your shell startup file (`~/.zshrc` for zsh) and open a new terminal.
+
+```sh
+export GRAMWAVE_TELEGRAM_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/gramwave/telegram.conf"
+```
+
+The release script in the Homebrew tap uses the same file. The published binary
+contains the app's API pair, which anyone with the binary can extract. Keep the
+configuration file and local build artifacts out of Git.
+[Homebrew release instructions](https://github.com/mag7ster/homebrew-gramwave#publish-a-bottle)
+
+On Fedora, install the native dependencies, then build and run Gramwave.
 
 ```sh
 sudo dnf install mpv-devel openssl-libs zlib-ng-compat libcxx libcxxabi llvm-libunwind
@@ -69,10 +102,8 @@ Local builds are called **Gramwave Dev**. The Homebrew formula enables
 
 ## Connect Telegram
 
-1. Create an application at [my.telegram.org/apps](https://my.telegram.org/apps).
-2. Enter its API ID and API hash in the player.
-3. Sign in with a QR code or your phone number; enter your two-step verification
-   password if requested.
+Sign in with a QR code or your phone number. Enter your two-step verification
+password if requested.
 
 Your session is saved for future launches. **Gramwave** stores account data and
 downloads in `$XDG_DATA_HOME/gramwave` (`~/.local/share/gramwave` by default).

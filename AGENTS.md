@@ -23,6 +23,10 @@ Read `ARCHITECTURE.md` before changing layer boundaries or persistence.
 - `cargo test --workspace --locked`: run the default suite; repeat with `--no-default-features`.
 - `cargo build --workspace --locked --release`: build an optimized binary.
 
+Use Cargo checks for routine features and commits. Build Gramwave through
+Homebrew or run `~/homebrew-gramwave/release.sh` only when the user explicitly
+requests a release.
+
 ## Coding Style & Naming Conventions
 
 Use rustfmt defaults, including four-space indentation. Use `snake_case` for modules/functions, `PascalCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Route playback actions through shared application commands. Wrap product strings in translation calls; preserve user content and translation placeholders.

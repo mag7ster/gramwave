@@ -36,7 +36,6 @@ fn roundtrip_and_closed_channel_are_explicit() {
     let dir = TempDir::new();
     let path = dir.path().join("db");
     let (mut store, mut state) = Store::open(&path).unwrap();
-    state.api_id = "12345".into();
     state.filters = [false; 3];
     state.chat_pins = vec![42];
     store.save(state).unwrap();
@@ -45,7 +44,6 @@ fn roundtrip_and_closed_channel_are_explicit() {
     assert!(store.save(State::default()).unwrap_err().contains("closed"));
     assert!(store.flush().is_err());
     let (_, state) = Store::open(&path).unwrap();
-    assert_eq!(state.api_id, "12345");
     assert_eq!(state.filters, [false; 3]);
     assert_eq!(state.chat_pins, vec![42]);
 }
@@ -638,7 +636,6 @@ fn v3_migration_backs_up_wal_and_retries_without_losing_offline_state() {
     let dir = TempDir::new();
     let path = dir.path().join("db");
     let (mut store, mut expected) = Store::open(&path).unwrap();
-    expected.api_id = "12345".into();
     expected.volume = 32.;
     let repeated = Track {
         chat: 42,
@@ -906,11 +903,11 @@ fn split_legacy_track_and_session_paths_survive_pure_metadata_migration() {
         CREATE TABLE library(id INTEGER PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE tracks(playlist INTEGER NOT NULL,position INTEGER NOT NULL,chat INTEGER NOT NULL,message INTEGER NOT NULL,value TEXT NOT NULL,PRIMARY KEY(playlist,position));")
         .unwrap();
-    let settings = gramwave_application::persistence::Settings {
-        volume: 32.,
-        api_id: "12345".into(),
-        ..Default::default()
-    };
+    let settings = serde_json::json!({
+        "volume": 32.,
+        "api_id": "12345",
+        "api_hash": "legacy-test-hash"
+    });
     let session = serde_json::json!({"snapshot":[{"chat":42,"message":8,"entry_id":9,"pinned":"/offline/session"}],"current":{"chat":42,"message":8,"entry_id":9},"serial":9}).to_string();
     let offline = serde_json::json!([
         {"chat":42,"message":10,"pinned":"/offline/document"},
@@ -946,8 +943,11 @@ fn split_legacy_track_and_session_paths_survive_pure_metadata_migration() {
     }
     for _ in 0..2 {
         let (mut store, state) = Store::open(&path).unwrap();
-        assert_eq!(state.api_id, "12345");
         assert_eq!(state.volume, 32.);
+        let settings = gramwave_application::persistence::Settings::from(&state);
+        let value = serde_json::to_value(settings).unwrap();
+        assert!(value.get("api_id").is_none());
+        assert!(value.get("api_hash").is_none());
         assert_eq!(state.session.current().unwrap().message, 8);
         let playlist = &state.playlists[0];
         assert_eq!(playlist.cursors, [321, 654, 0]);

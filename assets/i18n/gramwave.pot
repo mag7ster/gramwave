@@ -21,14 +21,6 @@ msgstr ""
 msgid "1 day"
 msgstr ""
 
-#: src/auth.rs:98
-msgid "API ID"
-msgstr ""
-
-#: src/auth.rs:100
-msgid "API hash"
-msgstr ""
-
 #: src/screens.rs:1170
 msgid "Add to queue"
 msgstr ""
@@ -79,6 +71,10 @@ msgstr ""
 
 #: src/screens.rs:2542
 msgid "Back to current track"
+msgstr ""
+
+#: src/auth.rs:99
+msgid "Build instructions"
 msgstr ""
 
 #: src/application/cache.rs:229
@@ -162,20 +158,12 @@ msgstr ""
 msgid "Connect to Telegram to open this message."
 msgstr ""
 
-#: src/auth.rs:90
-msgid "Connect your Telegram"
-msgstr ""
-
 #: src/auth.rs:199
 msgid "Connecting securely to Telegram…"
 msgstr ""
 
 #: src/application/controller.rs:279 src/application/notices.rs:7
 msgid "Connecting…"
-msgstr ""
-
-#: src/auth.rs:199
-msgid "Connection closed. Please reconnect."
 msgstr ""
 
 #: src/auth.rs:102 src/auth.rs:194
@@ -192,10 +180,6 @@ msgstr ""
 
 #: src/auth.rs:209 src/screens.rs:477
 msgid "Copy error"
-msgstr ""
-
-#: src/auth.rs:95
-msgid "Copy link"
 msgstr ""
 
 #: src/screens.rs:1172
@@ -289,10 +273,6 @@ msgstr ""
 
 #: src/screens.rs:341
 msgid "Find a chat"
-msgstr ""
-
-#: src/auth.rs:94
-msgid "Get application credentials"
 msgstr ""
 
 #: src/application/cache.rs:575
@@ -418,10 +398,6 @@ msgstr ""
 
 #: src/ui.rs:248
 msgid "No offline tracks saved yet."
-msgstr ""
-
-#: src/auth.rs:91
-msgid "ONE-TIME SETUP"
 msgstr ""
 
 #: src/ui.rs:132 src/ui.rs:143
@@ -562,18 +538,16 @@ msgstr ""
 msgid "Recent tracks may stay in the automatic cache."
 msgstr ""
 
+#: src/auth.rs:89
+msgid "Reconnect"
+msgstr ""
+
 #: src/screens.rs:795 src/screens.rs:1025
 msgid "Refresh library"
 msgstr ""
 
 #: src/application/cache.rs:410
 msgid "Refresh storage"
-msgstr ""
-
-#: src/auth.rs:92
-msgid ""
-"Register an app at my.telegram.org, then paste its credentials below. Your "
-"login is saved on this device."
 msgstr ""
 
 #: src/screens.rs:1831
@@ -768,6 +742,10 @@ msgstr ""
 msgid "Telegram has no direct link for this message."
 msgstr ""
 
+#: src/auth.rs:34
+msgid "Telegram rejected this build’s API credentials."
+msgstr ""
+
 #: src/auth.rs:131
 msgid "Telegram → Settings → Devices → Link Desktop Device"
 msgstr ""
@@ -778,6 +756,14 @@ msgstr ""
 
 #: src/application/controller.rs:224
 msgid "That code is incorrect. Please try again."
+msgstr ""
+
+#: src/auth.rs:96
+msgid "This build does not include Telegram support."
+msgstr ""
+
+#: src/auth.rs:94
+msgid "This build is missing Telegram credentials."
 msgstr ""
 
 #: src/adapters/telegram.rs:717

@@ -239,14 +239,16 @@ impl App {
                     }
                 }
                 Effect::ParametersRequested => {
-                    self.submit_auth(gramwave_application::telegram::AuthRequest::Parameters(
-                        gramwave_application::telegram::TelegramParameters {
-                            api_id: self.state.view().api_id.parse().unwrap_or(0),
-                            api_hash: self.state.view().api_hash.clone(),
-                            database: self.root.join("telegram").to_string_lossy().into(),
-                            files: self.root.join("cache").to_string_lossy().into(),
-                        },
-                    ))
+                    if let Some((api_id, api_hash)) = crate::auth::TELEGRAM_CREDENTIALS {
+                        self.submit_auth(gramwave_application::telegram::AuthRequest::Parameters(
+                            gramwave_application::telegram::TelegramParameters {
+                                api_id,
+                                api_hash: api_hash.into(),
+                                database: self.root.join("telegram").to_string_lossy().into(),
+                                files: self.root.join("cache").to_string_lossy().into(),
+                            },
+                        ));
+                    }
                 }
                 Effect::Connect => self.connect_native(),
                 Effect::Quit => self.quitting = true,

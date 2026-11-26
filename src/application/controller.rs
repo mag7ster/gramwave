@@ -98,8 +98,6 @@ pub(crate) struct DesktopApp {
     pub(crate) search: String,
     pub(crate) status: String,
     pub(crate) inline_notice: Option<crate::ui::InlineNotice>,
-    pub(crate) api_id_input: String,
-    pub(crate) api_hash_input: String,
     pub(crate) phone: String,
     pub(crate) code: String,
     pub(crate) password: String,
@@ -185,8 +183,6 @@ impl DesktopApp {
             test_seek: None,
             #[cfg(test)]
             test_seeks: vec![],
-            api_id_input: state.view().api_id.clone(),
-            api_hash_input: state.view().api_hash.clone(),
             state,
             db,
             root,
@@ -284,6 +280,7 @@ impl DesktopApp {
     pub(crate) fn connect_native(&mut self) {
         self.qr.clear();
         self.auth_error.clear();
+        self.error.clear();
         self.stream_base.clear();
         if let Some(server) = self.server.take() {
             server.stop();
