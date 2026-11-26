@@ -1,3 +1,5 @@
+use std::{fs, path::Path};
+
 #[test]
 fn domain_has_no_infrastructure_dependencies() {
     for (name, source) in [
@@ -39,8 +41,28 @@ fn workspace_enforces_dependency_direction_and_screens_have_no_io() {
             "application depends on {forbidden}"
         );
     }
-    let screens = include_str!("../src/screens.rs");
-    for forbidden in ["std::fs", "std::path", "serde_json", ".call_async("] {
-        assert!(!screens.contains(forbidden), "screens contain {forbidden}");
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut paths = vec![src.join("screens.rs"), src.join("screens")];
+    while let Some(path) = paths.pop() {
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name == "tests" || name == "tests.rs" || name.ends_with("_tests.rs") {
+            continue;
+        }
+        if path.is_dir() {
+            paths.extend(
+                fs::read_dir(path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+        } else if name.ends_with(".rs") {
+            let source = fs::read_to_string(&path).unwrap();
+            for forbidden in ["std::fs", "std::path", "serde_json", ".call_async("] {
+                assert!(
+                    !source.contains(forbidden),
+                    "{} contains {forbidden}",
+                    path.display()
+                );
+            }
+        }
     }
 }

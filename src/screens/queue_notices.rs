@@ -1,6 +1,8 @@
-use super::{design, focus_outline, tr, App, AppCommand, Duration};
+use super::keyboard::focus_outline;
+use crate::application::commands::AppCommand;
+use crate::{design, tr, App};
 use eframe::egui;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 impl App {
     pub(super) fn queue_notice_time(&self, _ui: &egui::Ui) -> Instant {

@@ -1,4 +1,8 @@
-use super::*;
+use super::TRACK_SCROLL_GUTTER;
+use crate::design;
+use eframe::egui;
+use gramwave_domain::QueueEntryId;
+use std::time::Duration;
 
 // A wheel detent can land on either side of the row's top edge.
 const SNAP_DISTANCE: f32 = design::ROW_HEIGHT / 2.;

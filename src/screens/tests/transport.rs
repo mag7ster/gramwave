@@ -1,8 +1,10 @@
 use super::*;
 
 use crate::application::ports::{PlaybackEvent, PlayerBackend, PlayerCommand, PlayerSnapshot};
+use crate::screens::transport::seek_repaint_interval;
 use crate::Track;
 use gramwave_application::AppError;
+use std::time::Duration;
 
 struct Clock(PlayerSnapshot);
 

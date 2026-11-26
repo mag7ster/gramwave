@@ -1,4 +1,5 @@
 use super::*;
+use crate::screens::playlist::track_labels;
 
 #[test]
 fn long_metadata_fits_virtual_list_row_height() {

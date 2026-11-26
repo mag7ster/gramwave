@@ -1,4 +1,6 @@
 use super::*;
+use crate::screens::queue::queue_cover_rect;
+use gramwave_domain::QueueEntryId;
 
 fn queue_order(h: &Harness) -> Vec<QueueEntryId> {
     h.app
