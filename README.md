@@ -28,7 +28,9 @@ gramwave
 ```
 
 Homebrew builds Gramwave from source and installs prebuilt TDLib from
-tdlib-rs. The TDLib binaries require glibc 2.38 or later. To update, run
+tdlib-rs. The TDLib binaries require glibc 2.38 or later. Homebrew can
+[provide its own glibc](https://docs.brew.sh/Homebrew-on-Linux) on older Linux
+distributions. To update, run
 `brew update` and `brew upgrade mag7ster/gramwave/gramwave`. For the launcher
 to appear in a desktop menu, the session needs Homebrew's `bin` on `PATH` and
 Homebrew's `share` in `XDG_DATA_DIRS`.
