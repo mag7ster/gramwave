@@ -183,12 +183,33 @@ impl Keyboard {
             .map(|row| row.key)
     }
 
+    pub(super) fn queue_delete(&self, ctx: &egui::Context) -> Option<Id> {
+        let key = self.source_key(WorkspacePane::Queue)?;
+        (self.enabled
+            && !ctx.text_edit_focused()
+            && ctx.input_mut(|input| {
+                let count = input.events.len();
+                input.events.retain(|event| {
+                    !matches!(event, egui::Event::Key {
+                    key: Key::Delete, pressed: true, repeat: false, modifiers, ..
+                } if modifiers.is_none())
+                });
+                count != input.events.len()
+            }))
+        .then_some(key)
+    }
+
     pub(super) fn focus_row(&mut self, pane: WorkspacePane, key: Id) {
         self.target = Some(Row {
             pane,
             key,
             menu: false,
         });
+    }
+
+    pub(super) fn focus_empty(&mut self, pane: WorkspacePane) {
+        self.target = None;
+        self.destination = Some(pane);
     }
 
     pub(super) fn row(
@@ -322,6 +343,9 @@ pub(super) struct MenuItems(Vec<(Id, Option<Id>)>);
 
 impl MenuItems {
     pub(super) fn push(&mut self, ui: &Ui, main: &Response, alternate: Option<&Response>) {
+        if !main.enabled() {
+            return;
+        }
         focus_outline(ui, main);
         if let Some(alternate) = alternate {
             focus_outline(ui, alternate);
@@ -451,6 +475,11 @@ pub(super) fn show_track_menu(
         popup = popup.open_memory(Some(egui::SetOpenCommand::Bool(true)));
     }
     let mut draw = |ui: &mut Ui| {
+        ui.set_width(208.);
+        let spacing = ui.spacing_mut();
+        spacing.button_padding = egui::vec2(8., 2.);
+        spacing.interact_size.y = 33.;
+        spacing.item_spacing.y = 0.;
         let mut items = MenuItems::default();
         contents(ui, &mut items);
         items

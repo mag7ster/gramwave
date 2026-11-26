@@ -175,6 +175,7 @@ impl AppCore {
         let mut effects = Vec::new();
         let advancing = matches!(&command, AppCommand::Next | AppCommand::Advance(_));
         let mut play = None;
+        let mut pause_after_load = None;
         match command {
             AppCommand::Connect => {
                 if !self.library.connected() {
@@ -276,7 +277,10 @@ impl AppCore {
                 }
             }
             AppCommand::StartSession(tracks, index) => {
-                play = self.handle(CoreCommand::Start(tracks, index))
+                play = self.handle(CoreCommand::Start(tracks, index));
+                if play.is_some() {
+                    self.playback.queue_removals.clear();
+                }
             }
             AppCommand::Play(track) => play = Some(track),
             AppCommand::PlayQueue(id) => play = self.handle(CoreCommand::Jump(id)),
@@ -356,7 +360,67 @@ impl AppCore {
             AppCommand::Remove(index) => {
                 self.handle(CoreCommand::Remove(index));
             }
+            AppCommand::RemoveQueueRows {
+                start,
+                expected,
+                now,
+            } => {
+                use crate::playback::{PendingQueueRemoval, QueueRemovalNotice};
+                use std::time::Duration;
+
+                self.playback.expire_queue_removals(now);
+                self.save_playback_position(self.playback.snapshot);
+                let pending = self.playback.queue_removals.iter().map(|entry| &entry.rows);
+                if let Some(rows) = self
+                    .state
+                    .session
+                    .remove_timeline_rows(start, &expected, pending)
+                {
+                    let paused = self.playback.state.paused();
+                    if rows.removed_current() {
+                        play = self.state.session.jump_to(0).as_ref().map(Into::into);
+                        if play.is_some() {
+                            pause_after_load = Some(paused);
+                        } else {
+                            self.stop_playback(&mut effects);
+                        }
+                    }
+                    self.playback.removal_serial += 1;
+                    self.playback.queue_removals.push(PendingQueueRemoval {
+                        notice: QueueRemovalNotice {
+                            id: self.playback.removal_serial,
+                            count: expected.len(),
+                            expires: now + Duration::from_secs(5),
+                        },
+                        rows,
+                        paused,
+                    });
+                    self.record_session_change();
+                }
+            }
+            AppCommand::UndoQueueRemoval { id, now } => {
+                self.playback.expire_queue_removals(now);
+                if let Some(index) = self
+                    .playback
+                    .queue_removals
+                    .iter()
+                    .position(|removal| removal.notice.id == id)
+                {
+                    let removal = self.playback.queue_removals.remove(index);
+                    let pending = self.playback.queue_removals.iter().map(|entry| &entry.rows);
+                    if self
+                        .state
+                        .session
+                        .restore_timeline_rows(removal.rows, pending)
+                    {
+                        play = self.state.session.current().map(Into::into);
+                        pause_after_load = Some(removal.paused);
+                    }
+                    self.record_session_change();
+                }
+            }
             AppCommand::Clear => {
+                self.playback.queue_removals.clear();
                 self.handle(CoreCommand::Clear);
             }
             AppCommand::ToggleChatPin(id) => {
@@ -371,13 +435,19 @@ impl AppCore {
         }
         if let Some(track) = play {
             self.prepare_playback(track, &mut effects);
+            if let Some(paused) = pause_after_load {
+                self.playback.state.set_paused(paused);
+            }
         } else if advancing {
-            self.playback.cancel();
-            self.playback.state = crate::playback::PlaybackState::Stopped;
-            effects.extend([Effect::Player(PlayerCommand::Stop), Effect::ClearSeek]);
+            self.stop_playback(&mut effects);
         }
         self.persistence_effect(&mut effects);
         effects
+    }
+    fn stop_playback(&mut self, effects: &mut Vec<Effect>) {
+        self.playback.cancel();
+        self.playback.state = crate::playback::PlaybackState::Stopped;
+        effects.extend([Effect::Player(PlayerCommand::Stop), Effect::ClearSeek]);
     }
     fn save_tracks(&mut self, tracks: impl IntoIterator<Item = Track>) {
         self.prune_audio_cache();

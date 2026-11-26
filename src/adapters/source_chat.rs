@@ -11,7 +11,60 @@ fn username_uri(username: &str) -> Option<String> {
     .then(|| format!("tg://resolve?domain={username}"))
 }
 
+fn message_uri(link: &str) -> Option<String> {
+    let link = url::Url::parse(link).ok()?;
+    if link.scheme() != "https"
+        || link.host_str() != Some("t.me")
+        || !link.username().is_empty()
+        || link.password().is_some()
+        || link.port().is_some()
+    {
+        return None;
+    }
+    let mut path = link.path_segments()?;
+    let user = path.next()?;
+    let positive_id = |value: &str| value.parse::<u64>().is_ok_and(|id| id > 0);
+    let base = if user == "c" {
+        let channel = path.next().filter(|value| positive_id(value))?;
+        format!("tg://privatepost?channel={channel}")
+    } else {
+        username_uri(user)?
+    };
+    let first = path.next().filter(|value| positive_id(value))?;
+    let (post, thread) = match path.next() {
+        Some(post) if positive_id(post) && path.next().is_none() => (post, Some(first)),
+        Some(_) => return None,
+        None => (first, None),
+    };
+    let mut uri = url::Url::parse(&base).ok()?;
+    {
+        let mut query = uri.query_pairs_mut();
+        query.append_pair("post", post);
+        if let Some(thread) = thread {
+            query.append_pair("thread", thread);
+        }
+        for (key, value) in link.query_pairs() {
+            if matches!(key.as_ref(), "single" | "comment" | "t" | "task" | "option")
+                || (key == "thread" && thread.is_none())
+            {
+                query.append_pair(&key, &value);
+            }
+        }
+    }
+    Some(uri.into())
+}
+
 impl Telegram {
+    pub(crate) async fn source_message_uri(
+        &self,
+        chat: i64,
+        message: i64,
+        cancel: &CancellationToken,
+    ) -> Option<String> {
+        let link = self.message_link(chat, message, cancel).await.ok()?;
+        message_uri(&link)
+    }
+
     pub(crate) async fn source_chat_uri(
         &self,
         chat: i64,
@@ -69,6 +122,33 @@ pub(crate) async fn open(uri: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resolves_public_and_private_source_message_links() {
+        let tg = Telegram::mock_rpc(|request| {
+            assert_eq!(request["@type"], "getMessageLink");
+            assert_eq!(request["chat_id"], 51);
+            match request["message_id"].as_i64().unwrap() {
+                1 => json!({"link":"https://t.me/Music_42/24"}),
+                2 => json!({"link":"https://t.me/c/42/3/25?t=3"}),
+                3 => json!({"link":"https://example.org/Music_42/24"}),
+                _ => json!({"@type":"error","code":400,"message":"Unavailable"}),
+            }
+        });
+        for (message, uri) in [
+            (1, Some("tg://resolve?domain=Music_42&post=24")),
+            (2, Some("tg://privatepost?channel=42&post=25&thread=3&t=3")),
+            (3, None),
+            (4, None),
+        ] {
+            assert_eq!(
+                tg.source_message_uri(51, message, &CancellationToken::new())
+                    .await
+                    .as_deref(),
+                uri
+            );
+        }
+    }
 
     #[tokio::test]
     async fn builds_only_supported_telegram_chat_links() {

@@ -488,3 +488,65 @@ fn group_queue_edits_persist_without_player_effects() {
     assert_eq!(session.timeline().current_index(), Some(2));
     assert!(effects.iter().any(|effect| matches!(effect, Effect::Persist(changes) if changes.session.as_ref() == Some(session))));
 }
+
+#[test]
+fn undo_current_loads_its_checkpoint_with_the_original_pause_state() {
+    use crate::playback::PlaybackState;
+    let mut state = State::default();
+    state.session.start(&[track(1), track(2)], 0, false);
+    let old = state.session.current().unwrap().entry_id;
+    let now = Instant::now();
+    let mut core = AppCore::new(state);
+    core.playback.state = PlaybackState::Paused;
+    core.playback.target = core.view().session.current().map(Into::into);
+    core.event(AppEvent::Snapshot(PlayerSnapshot {
+        checkpoint_position: Some(23.5),
+        duration: 100.,
+        ..Default::default()
+    }));
+
+    core.command(AppCommand::RemoveQueueRows {
+        start: 0,
+        expected: vec![old],
+        now,
+    });
+    assert_eq!(core.view().session.current().unwrap().message, 2);
+    assert!(core.playback.state().paused());
+    let id = core.playback().queue_removals(now).next().unwrap().id;
+    let effects = core.command(AppCommand::UndoQueueRemoval { id, now });
+    assert_eq!(core.view().session.current().unwrap().entry_id, old);
+    let (request, revision, restored) = effects
+        .into_iter()
+        .find_map(|effect| {
+            if let Effect::PreparePlayback {
+                operation,
+                revision,
+                track,
+                ..
+            } = effect
+            {
+                Some((operation.key(), revision, track))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let effects = core.event(AppEvent::PlaybackPrepared {
+        request,
+        revision,
+        result: Ok(PreparedPlayback {
+            track: restored.into(),
+            path: Some("restored.ogg".into()),
+        }),
+    });
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Player(PlayerCommand::Load {
+            start_ms: 23_500,
+            ..
+        })
+    )));
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Player(PlayerCommand::Pause(true)))));
+}

@@ -158,6 +158,10 @@ msgstr ""
 msgid "Connect to Telegram to open this chat."
 msgstr ""
 
+#: src/application/source_chat.rs:7
+msgid "Connect to Telegram to open this message."
+msgstr ""
+
 #: src/auth.rs:90
 msgid "Connect your Telegram"
 msgstr ""
@@ -457,6 +461,10 @@ msgstr ""
 msgid "Open source chat"
 msgstr ""
 
+#: src/screens.rs:1972
+msgid "Open source message"
+msgstr ""
+
 #: src/auth.rs:134
 msgid "Or sign in with your phone"
 msgstr ""
@@ -606,6 +614,10 @@ msgstr ""
 msgid "Remove selected downloads"
 msgstr ""
 
+#: src/screens.rs:3064
+msgid "Remove selected tracks"
+msgstr ""
+
 #: src/application/cache.rs:223
 #, rust-format
 msgid "Removed from cache · {size}"
@@ -688,8 +700,16 @@ msgstr ""
 msgid "Settings"
 msgstr ""
 
+#: src/screens.rs:1237
+msgid "Show elapsed time"
+msgstr ""
+
 #: src/adapters/tray.rs:190
 msgid "Show player"
+msgstr ""
+
+#: src/screens.rs:1239
+msgid "Show remaining time"
 msgstr ""
 
 #: src/ui.rs:130
@@ -744,6 +764,10 @@ msgstr ""
 msgid "Telegram has no direct link for this chat."
 msgstr ""
 
+#: src/application/source_chat.rs:21
+msgid "Telegram has no direct link for this message."
+msgstr ""
+
 #: src/auth.rs:131
 msgid "Telegram → Settings → Devices → Link Desktop Device"
 msgstr ""
@@ -764,6 +788,13 @@ msgstr ""
 msgid "Title"
 msgstr ""
 
+#: src/screens/queue_notices.rs:60
+#, rust-format
+msgid "Track removed"
+msgid_plural "{count} tracks removed"
+msgstr[0] ""
+msgstr[1] ""
+
 #: src/screens.rs:269
 msgid "Tracks"
 msgstr ""
@@ -774,6 +805,10 @@ msgstr ""
 
 #: src/demo.rs:44
 msgid "Unable to play track"
+msgstr ""
+
+#: src/screens/queue_notices.rs:72
+msgid "Undo"
 msgstr ""
 
 #: src/screens.rs:426 src/screens.rs:855

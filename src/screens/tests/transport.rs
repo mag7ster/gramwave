@@ -358,3 +358,32 @@ fn seek_supports_click_drag_and_keyboard() {
     h.click(rect.center());
     assert_eq!(h.app.test_seeks.len(), before);
 }
+
+#[test]
+fn clicking_time_toggles_remaining_hours_without_seeking_or_moving_the_rail() {
+    let mut h = queue_harness(1);
+    h.app.start_session(
+        &[Track {
+            duration: 4080,
+            ..Default::default()
+        }],
+        0,
+    );
+    h.app.player = Some(Box::new(Clock(PlayerSnapshot {
+        duration: 4080.,
+        position: 312.,
+        ..Default::default()
+    })));
+    h.settle();
+    let (rail, _) = h.app.test_seek.unwrap();
+    let elapsed = menu_text(&mut h, "0:05:12")[0];
+    h.click(elapsed);
+    let remaining = menu_text(&mut h, "−1:02:48")[0];
+    assert_eq!(menu_text(&mut h, "1:08:00").len(), 1);
+    assert_eq!(h.app.test_seek.unwrap().0, rail);
+    assert!(h.app.test_seeks.is_empty());
+    h.click(remaining);
+    assert_eq!(menu_text(&mut h, "0:05:12"), [elapsed]);
+    assert_eq!(clock(3599., false), "59:59");
+    assert_eq!(clock(3600., false), "1:00:00");
+}

@@ -105,6 +105,7 @@ pub(crate) struct DesktopApp {
     pub(crate) password: String,
     pub(crate) qr: String,
     pub(crate) seek_preview: Option<f64>,
+    pub(crate) show_remaining_time: bool,
     pub(crate) error: String,
     pub(crate) error_retry: Option<RetryAction>,
     pub(crate) pane: crate::screens::WorkspacePane,
@@ -229,6 +230,7 @@ impl DesktopApp {
                 String::new()
             },
             seek_preview: None,
+            show_remaining_time: false,
             error: String::new(),
             error_retry: None,
             pane: Default::default(),

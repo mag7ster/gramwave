@@ -119,8 +119,11 @@ impl AppCore {
         };
         if position_ms != self.state.session.position_ms() {
             self.state.session.set_position_ms(position_ms);
-            self.pending.session = Some(self.state.session.clone());
+            self.record_session_change();
         }
+    }
+    pub(crate) fn record_session_change(&mut self) {
+        self.pending.session = Some(self.state.session.clone());
     }
     pub fn library_version(&self) -> u64 {
         self.library.version()

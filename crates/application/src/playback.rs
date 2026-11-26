@@ -7,6 +7,7 @@ use crate::{
 };
 use gramwave_domain::playback::QueueRangeEdit;
 use gramwave_domain::QueueEntryId;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PlaybackState {
@@ -57,13 +58,40 @@ pub struct PlaybackCore {
     pub(crate) target: Option<Track>,
     pub(crate) revision: u64,
     pub(crate) snapshot: PlayerSnapshot,
+    pub(crate) queue_removals: Vec<PendingQueueRemoval>,
+    pub(crate) removal_serial: u64,
 }
+
+#[derive(Clone, Copy)]
+pub struct QueueRemovalNotice {
+    pub id: u64,
+    pub count: usize,
+    pub expires: Instant,
+}
+
+pub(crate) struct PendingQueueRemoval {
+    pub notice: QueueRemovalNotice,
+    pub rows: gramwave_domain::playback::QueueRemoval,
+    pub paused: bool,
+}
+
 impl PlaybackCore {
     pub fn state(&self) -> PlaybackState {
         self.state
     }
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+    pub fn queue_removals(&self, now: Instant) -> impl Iterator<Item = QueueRemovalNotice> + '_ {
+        self.queue_removals
+            .iter()
+            .map(|removal| removal.notice)
+            .filter(move |notice| notice.expires > now)
+    }
+
+    pub(crate) fn expire_queue_removals(&mut self, now: Instant) {
+        self.queue_removals
+            .retain(|removal| removal.notice.expires > now);
     }
     pub(crate) fn begin(&mut self, track: Track, revision: u64) -> Operation {
         self.cancel();

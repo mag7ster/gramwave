@@ -500,3 +500,55 @@ fn queue_edge_scroll_arms_on_movement_and_stops_after_release() {
         current
     );
 }
+
+#[test]
+fn queue_menu_and_delete_stack_independent_undo_buttons_at_the_bottom() {
+    use egui::{Key, Modifiers, PointerButton};
+    let mut h = queue_harness(6);
+    let order = queue_order(&h);
+
+    let first = h.app.test_queue_rows[&order[0]].0.center();
+    let second = h.app.test_queue_rows[&order[1]].0.center();
+    for row in [first, second] {
+        h.click_with(row, PointerButton::Primary, Modifiers::CTRL);
+    }
+    h.key(Key::Enter);
+    let remove = menu_text(&mut h, "Remove selected tracks")[0];
+    h.click(remove);
+    assert_eq!(queue_order(&h), order[2..]);
+    h.settle();
+
+    h.key(Key::Delete);
+    assert_eq!(queue_order(&h), order[3..]);
+    assert_eq!(menu_text(&mut h, "2 tracks removed").len(), 1);
+    assert_eq!(menu_text(&mut h, "Track removed").len(), 1);
+    let mut undo = menu_text(&mut h, "Undo");
+    assert_eq!(undo.len(), 2);
+    undo.sort_by(|a, b| b.y.total_cmp(&a.y));
+    assert!(undo[0].y - undo[1].y > 25.);
+    h.click(undo[0]);
+    h.click(undo[0]);
+    assert_eq!(queue_order(&h), order);
+    assert!(menu_text(&mut h, "Undo").is_empty());
+}
+
+#[test]
+fn queue_undo_expires_independently_and_drops_the_next_button() {
+    use egui::{Key, Modifiers, PointerButton};
+    let mut h = queue_harness(4);
+    let order = queue_order(&h);
+    let menu = h.app.test_queue_rows[&order[0]].1.center();
+    h.click_with(menu, PointerButton::Primary, Modifiers::NONE);
+    let remove = menu_text(&mut h, "Remove")[0];
+    h.click(remove);
+    h.settle();
+    let bottom = menu_text(&mut h, "Undo")[0];
+    h.time += 3.;
+    h.key(Key::Delete);
+    assert_eq!(queue_order(&h), order[2..]);
+    h.time += 2.;
+    h.settle();
+    assert_eq!(menu_text(&mut h, "Undo"), [bottom]);
+    h.click(bottom);
+    assert_eq!(queue_order(&h), order[1..]);
+}

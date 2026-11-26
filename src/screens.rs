@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 mod keyboard;
+mod queue_notices;
 mod queue_scroll;
 mod selection;
 pub(crate) use keyboard::Keyboard;
@@ -1188,11 +1189,49 @@ impl App {
                 0.
             };
             let mut preview = self.seek_preview.unwrap_or(position);
+            let hours = duration >= 3600.;
+            let duration_label = if has_duration {
+                clock(duration, hours)
+            } else {
+                "—:—".into()
+            };
+            let digits = "8".repeat(duration_label.chars().count().saturating_sub(6).max(1));
+            let clock_sample = if hours {
+                format!("{digits}:88:88")
+            } else {
+                "88:88".into()
+            };
+            let left_width = clock_width(ui, format!("−{clock_sample}")).max(42.);
+            let right_width = clock_width(ui, clock_sample).max(42.);
             ui.horizontal(|ui| {
-                ui.add_sized(
-                    [42., 28.],
-                    egui::Label::new(egui::RichText::new(clock(preview)).small()),
+                let can_toggle = seek_active && has_duration;
+                let time = if self.show_remaining_time && has_duration {
+                    format!("−{}", clock((duration - preview).max(0.).ceil(), hours))
+                } else {
+                    clock(preview, hours)
+                };
+                let response = ui.add_sized(
+                    [left_width, 28.],
+                    egui::Label::new(egui::RichText::new(time).small()).sense(if can_toggle {
+                        egui::Sense::click()
+                    } else {
+                        egui::Sense::hover()
+                    }),
                 );
+                if can_toggle {
+                    response
+                        .clone()
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(if self.show_remaining_time {
+                            tr("Show elapsed time")
+                        } else {
+                            tr("Show remaining time")
+                        });
+                    if response.clicked() {
+                        self.show_remaining_time = !self.show_remaining_time;
+                        ui.request_repaint();
+                    }
+                }
                 let response = ui
                     .add_enabled_ui(enabled, |ui| {
                         ui.push_id(("seek", self.state.playback().generation()), |ui| {
@@ -1200,7 +1239,7 @@ impl App {
                                 ui,
                                 &mut preview,
                                 duration.max(0.),
-                                (timeline_width - 100.).max(40.),
+                                (timeline_width - left_width - right_width - 2. * gap).max(40.),
                                 tr("Seek"),
                                 true,
                             )
@@ -1233,11 +1272,10 @@ impl App {
                 {
                     self.execute(AppCommand::Seek(preview));
                 }
-                ui.small(if has_duration {
-                    clock(duration)
-                } else {
-                    "—:—".into()
-                });
+                ui.add_sized(
+                    [right_width, 28.],
+                    egui::Label::new(egui::RichText::new(duration_label).small()),
+                );
             });
         }
     }
@@ -1851,17 +1889,20 @@ impl App {
                                     p.accent,
                                 );
                             }
-                            track_labels(ui, &t.title, &t.artist, active);
+                            let duration = if t.duration == 0 {
+                                "—:—".into()
+                            } else {
+                                clock(t.duration as f64, false)
+                            };
+                            let duration_width = if t.duration >= 3600 {
+                                clock_width(ui, duration.clone()).max(44.)
+                            } else {
+                                44.
+                            };
+                            track_labels(ui, &t.title, &t.artist, active, duration_width);
                             ui.add_sized(
-                                [44., 36.],
-                                egui::Label::new(
-                                    egui::RichText::new(if t.duration == 0 {
-                                        "—:—".into()
-                                    } else {
-                                        clock(t.duration as f64)
-                                    })
-                                    .small(),
-                                ),
+                                [duration_width, 36.],
+                                egui::Label::new(egui::RichText::new(duration).small()).extend(),
                             );
                             ui.scope(|ui| {
                                 ui.visuals_mut().widgets.inactive.weak_bg_fill =
@@ -1875,15 +1916,19 @@ impl App {
                                         egui::Color32::TRANSPARENT;
                                     ui.visuals_mut().override_text_color = None;
                                 }
-                                let menu = ui.add(
-                                    egui::Button::new("…")
-                                        .min_size(egui::Vec2::splat(36.))
-                                        .sense(if self.selection.active(scope) {
-                                            egui::Sense::CLICK
-                                        } else {
-                                            keyboard::row_sense(ui, rect)
-                                        }),
-                                );
+                                let menu_button = egui::Button::new("…")
+                                    .frame_when_inactive(false)
+                                    .min_size(egui::Vec2::splat(36.))
+                                    .sense(if self.selection.active(scope) {
+                                        egui::Sense::CLICK
+                                    } else {
+                                        keyboard::row_sense(ui, rect)
+                                    });
+                                let menu = ui.add(track_more_button(
+                                    menu_button,
+                                    p.raised,
+                                    highlight.is_some(),
+                                ));
                                 self.keyboard
                                     .row(ui, nav, i, key_at(i), true, (&menu, rect));
                                 focus_outline(ui, &menu);
@@ -1916,10 +1961,18 @@ impl App {
                                                 tr("Save offline")
                                             },
                                         ),
+                                        (7, tr("Open source message")),
                                         (4, tr("Copy message link")),
                                         (5, tr("Copy title")),
                                     ] {
-                                        let button = ui.button(label);
+                                        let button = if kind == 7 && self.demo {
+                                            ui.add_enabled(
+                                                false,
+                                                full_menu_button(label, ui.available_width()),
+                                            )
+                                        } else {
+                                            track_menu_button(ui, label)
+                                        };
                                         items.push(ui, &button, None);
                                         #[cfg(test)]
                                         if kind == 0 {
@@ -1930,6 +1983,7 @@ impl App {
                                             ui.close();
                                         }
                                     }
+                                    ui.spacing_mut().item_spacing.y = 3.;
                                     if offline.is_some() {
                                         ui.separator();
                                     }
@@ -2028,6 +2082,7 @@ impl App {
                         self.execute(AppCommand::SaveTrack(tracks[i].metadata()));
                     }
                 }
+                7 => self.open_source_message(tracks[i].chat, tracks[i].message),
                 _ => self.link(&tracks[i]),
             }
             self.persist();
@@ -2039,11 +2094,33 @@ enum PlaylistSelectionAction {
     SaveOffline,
 }
 
+fn track_more_button(
+    button: egui::Button<'_>,
+    neutral: egui::Color32,
+    highlighted_row: bool,
+) -> egui::Button<'_> {
+    if highlighted_row {
+        button.fill(neutral)
+    } else {
+        button
+    }
+}
+
+fn full_menu_button(label: String, width: f32) -> egui::Button<'static> {
+    egui::Button::new(label)
+        .right_text("")
+        .min_size(egui::vec2(width, 0.))
+        .frame_when_inactive(false)
+}
+
+fn track_menu_button(ui: &mut egui::Ui, label: String) -> egui::Response {
+    ui.add(full_menu_button(label, ui.available_width()))
+}
+
 fn playlist_selection_menu(
     ui: &mut egui::Ui,
     items: &mut MenuItems,
 ) -> Option<PlaylistSelectionAction> {
-    ui.set_width(184.);
     let mut action = None;
     for (next, label, reverse_label) in [
         (true, tr("Play next"), tr("Play next in reverse order")),
@@ -2054,11 +2131,18 @@ fn playlist_selection_menu(
         ),
     ] {
         ui.horizontal(|ui| {
-            let forward = ui.button(label);
+            ui.spacing_mut().item_spacing.x = 0.;
+            let highlight = ui.painter().add(egui::Shape::Noop);
+            let reverse_width = 40.;
+            let width = ui.available_width() - reverse_width;
+            let forward = ui.add(full_menu_button(label, width).fill(egui::Color32::TRANSPARENT));
             let reverse = ui
                 .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.visuals_mut().widgets.inactive.weak_bg_fill = design::colors(ui).raised;
-                    let button = ui.add(egui::Button::new("⇅").min_size(egui::Vec2::splat(36.)));
+                    let button = ui.add(
+                        egui::Button::new("⇅")
+                            .min_size(egui::vec2(reverse_width, ui.spacing().interact_size.y)),
+                    );
                     button.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
@@ -2069,6 +2153,19 @@ fn playlist_selection_menu(
                     button.on_hover_text(reverse_label)
                 })
                 .inner;
+            if forward.hovered() || forward.is_pointer_button_down_on() {
+                let fill = design::colors(ui).selected;
+                ui.painter().set(
+                    highlight,
+                    egui::Shape::rect_filled(forward.rect.union(reverse.rect), 8., fill),
+                );
+                ui.painter().rect_stroke(
+                    reverse.rect,
+                    8.,
+                    egui::Stroke::new(2., fill),
+                    egui::StrokeKind::Inside,
+                );
+            }
             items.push(ui, &forward, Some(&reverse));
             if forward.clicked() || reverse.clicked() {
                 action = Some(PlaylistSelectionAction::Insert {
@@ -2079,7 +2176,7 @@ fn playlist_selection_menu(
             }
         });
     }
-    let save = ui.button(tr("Save offline"));
+    let save = track_menu_button(ui, tr("Save offline"));
     items.push(ui, &save, None);
     if save.clicked() {
         action = Some(PlaylistSelectionAction::SaveOffline);
@@ -2308,10 +2405,17 @@ fn window_header(
         .inner
 }
 
-fn track_labels(ui: &mut egui::Ui, title: &str, artist: &str, active: bool) -> egui::Response {
+fn track_labels(
+    ui: &mut egui::Ui,
+    title: &str,
+    artist: &str,
+    active: bool,
+    duration_width: f32,
+) -> egui::Response {
     ui.allocate_ui(
         egui::vec2(
-            (ui.available_width() - 44. - 36. - 2. * ui.spacing().item_spacing.x).max(0.),
+            (ui.available_width() - duration_width - 36. - 2. * ui.spacing().item_spacing.x)
+                .max(0.),
             40.,
         ),
         |ui| {
@@ -2343,9 +2447,25 @@ fn seek_repaint_interval(duration: f64, rail_pixels: f32) -> Duration {
     Duration::from_secs_f64(seconds_per_quarter_pixel.clamp(1. / 60., 0.2))
 }
 
-fn clock(seconds: f64) -> String {
+fn clock(seconds: f64, hours: bool) -> String {
     let n = seconds.max(0.) as u64;
-    format!("{}:{:02}", n / 60, n % 60)
+    if hours || n >= 3600 {
+        format!("{}:{:02}:{:02}", n / 3600, n / 60 % 60, n % 60)
+    } else {
+        format!("{}:{:02}", n / 60, n % 60)
+    }
+}
+
+fn clock_width(ui: &egui::Ui, text: String) -> f32 {
+    ui.painter()
+        .layout_no_wrap(
+            text,
+            egui::TextStyle::Small.resolve(ui.style()),
+            ui.visuals().text_color(),
+        )
+        .size()
+        .x
+        .ceil()
 }
 fn cover(ui: &mut egui::Ui, title: &str, size: f32) {
     let seed = title.bytes().fold(0u8, u8::wrapping_add);
@@ -2561,6 +2681,7 @@ fn queue_row_contents(
     track: &crate::Track,
     past: bool,
     current: bool,
+    highlighted: bool,
 ) -> egui::Response {
     let inset = rect.shrink2(egui::vec2(TRACK_ROW_PADDING, 6.));
     let center_y = inset.center().y;
@@ -2635,13 +2756,17 @@ fn queue_row_contents(
             egui::pos2(inset.right() - 36., center_y - 18.),
             egui::Vec2::splat(36.),
         ),
-        egui::Button::image(
-            Icon::More
-                .image(ui.visuals().text_color(), 18.)
-                .alt_text(&label),
-        )
-        .frame_when_inactive(false)
-        .sense(egui::Sense::click_and_drag()),
+        track_more_button(
+            egui::Button::image(
+                Icon::More
+                    .image(ui.visuals().text_color(), 18.)
+                    .alt_text(&label),
+            )
+            .frame_when_inactive(false)
+            .sense(egui::Sense::click_and_drag()),
+            palette.raised,
+            highlighted,
+        ),
     );
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
@@ -2709,6 +2834,12 @@ impl App {
         let mut action = None;
         let mut reordering = false;
         let mut edited_range = None;
+        let mut removed_range = None;
+        let now = self.queue_notice_time(ui);
+        let notice_bounds = ui
+            .max_rect()
+            .intersect(ui.clip_rect())
+            .with_min_y(ui.cursor().top());
         #[cfg(test)]
         self.test_queue_rows.clear();
         let mut list_frame = if extend_rows {
@@ -2783,6 +2914,22 @@ impl App {
                 let (lifted, moved) = queue_drag(ui, list, stride, queue, key, key_at, allow_drag);
                 reordering = lifted.is_some();
                 action = moved;
+                let remove = |range: std::ops::RangeInclusive<usize>| AppCommand::RemoveQueueRows {
+                    start: *range.start(),
+                    expected: range.map(|i| queue.get(i).unwrap().entry_id).collect(),
+                    now,
+                };
+                if lifted.is_none() && allow_drag {
+                    if let Some(row) = self
+                        .keyboard
+                        .queue_delete(ui.ctx())
+                        .and_then(|id| (0..queue.len()).find(|&i| key_at(i) == id))
+                    {
+                        let range = self.selection.queue_range().unwrap_or(row..=row);
+                        removed_range = Some((key, *range.start()));
+                        action = Some(remove(range));
+                    }
+                }
                 let palette = design::colors(ui);
                 if let Some(lifted) = &lifted {
                     ui.painter().rect_filled(
@@ -2864,7 +3011,14 @@ impl App {
                     ui.painter().rect_filled(rect, 8., fill);
                     let mut row_ui =
                         ui.new_child(egui::UiBuilder::new().id(id.with("body")).max_rect(rect));
-                    let menu = queue_row_contents(&mut row_ui, rect, &track, past, current);
+                    let menu = queue_row_contents(
+                        &mut row_ui,
+                        rect,
+                        &track,
+                        past,
+                        current,
+                        current || selected_row || row.has_focus(),
+                    );
                     self.keyboard.row(ui, nav, i, id, true, (&menu, rect));
                     self.selection.start(
                         &row,
@@ -2897,7 +3051,7 @@ impl App {
                                 if let Some(destination) =
                                     edit.destination(start, count, queue.len())
                                 {
-                                    let button = ui.button(label);
+                                    let button = track_menu_button(ui, label);
                                     items.push(ui, &button, None);
                                     if button.clicked() {
                                         let expected = range
@@ -2923,6 +3077,13 @@ impl App {
                                     }
                                 }
                             }
+                            let button = track_menu_button(ui, tr("Remove selected tracks"));
+                            items.push(ui, &button, None);
+                            if button.clicked() {
+                                removed_range = Some((key, start));
+                                action = Some(remove(range));
+                                ui.close();
+                            }
                             return;
                         }
                         let move_to = |to| AppCommand::MoveQueueRow {
@@ -2933,16 +3094,15 @@ impl App {
                         for (available, label, command) in [
                             (i > 0, tr("Move up"), move_to(i.saturating_sub(1))),
                             (i + 1 < queue.len(), tr("Move down"), move_to(i + 1)),
-                            (
-                                i >= queue.upcoming_start(),
-                                tr("Remove"),
-                                AppCommand::Remove(i.saturating_sub(queue.upcoming_start())),
-                            ),
+                            (true, tr("Remove"), remove(i..=i)),
                         ] {
                             if available {
-                                let button = ui.button(label);
+                                let button = track_menu_button(ui, label);
                                 items.push(ui, &button, None);
                                 if button.clicked() {
+                                    if matches!(command, AppCommand::RemoveQueueRows { .. }) {
+                                        removed_range = Some((key, i));
+                                    }
                                     action = Some(command);
                                     ui.close();
                                 }
@@ -2954,6 +3114,7 @@ impl App {
                     self.selection.remember_popup(popup, keep_click);
                     if lifted.is_none()
                         && !handled
+                        && removed_range.is_none()
                         && !self.selection.block_click()
                         && row.clicked()
                     {
@@ -3007,6 +3168,7 @@ impl App {
                         &track,
                         lifted.from < queue.past_len(),
                         current,
+                        current,
                     );
                 }
                 viewport.min.y
@@ -3036,6 +3198,16 @@ impl App {
         if let Some(action) = action {
             let persist = !matches!(action, AppCommand::PlayQueueRow { .. });
             self.execute(action);
+            if let Some((key, start)) = removed_range {
+                self.selection.clear(ui.ctx());
+                let queue = self.state.view().session.timeline();
+                if let Some(last) = queue.len().checked_sub(1) {
+                    let id = queue_row_id(queue, &repeated_upcoming(queue), key, start.min(last));
+                    self.keyboard.focus_row(WorkspacePane::Queue, id);
+                } else {
+                    self.keyboard.focus_empty(WorkspacePane::Queue);
+                }
+            }
             if let Some((key, range, focus)) = edited_range {
                 let queue = self.state.view().session.timeline();
                 let repeated = repeated_upcoming(queue);
@@ -3050,6 +3222,7 @@ impl App {
                 self.persist();
             }
         }
+        self.queue_removal_notices(ui, notice_bounds, now);
     }
 }
 

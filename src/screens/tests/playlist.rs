@@ -11,7 +11,7 @@ fn long_metadata_fits_virtual_list_row_height() {
         let row = egui::Frame::new().inner_margin(6.).show(ui, |ui| {
             ui.set_min_height(48.);
             ui.horizontal(|ui| {
-                track_labels(ui, &long, &long, false);
+                track_labels(ui, &long, &long, false, 44.);
             });
         });
         height = row.response.rect.height();
@@ -898,4 +898,75 @@ fn playlist_edge_scroll_selects_hidden_rows_and_shrinks_on_the_way_back() {
     h.pointer(bottom, false);
     assert_eq!(h.list_scroll("test-playlist-scroll").1, stopped);
     assert!(h.app.state.view().session.current().is_none());
+}
+
+#[test]
+fn playlist_menu_buttons_fill_the_rows_and_highlight_both_actions() {
+    let mut h = Harness::new();
+    h.size = egui::vec2(1240., 800.);
+    h.settle();
+    let first = h.app.test_rows[&0].0.center();
+    let second = h.app.test_rows[&1].0.center();
+    h.pointer(first, true);
+    h.frame(vec![egui::Event::PointerMoved(second)]);
+    h.pointer(second, false);
+    h.click_with(first, egui::PointerButton::Secondary, egui::Modifiers::NONE);
+    h.settle();
+    let forward = menu_text(&mut h, "Play next")[0];
+    let reverse = menu_text(&mut h, "⇅")[0];
+    let append = menu_text(&mut h, "Add to queue")[0];
+    let palette = design::palette(h.app.state.view().light);
+    let hover = |h: &mut Harness, position| {
+        h.frame(vec![egui::Event::PointerMoved(position)]);
+        h.frame(vec![])
+            .shapes
+            .into_iter()
+            .filter_map(|clipped| match clipped.shape {
+                egui::Shape::Rect(rect) => Some(rect),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let rects = hover(&mut h, forward);
+    let row = rects
+        .iter()
+        .find(|rect| {
+            rect.fill == palette.selected
+                && rect.rect.contains(forward)
+                && rect.rect.contains(reverse)
+        })
+        .expect("full row highlight");
+    let reverse_face = rects
+        .iter()
+        .find(|rect| {
+            rect.fill == palette.raised
+                && rect.rect.contains(reverse)
+                && !rect.rect.contains(forward)
+        })
+        .expect("neutral reverse button");
+    assert!(rects.iter().any(|rect| rect.rect == reverse_face.rect
+        && rect.stroke.color == palette.selected
+        && rect.stroke.width > 0.
+        && rect.stroke_kind == egui::StrokeKind::Inside));
+    assert!(hover(&mut h, reverse)
+        .iter()
+        .any(|rect| rect.fill == palette.selected && rect.rect == reverse_face.rect));
+
+    let below = egui::pos2(append.x, row.rect.bottom() + 0.5);
+    assert!(hover(&mut h, below)
+        .iter()
+        .any(|rect| rect.fill == palette.selected
+            && rect.rect.contains(below)
+            && rect.rect.contains(append)));
+    h.click(below);
+    assert_eq!(h.app.state.view().session.remaining().len(), 2);
+}
+
+#[test]
+fn single_track_menu_places_open_source_message_above_copy() {
+    let mut h = Harness::new();
+    h.click(h.app.test_rows[&0].1.center());
+    let open = menu_text(&mut h, "Open source message")[0];
+    let copy = menu_text(&mut h, "Copy message link")[0];
+    assert!(copy.y > open.y);
 }
