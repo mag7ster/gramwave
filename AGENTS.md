@@ -17,7 +17,7 @@ Read `ARCHITECTURE.md` before changing layer boundaries or persistence.
 ## Build, Test, and Development Commands
 
 - `cargo run --no-default-features -- --demo`: preview fictional data without TDLib or account services.
-- `cargo run --release`: launch the real player; requires libmpv and TDLib runtime dependencies listed in `README.md`.
+- `cargo run --release --locked`: launch the real player. See [Build and run](README.md#build-and-run) for dependencies and Telegram credentials.
 - `cargo fmt --all --check`: verify formatting.
 - `cargo clippy --workspace --locked --all-targets -- -D warnings`: lint; repeat with `--no-default-features` before `--`.
 - `cargo test --workspace --locked`: run the default suite; repeat with `--no-default-features`.
@@ -26,6 +26,15 @@ Read `ARCHITECTURE.md` before changing layer boundaries or persistence.
 Use Cargo checks for routine features and commits. Build Gramwave through
 Homebrew or run `~/homebrew-gramwave/release.sh` only when the user explicitly
 requests a release.
+
+## Documentation
+
+Keep `README.md` focused on what Gramwave does, how to install it and sign in,
+and how to run the default local build or demo. Add a detail only if it explains
+a distinct user-facing capability or changes what the reader needs to do.
+Put build variants and verification in `ARCHITECTURE.md`, and packaging and
+release instructions in the [Homebrew tap](https://github.com/mag7ster/homebrew-gramwave).
+Link to those instructions from the README.
 
 ## Coding Style & Naming Conventions
 

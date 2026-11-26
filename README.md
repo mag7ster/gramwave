@@ -1,30 +1,25 @@
 # Gramwave
 
-A Telegram music player for Linux, built with Rust and egui. Listen to audio from
-channels, groups, private chats and Saved Messages in a dedicated desktop app.
-
-
+Gramwave is a read-only Telegram music player for Linux. Listen to audio from
+channels, groups, private chats, and Saved Messages.
 
 https://github.com/user-attachments/assets/85dc199a-1325-4383-bdb4-9b5e1838e32b
 
-
-
 ## Features
 
-- Browse and search chats, pin favorites, and filter music, audio files and voice messages.
-- Open source chats in the system Telegram client and choose which playlist appears on startup.
-- Edit the playback queue, shuffle tracks and use repeat modes.
-- Save tracks or entire playlists for offline listening and manage temporary media by category and chat.
-- Resize down to a mini player and view color emoji and animated Telegram emoji.
-- Control playback with media keys, MPRIS and the system tray.
-- Switch between light and dark themes.
-
-The player does not send messages or mark them as read. It currently supports
-one Telegram account and has an English interface.
+- Search chats and find tracks within a playlist. Pin favorite chats and filter
+  music, audio files, and voice messages.
+- Save tracks or whole playlists for offline listening. Saved playlists
+  automatically download new tracks that match your filters.
+- Reorder the queue, see playback history, and undo removals. After a restart,
+  press Play to resume the saved queue from where you left off.
+- Open a track's original message in Telegram when a link is available.
+- Shrink the window to a mini player and control playback with media keys or the
+  system tray.
 
 ## Install with Homebrew
 
-On Linux x86_64, add the Gramwave tap and install the player.
+Prebuilt packages are available for Linux x86_64.
 
 ```sh
 brew trust --tap mag7ster/gramwave
@@ -33,109 +28,46 @@ brew install mag7ster/gramwave/gramwave
 gramwave
 ```
 
-Homebrew installs a prebuilt Gramwave bottle on compatible Linux x86_64 systems.
-For a source build on x86_64, set up Telegram credentials under [Build and run](#build-and-run)
-and pass the file path to Homebrew.
-
-```sh
-HOMEBREW_GRAMWAVE_TELEGRAM_CONFIG="$GRAMWAVE_TELEGRAM_CONFIG" \
-  brew install --build-from-source mag7ster/gramwave/gramwave
-```
-
-The tap supplies its own TDLib bottle and an audio-focused libmpv bottle with
-ALSA, PulseAudio and PipeWire outputs. Homebrew can
-[provide its own glibc](https://docs.brew.sh/Homebrew-on-Linux) on older Linux
-distributions. To update, run
-`brew update` and `brew upgrade mag7ster/gramwave/gramwave`. For the launcher
-to appear in a desktop menu, the session needs Homebrew's `bin` on `PATH` and
-Homebrew's `share` in `XDG_DATA_DIRS`.
-
-## Build and run
-
-You need a recent stable Rust toolchain and the libmpv development package
-to build Gramwave. The executable needs `libmpv.so.2` at runtime. The default
-build downloads TDLib automatically. Its runtime dependencies are OpenSSL 3,
-zlib, libc++, libc++abi and LLVM libunwind.
-
-Opening a source chat uses GIO (`gio`) and a registered `tg://` handler such as
-Telegram Desktop. Video emoji use FFmpeg with the `libvpx-vp9` decoder for
-transparency. Without that decoder the player shows a thumbnail or the associated
-Unicode emoji.
-
-To enable Telegram login in a local build, create an application and obtain its
-API ID and API hash. Store them in a private file outside both Git repositories.
-Put the API ID on the first line and the API hash on the second line. Use an
-editor to keep the values out of your shell history. [Telegram API credentials](https://my.telegram.org/apps)
-
-```sh
-gramwave_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/gramwave"
-mkdir -p -m 700 "$gramwave_config_dir"
-chmod 700 "$gramwave_config_dir"
-(umask 077; touch "$gramwave_config_dir/telegram.conf")
-chmod 600 "$gramwave_config_dir/telegram.conf"
-${EDITOR:-vi} "$gramwave_config_dir/telegram.conf"
-```
-
-Add this export to your shell startup file (`~/.zshrc` for zsh) and open a new terminal.
-
-```sh
-export GRAMWAVE_TELEGRAM_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/gramwave/telegram.conf"
-```
-
-The release script in the Homebrew tap uses the same file. The published binary
-contains the app's API pair, which anyone with the binary can extract. Keep the
-configuration file and local build artifacts out of Git.
-[Homebrew release instructions](https://github.com/mag7ster/homebrew-gramwave#publish-a-bottle)
-
-On Fedora, install the native dependencies, then build and run Gramwave.
-
-```sh
-sudo dnf install mpv-devel openssl-libs zlib-ng-compat libcxx libcxxabi llvm-libunwind
-cargo run --release --locked
-```
-
-Choose a renderer when building the optimized local executable at
-`target/release/gramwave-dev`.
-
-- Vulkan (default): `cargo build --release --locked`
-- OpenGL: `cargo build --release --locked --no-default-features --features mpv,download-tdlib`
-
-To build with an installed TDLib 1.8.61, set `GRAMWAVE_TDLIB_DIR` to its
-installation prefix and enable `mpv,telegram,vulkan` with `--no-default-features`.
-
-Local builds are called **Gramwave Dev**. The Homebrew formula enables
-`release-branding` and installs the executable as `gramwave`.
+To update, run `brew update && brew upgrade mag7ster/gramwave/gramwave`.
+Packaging details are in the [Gramwave Homebrew tap](https://github.com/mag7ster/homebrew-gramwave).
 
 ## Connect Telegram
 
-Sign in with a QR code or your phone number. Enter your two-step verification
-password if requested.
+Scan the QR code from **Settings → Devices → Link Desktop Device** in Telegram
+on your phone, or sign in with your phone number.
 
-Your session is saved for future launches. **Gramwave** stores account data and
-downloads in `$XDG_DATA_HOME/gramwave` (`~/.local/share/gramwave` by default).
-**Gramwave Dev** uses the separate `gramwave-dev` directory under the same data
-home. Keep both directories private.
+Closing the window keeps playback running when a system tray is available.
+Choose **Quit** in the tray menu or press **Ctrl+Shift+Q** to exit completely.
 
-Closing the window keeps playback in the tray when a tray host is available.
-Use **Quit** in the tray menu or **Ctrl+Shift+Q** to exit completely.
+## Build and run
 
-## Development
+Install a recent stable Rust toolchain and the libmpv development package.
+Cargo downloads TDLib automatically. On Fedora, install the native dependencies
+with `dnf`.
 
-The demo uses fictional data for development and UI testing. Build it without
-the `mpv` and `telegram` features to run it without either native library:
+```sh
+sudo dnf install mpv-devel openssl-libs zlib-ng-compat libcxx libcxxabi llvm-libunwind
+```
+
+Create a Telegram application to get an API ID and API hash. Put the ID on the
+first line and the hash on the second line of a private file (mode `600`) outside
+the checkout. The build embeds these credentials, so keep the file and your
+local build artifacts private. [Telegram API credentials](https://my.telegram.org/apps)
+
+From the repository root, pass the path to your file and run Gramwave.
+
+```sh
+GRAMWAVE_TELEGRAM_CONFIG=/path/to/telegram.conf cargo run --release --locked
+```
+
+To try the interface with fictional data, run the demo.
 
 ```sh
 cargo run --locked --no-default-features -- --demo
 ```
 
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --locked --all-targets -- -D warnings
-cargo test --workspace --locked
-```
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the project structure and full check
-matrix.
+See the developer documentation for [build variants](ARCHITECTURE.md#local-build-variants)
+and [verification](ARCHITECTURE.md#verification).
 
 ## License
 

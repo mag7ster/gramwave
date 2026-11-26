@@ -169,6 +169,21 @@ file removal job; a late deletion result cannot remove a newer copy. Network/sto
 failures retain jobs for retry. Successful publications from superseded attempts
 also enter the durable removal queue; failed cleanup is retried after restart.
 
+## Local build variants
+
+The [default build](README.md#build-and-run) uses Vulkan and downloads TDLib.
+Set `GRAMWAVE_TELEGRAM_CONFIG` at build time to enable Telegram sign-in in either
+of these variants.
+
+- OpenGL with downloaded TDLib uses
+  `cargo build --release --locked --no-default-features --features mpv,download-tdlib`.
+- With an installed TDLib 1.8.61, set `GRAMWAVE_TDLIB_DIR` to its installation
+  prefix and run `cargo build --release --locked --no-default-features --features mpv,telegram,vulkan`.
+
+Source chat and message links use `gio` and a registered `tg://` handler such as
+Telegram Desktop. Transparent video emoji use FFmpeg's `libvpx-vp9` decoder and
+fall back to a thumbnail or the associated Unicode emoji when decoding fails.
+
 ## Verification
 
 ```sh
