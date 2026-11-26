@@ -3,6 +3,12 @@
 A Telegram music player for Linux, built with Rust and egui. Listen to audio from
 channels, groups, private chats and Saved Messages in a dedicated desktop app.
 
+
+
+https://github.com/user-attachments/assets/85dc199a-1325-4383-bdb4-9b5e1838e32b
+
+
+
 ## Features
 
 - Browse and search chats, pin favorites, and filter music, audio files and voice messages.
