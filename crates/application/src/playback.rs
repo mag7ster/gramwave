@@ -5,6 +5,7 @@ use crate::{
     tasks::{Operation, RequestId},
     AppError,
 };
+use gramwave_domain::playback::QueueRangeEdit;
 use gramwave_domain::QueueEntryId;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,6 +96,8 @@ pub(crate) enum PlaybackMutation {
     Repeat(gramwave_domain::RepeatMode),
     Start(Vec<Track>, usize),
     Insert(Track, bool),
+    InsertTracks(Vec<Track>, bool),
+    EditQueueRange(usize, Vec<QueueEntryId>, QueueRangeEdit),
     MoveQueueRow(usize, QueueEntryId, usize),
     Remove(usize),
     Clear,
@@ -147,6 +150,17 @@ impl PlaybackCore {
                     .map(Into::into)
             }
             PlaybackMutation::Insert(track, next) => state.session.insert(track, next),
+            PlaybackMutation::InsertTracks(tracks, next) => {
+                if tracks.is_empty() {
+                    return (None, ChangeSet::default());
+                }
+                state.session.insert_many(tracks, next);
+            }
+            PlaybackMutation::EditQueueRange(start, ids, edit) => {
+                if !state.session.edit_timeline_range(start, &ids, edit) {
+                    return (None, ChangeSet::default());
+                }
+            }
             PlaybackMutation::MoveQueueRow(from, id, to) => {
                 state.session.move_timeline_row(from, id, to)
             }

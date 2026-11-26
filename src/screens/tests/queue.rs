@@ -186,13 +186,13 @@ fn queue_drags_current_across_the_boundary_and_can_select_the_new_past() {
 }
 
 #[test]
-fn queue_drag_from_artwork_commits_only_on_drop() {
+fn queue_drag_from_row_body_commits_only_on_drop() {
     let mut h = queue_harness(5);
     let order = queue_order(&h);
     let first = h.app.test_queue_rows[&order[0]].0;
     let third = h.app.test_queue_rows[&order[2]].0;
     let current = h.app.state.view().session.current().unwrap().entry_id;
-    let grab = egui::pos2(first.left() + 24., first.center().y);
+    let grab = first.center();
     let target = egui::pos2(grab.x, third.center().y);
     h.pointer(grab, true);
     h.frame(vec![egui::Event::PointerMoved(target)]);
@@ -264,7 +264,7 @@ fn queue_row_plays_on_click_or_enter() {
 }
 
 #[test]
-fn queue_menu_and_stationary_drag_leave_playback_unchanged() {
+fn queue_menu_and_long_press_leave_playback_unchanged() {
     let mut h = queue_harness(5);
     let order = queue_order(&h);
     let current = h.app.state.view().session.current().unwrap().entry_id;
@@ -290,11 +290,13 @@ fn queue_menu_and_stationary_drag_leave_playback_unchanged() {
     }
     assert!(egui::Popup::is_any_open(&h.ctx));
     h.key(egui::Key::Escape);
-    h.pointer(row.center(), true);
-    h.time += 1.;
+    let cover = queue_cover_rect(row).center();
+    h.pointer(cover, true);
+    h.time += 0.5;
     h.frame(vec![]);
-    assert!(!h.app.test_queue_rows.contains_key(&order[0]));
-    h.pointer(row.center(), false);
+    assert!(h.app.selection.queue_range().is_none());
+    h.pointer(cover, false);
+    assert!(h.app.selection.queue_range().is_none());
     assert_eq!(queue_order(&h), order);
     assert_eq!(
         h.app.state.view().session.current().unwrap().entry_id,
@@ -321,4 +323,180 @@ fn queue_drag_scrolls_at_the_edge_and_escape_keeps_the_order() {
     h.pointer(edge, false);
     assert_eq!(queue_order(&h), order);
     h.app.shutdown_core().unwrap();
+}
+
+#[test]
+fn queue_reverses_selected_rows_without_restarting_the_current_track() {
+    let mut h = queue_harness(6);
+    let current = h.app.state.view().session.current().unwrap().entry_id;
+    let order = queue_order(&h);
+    let from = queue_cover_rect(h.app.test_queue_rows[&current].0).center();
+    let to = h.app.test_queue_rows[&order[1]].0.center();
+    h.pointer(from, true);
+    h.frame(vec![egui::Event::PointerMoved(to)]);
+    h.pointer(to, false);
+    assert_eq!(h.app.selection.queue_range(), Some(0..=2));
+    h.key(egui::Key::Enter);
+    let reverse = menu_text(&mut h, "Reverse selected tracks")[0];
+    h.click(reverse);
+    let session = &h.app.state.view().session;
+    assert_eq!(session.timeline().current_index(), Some(2));
+    assert_eq!(session.current().unwrap().entry_id, current);
+    assert_eq!(session.timeline().get(0).unwrap().entry_id, order[1]);
+    assert_eq!(session.timeline().get(1).unwrap().entry_id, order[0]);
+    assert_eq!(h.app.selection.queue_range(), Some(0..=2));
+    h.key(egui::Key::Escape);
+    assert!(h.app.selection.queue_range().is_none());
+}
+
+#[test]
+fn ctrl_selection_in_queue_fills_gaps_and_preserves_the_middle() {
+    let mut h = queue_harness(6);
+    let order = queue_order(&h);
+    for index in [0, 3, 1] {
+        let row = h.app.test_queue_rows[&order[index]].0.center();
+        h.click_with(row, egui::PointerButton::Primary, egui::Modifiers::CTRL);
+    }
+    assert_eq!(h.app.selection.queue_range(), Some(1..=4));
+    let last = h.app.test_queue_rows[&order[3]].0.center();
+    h.click_with(last, egui::PointerButton::Primary, egui::Modifiers::CTRL);
+    assert_eq!(h.app.selection.queue_range(), Some(1..=3));
+}
+
+#[test]
+fn queue_modifier_drag_selects_from_body_and_one_selected_row_keeps_remove() {
+    use egui::{Key, Modifiers, PointerButton};
+    let mut h = queue_harness(6);
+    let order = queue_order(&h);
+    let (from, _, id) = h.app.test_queue_rows[&order[0]];
+    h.click_with(from.center(), PointerButton::Primary, Modifiers::CTRL);
+    h.key(Key::Enter);
+    assert!(!menu_text(&mut h, "Remove").is_empty());
+    assert!(menu_text(&mut h, "Reverse selected tracks").is_empty());
+    h.key(Key::Escape);
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(id));
+
+    let start = from.center();
+    let end = h.app.test_queue_rows[&order[2]].0.center();
+    h.frame(vec![
+        egui::Event::PointerMoved(start),
+        egui::Event::PointerButton {
+            pos: start,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::CTRL,
+        },
+    ]);
+    h.frame(vec![egui::Event::PointerMoved(end)]);
+    h.pointer(end, false);
+    assert_eq!(h.app.selection.queue_range(), Some(1..=3));
+    assert_eq!(queue_order(&h), order);
+}
+
+#[test]
+fn queue_cover_drag_shrinks_and_ctrl_restores_the_original_range() {
+    use egui::{Modifiers, PointerButton};
+    let mut h = queue_harness(7);
+    let current = h.app.state.view().session.current().unwrap().entry_id;
+    let order = queue_order(&h);
+    let pos: Vec<_> = order
+        .iter()
+        .take(5)
+        .map(|id| queue_cover_rect(h.app.test_queue_rows[id].0).center())
+        .collect();
+
+    h.pointer(pos[2], true);
+    for (i, expected) in [
+        (4, Some(3..=5)),
+        (3, Some(3..=4)),
+        (2, None),
+        (1, Some(2..=3)),
+        (2, None),
+    ] {
+        h.frame(vec![egui::Event::PointerMoved(pos[i])]);
+        assert_eq!(h.app.selection.queue_range(), expected);
+    }
+    h.pointer(pos[2], false);
+    assert!(h.app.selection.queue_range().is_none());
+
+    h.click_with(pos[0], PointerButton::Primary, Modifiers::CTRL);
+    h.frame(vec![
+        egui::Event::PointerMoved(pos[2]),
+        egui::Event::PointerButton {
+            pos: pos[2],
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::CTRL,
+        },
+    ]);
+    for (i, range) in [(4, 1..=5), (3, 1..=4), (2, 1..=1)] {
+        h.frame(vec![egui::Event::PointerMoved(pos[i])]);
+        assert_eq!(h.app.selection.queue_range(), Some(range));
+    }
+    h.pointer(pos[2], false);
+    assert_eq!(h.app.selection.queue_range(), Some(1..=1));
+    assert_eq!(
+        h.app.state.view().session.current().unwrap().entry_id,
+        current
+    );
+    assert_eq!(queue_order(&h), order);
+}
+
+#[test]
+fn queue_edge_scroll_arms_on_movement_and_stops_after_release() {
+    let mut h = queue_harness(30);
+    let current = queue_order(&h)[10];
+    h.app.execute(AppCommand::PlayQueue(current));
+    h.settle();
+    let (viewport, initial) = h.list_scroll("test-queue-scroll");
+    let cover = queue_cover_rect(h.app.test_queue_rows[&current].0).center();
+    let top = egui::pos2(cover.x, viewport.top() - 5.);
+    let farther = top - egui::vec2(45., 42.);
+    let bottom = egui::pos2(cover.x, viewport.bottom() + 5.);
+    let start = h
+        .app
+        .state
+        .view()
+        .session
+        .timeline()
+        .current_index()
+        .unwrap();
+
+    h.pointer(cover, true);
+    h.settle();
+    assert_eq!(scroll_offset(&h), initial);
+    assert!(h.app.selection.queue_range().is_none());
+
+    h.frame(vec![egui::Event::PointerMoved(top)]);
+    assert!(h.app.selection.queue_range().is_none());
+    let near = scroll_offset(&h);
+    assert!(near < initial);
+    h.frame(vec![egui::Event::PointerMoved(farther)]);
+    assert!(near - scroll_offset(&h) > initial - near);
+    h.settle();
+    let up = scroll_offset(&h);
+    assert!(up < initial - design::ROW_HEIGHT);
+    let selection = h.app.selection.queue_range().unwrap();
+    assert!(*selection.start() < start);
+    assert_eq!(*selection.end(), start);
+
+    h.frame(vec![egui::Event::PointerMoved(bottom)]);
+    h.settle();
+    assert!(scroll_offset(&h) > up);
+    assert!(*h.app.selection.queue_range().unwrap().end() > start);
+    let stopped = scroll_offset(&h);
+    h.frame(vec![egui::Event::PointerMoved(viewport.center())]);
+    h.settle();
+    assert_eq!(scroll_offset(&h), stopped);
+    h.frame(vec![egui::Event::PointerMoved(bottom)]);
+    assert!(scroll_offset(&h) > stopped);
+    h.pointer(bottom, false);
+    let released = scroll_offset(&h);
+    h.settle();
+    assert_eq!(scroll_offset(&h), released);
+    assert!(return_button(&h).is_some());
+    assert_eq!(
+        h.app.state.view().session.current().unwrap().entry_id,
+        current
+    );
 }

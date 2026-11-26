@@ -569,3 +569,333 @@ fn removing_track_selected_and_all_downloads_preserves_cover_and_cache_schedule(
         );
     }
 }
+
+#[test]
+fn playlist_group_actions_follow_display_order_and_can_reverse_it() {
+    let mut h = Harness::new();
+    h.size = egui::vec2(1240., 800.);
+    h.settle();
+    let tracks = h.app.playlist_tracks(0);
+    let rows: Vec<_> = tracks
+        .iter()
+        .take(4)
+        .map(|t| (t.message, h.app.test_rows[&t.message].0.center()))
+        .collect();
+    h.pointer(rows[0].1, true);
+    h.frame(vec![egui::Event::PointerMoved(rows[1].1)]);
+    h.pointer(rows[1].1, false);
+    h.click_with(
+        rows[3].1,
+        egui::PointerButton::Primary,
+        egui::Modifiers::CTRL,
+    );
+    assert!(h.app.state.view().session.current().is_none());
+
+    let selection = [rows[0].0, rows[1].0, rows[3].0];
+    let mut expected = Vec::new();
+    for (next, reverse) in [(true, false), (false, true), (true, true), (false, false)] {
+        let mut added = selection;
+        if reverse {
+            added.reverse();
+        }
+        let destination = if next { 0 } else { expected.len() };
+        expected.splice(destination..destination, added);
+        if next && !reverse {
+            h.key(egui::Key::Enter);
+            assert!(egui::Popup::is_any_open(&h.ctx));
+            h.key(egui::Key::Tab);
+            h.key(egui::Key::Enter);
+        } else {
+            h.click_with(
+                rows[3].1,
+                egui::PointerButton::Secondary,
+                egui::Modifiers::NONE,
+            );
+            let at = if reverse {
+                menu_text(&mut h, "⇅")[usize::from(!next)] - egui::vec2(13., 0.)
+            } else {
+                menu_text(&mut h, "Add to queue")[0]
+            };
+            h.click(at);
+        }
+        h.settle();
+        assert_eq!(
+            h.app
+                .state
+                .view()
+                .session
+                .remaining()
+                .iter()
+                .map(|entry| entry.message)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    h.click_with(
+        rows[0].1,
+        egui::PointerButton::Secondary,
+        egui::Modifiers::NONE,
+    );
+    let save = menu_text(&mut h, "Save offline")[0];
+    h.click(save);
+    assert_eq!(
+        h.app
+            .state
+            .offline()
+            .pending
+            .values()
+            .map(|track| track.message)
+            .collect::<Vec<_>>(),
+        [rows[0].0, rows[1].0, rows[3].0],
+    );
+}
+
+#[test]
+fn keyboard_selection_grows_shrinks_and_skips_playlist_menu_buttons() {
+    use egui::{Key, Modifiers};
+    let mut h = Harness::new();
+    let tracks = h.app.playlist_tracks(0);
+    let scope = selection::scope(0, "", h.app.sort, h.app.state.view().playlists[0].filters);
+    let key = |i: usize| egui::Id::new((0i64, tracks[i].library_id, tracks[i].id()));
+    h.ctx
+        .memory_mut(|m| m.request_focus(h.app.test_row_ids[&tracks[0].message]));
+    h.frame(vec![egui::Event::ModifiersChanged(Modifiers::CTRL)]);
+    h.frame(vec![egui::Event::ModifiersChanged(Modifiers::NONE)]);
+    assert!(h.app.selection.contains(scope, key(0)));
+    h.key_with(Key::ArrowDown, Modifiers::CTRL);
+    assert!(h.app.selection.contains(scope, key(1)));
+    h.key_with(Key::ArrowDown, Modifiers::SHIFT);
+    assert!(h.app.selection.contains(scope, key(2)));
+    h.key_with(Key::ArrowUp, Modifiers::SHIFT);
+    assert!(!h.app.selection.contains(scope, key(2)));
+    h.key(Key::Tab);
+    assert_eq!(
+        h.app.keyboard.focused(&h.ctx),
+        Some((WorkspacePane::Playlist, key(2), false))
+    );
+    h.key(Key::Escape);
+    assert!(!h.app.selection.active(scope));
+}
+
+#[test]
+fn playlist_drag_waits_for_a_second_row_and_outside_clicks_clear_the_range() {
+    use egui::{Modifiers, PointerButton};
+    let mut h = queue_harness(6);
+    let (first, _) = h.app.test_rows[&0];
+    let start = first.center();
+    let to = h.app.test_rows[&1].0.center();
+    let scope = selection::scope(0, "", h.app.sort, h.app.state.view().playlists[0].filters);
+    h.pointer(start, true);
+    h.time += 0.5;
+    let within = start + egui::vec2(12., 0.);
+    h.frame(vec![egui::Event::PointerMoved(within)]);
+    assert!(!h.app.selection.active(scope));
+    h.pointer(within, false);
+    assert!(!h.app.selection.active(scope));
+    assert_eq!(h.app.state.view().session.current().unwrap().message, 1);
+
+    for button in [PointerButton::Primary, PointerButton::Secondary] {
+        h.pointer(start, true);
+        h.frame(vec![egui::Event::PointerMoved(to)]);
+        assert!(h.app.selection.is_group());
+        h.pointer(to, false);
+        let outside = if button == PointerButton::Primary {
+            egui::pos2(10., 670.)
+        } else {
+            let id = h.app.state.view().session.current().unwrap().entry_id;
+            h.app.test_queue_rows[&id].0.center()
+        };
+        h.click_with(outside, button, Modifiers::NONE);
+        assert!(!h.app.selection.active(scope));
+    }
+    assert!(egui::Popup::is_any_open(&h.ctx));
+}
+
+#[test]
+fn playlist_popup_navigation_stays_inside_and_uses_the_reverse_column() {
+    use egui::{Key, Modifiers, PointerButton};
+
+    fn focused_at(h: &mut Harness, label: &str, column: usize) {
+        let pos = menu_text(h, label)[column];
+        let id = h.ctx.memory(|m| m.focused()).expect("menu focus");
+        assert!(
+            h.ctx.read_response(id).unwrap().rect.contains(pos),
+            "expected focus on {label} at {pos:?}, focused {id:?} at {:?}",
+            h.ctx.read_response(id).unwrap().rect
+        );
+    }
+
+    let mut h = Harness::new();
+    let first = h.app.test_rows[&0].0.center();
+    let second = h.app.test_rows[&1].0.center();
+    let opener = h.app.test_row_ids[&0];
+    h.click_with(first, PointerButton::Primary, Modifiers::CTRL);
+    h.key(Key::Enter);
+    assert_eq!(h.ctx.memory(|m| m.focused()), None);
+    h.key(Key::Enter);
+    assert!(egui::Popup::is_any_open(&h.ctx));
+    assert!(h.app.state.view().session.current().is_none());
+    h.key(Key::Tab);
+    focused_at(&mut h, "Play", 0);
+    assert!(menu_text(&mut h, "⇅").is_empty());
+    h.key_with(Key::Tab, Modifiers::SHIFT);
+    focused_at(&mut h, "Copy title", 0);
+    h.key(Key::Escape);
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(opener));
+
+    h.pointer(first, true);
+    h.frame(vec![egui::Event::PointerMoved(second)]);
+    h.pointer(second, false);
+    h.click_with(first, PointerButton::Secondary, Modifiers::NONE);
+    h.settle();
+    assert_eq!(h.ctx.memory(|m| m.focused()), None);
+    h.key(Key::ArrowUp);
+    focused_at(&mut h, "Save offline", 0);
+    h.key(Key::Tab);
+    focused_at(&mut h, "Play next", 0);
+    h.key(Key::ArrowRight);
+    focused_at(&mut h, "⇅", 0);
+    h.key(Key::ArrowDown);
+    focused_at(&mut h, "⇅", 1);
+    h.key(Key::Tab);
+    focused_at(&mut h, "Save offline", 0);
+    h.key(Key::Tab);
+    focused_at(&mut h, "Play next", 0);
+    h.key(Key::ArrowDown);
+    focused_at(&mut h, "Add to queue", 0);
+    h.key(Key::ArrowRight);
+    h.key(Key::Enter);
+    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert!(h.app.selection.is_group());
+    let tracks = h.app.playlist_tracks(0);
+    assert_eq!(
+        h.app
+            .state
+            .view()
+            .session
+            .remaining()
+            .iter()
+            .map(|row| row.message)
+            .collect::<Vec<_>>(),
+        [tracks[1].message, tracks[0].message]
+    );
+}
+
+#[test]
+fn playlist_drag_shrinks_and_ctrl_restores_the_original_groups() {
+    use egui::{Modifiers, PointerButton};
+    let mut h = Harness::new();
+    h.size = egui::vec2(1240., 800.);
+    h.settle();
+    let tracks = h.app.playlist_tracks(0);
+    let scope = selection::scope(0, "", h.app.sort, h.app.state.view().playlists[0].filters);
+    let keys: Vec<_> = tracks
+        .iter()
+        .take(5)
+        .map(|track| egui::Id::new((0i64, track.library_id, track.id())))
+        .collect();
+    let pos: Vec<_> = tracks
+        .iter()
+        .take(5)
+        .map(|track| h.app.test_rows[&track.message].0.center())
+        .collect();
+    let selected = |h: &Harness| {
+        keys.iter()
+            .enumerate()
+            .filter_map(|(i, &key)| h.app.selection.contains(scope, key).then_some(i))
+            .collect::<Vec<_>>()
+    };
+
+    h.pointer(pos[2], true);
+    for (at, expected) in [
+        (pos[4], vec![2, 3, 4]),
+        (pos[3], vec![2, 3]),
+        (egui::pos2(10., pos[3].y), vec![2, 3]),
+        (pos[2], vec![]),
+        (pos[1], vec![1, 2]),
+        (pos[2], vec![]),
+    ] {
+        h.frame(vec![egui::Event::PointerMoved(at)]);
+        assert_eq!(selected(&h), expected);
+    }
+    h.pointer(pos[2], false);
+    assert!(h.app.state.view().session.current().is_none());
+
+    for i in [0, 4] {
+        h.click_with(pos[i], PointerButton::Primary, Modifiers::CTRL);
+    }
+    h.frame(vec![
+        egui::Event::PointerMoved(pos[2]),
+        egui::Event::PointerButton {
+            pos: pos[2],
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::CTRL,
+        },
+    ]);
+    h.frame(vec![egui::Event::PointerMoved(pos[4])]);
+    assert_eq!(selected(&h), [0, 2, 3, 4]);
+    h.frame(vec![egui::Event::PointerMoved(pos[3])]);
+    assert_eq!(selected(&h), [0, 2, 3, 4]);
+    h.frame(vec![egui::Event::PointerMoved(pos[2])]);
+    assert_eq!(selected(&h), [0, 4]);
+    h.pointer(pos[2], false);
+    assert!(h.app.state.view().session.current().is_none());
+}
+
+#[test]
+fn playlist_edge_scroll_selects_hidden_rows_and_shrinks_on_the_way_back() {
+    let mut h = Harness::new();
+    h.size = egui::vec2(1240., 800.);
+    h.settle();
+    let (viewport, initial) = h.list_scroll("test-playlist-scroll");
+    let tracks = h.app.playlist_tracks(0);
+    let scope = selection::scope(0, "", h.app.sort, h.app.state.view().playlists[0].filters);
+    let selected = |h: &Harness, at: usize| {
+        let track = &tracks[at];
+        h.app
+            .selection
+            .contains(scope, egui::Id::new((0i64, track.library_id, track.id())))
+    };
+    let first = h.app.test_rows[&tracks[0].message].0.center();
+    let bottom = egui::pos2(first.x, viewport.bottom() + 5.);
+    let farther = bottom + egui::vec2(0., 45.);
+    let top = egui::pos2(first.x, viewport.top() - 5.);
+    let last = tracks.len() - 1;
+
+    h.pointer(first, true);
+    h.frame(vec![egui::Event::PointerMoved(bottom)]);
+    let near = h.list_scroll("test-playlist-scroll").1;
+    assert!(near > initial);
+    h.frame(vec![egui::Event::PointerMoved(farther)]);
+    assert!(h.list_scroll("test-playlist-scroll").1 - near > near - initial);
+    assert!(!selected(&h, last));
+    for _ in 0..240 {
+        h.frame(vec![]);
+    }
+    let (_, end) = h.list_scroll("test-playlist-scroll");
+    assert!(end > initial + design::ROW_HEIGHT);
+    assert!(selected(&h, last));
+    h.settle();
+    assert_eq!(h.list_scroll("test-playlist-scroll").1, end);
+
+    h.frame(vec![egui::Event::PointerMoved(top)]);
+    assert!(!selected(&h, last));
+    h.settle();
+    assert!(h.list_scroll("test-playlist-scroll").1 < end);
+    for _ in 0..240 {
+        h.frame(vec![]);
+    }
+    assert!((h.list_scroll("test-playlist-scroll").1 - initial).abs() < 0.5);
+    assert!(!h.app.selection.active(scope));
+
+    h.frame(vec![egui::Event::PointerMoved(bottom)]);
+    h.settle();
+    h.key(egui::Key::Escape);
+    let (_, stopped) = h.list_scroll("test-playlist-scroll");
+    h.settle();
+    h.pointer(bottom, false);
+    assert_eq!(h.list_scroll("test-playlist-scroll").1, stopped);
+    assert!(h.app.state.view().session.current().is_none());
+}

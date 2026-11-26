@@ -15,7 +15,18 @@ pub struct Palette {
     pub muted: egui::Color32,
     pub accent: egui::Color32,
     pub selected: egui::Color32,
+    pub track_selection: egui::Color32,
     pub error: egui::Color32,
+}
+impl Palette {
+    pub fn track_fill(&self, current: bool, selected: bool) -> Option<egui::Color32> {
+        match (current, selected) {
+            (true, true) => Some(self.selected.lerp_to_gamma(self.track_selection, 0.5)),
+            (true, false) => Some(self.selected),
+            (false, true) => Some(self.track_selection),
+            (false, false) => None,
+        }
+    }
 }
 pub fn palette(light: bool) -> Palette {
     use egui::Color32 as C;
@@ -28,6 +39,7 @@ pub fn palette(light: bool) -> Palette {
             muted: C::from_rgb(81, 94, 86),
             accent: C::from_rgb(0, 112, 66),
             selected: C::from_rgb(211, 238, 224),
+            track_selection: C::from_rgb(203, 233, 229),
             error: C::from_rgb(164, 37, 44),
         }
     } else {
@@ -39,6 +51,7 @@ pub fn palette(light: bool) -> Palette {
             muted: C::from_rgb(168, 176, 186),
             accent: GREEN,
             selected: C::from_rgb(28, 65, 48),
+            track_selection: C::from_rgb(26, 63, 60),
             error: C::from_rgb(255, 155, 155),
         }
     }

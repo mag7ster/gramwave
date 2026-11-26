@@ -344,9 +344,13 @@ impl App {
             .paint(ui, rect, status.id, crate::design::colors(ui).accent, "✦");
     }
 
-    pub(crate) fn track_caption(&self, ui: &mut egui::Ui, caption: Option<&Caption>) {
+    pub(crate) fn track_caption(
+        &self,
+        ui: &mut egui::Ui,
+        caption: Option<&Caption>,
+    ) -> Vec<egui::Id> {
         let Some(caption) = caption else {
-            return;
+            return Vec::new();
         };
         ui.separator();
         ui.weak(crate::tr("Telegram caption"));
@@ -354,15 +358,16 @@ impl App {
         egui::ScrollArea::vertical()
             .id_salt("telegram-caption")
             .max_height(max_height)
-            .show(ui, |ui| self.caption_contents(ui, caption));
+            .show(ui, |ui| self.caption_contents(ui, caption))
+            .inner
     }
 
-    fn caption_contents(&self, ui: &mut egui::Ui, caption: &Caption) {
+    fn caption_contents(&self, ui: &mut egui::Ui, caption: &Caption) -> Vec<egui::Id> {
         ui.set_max_width(ui.available_width().min(280.));
         let links = caption_links(caption);
         if caption.emoji.is_empty() && links.is_empty() {
             ui.label(&caption.text);
-            return;
+            return Vec::new();
         }
         let color = ui.visuals().text_color();
         let format = egui::TextFormat::simple(egui::TextStyle::Body.resolve(ui.style()), color);
@@ -435,6 +440,7 @@ impl App {
         ui.painter().galley(rect.min, galley.clone(), color);
         let mut start = 0;
         let mut focusable = vec![true; links.len()];
+        let mut focus_targets = Vec::new();
         for (row_index, row) in galley.rows.iter().enumerate() {
             let end = start + row.glyphs.len();
             for (link_index, ((link, url), range)) in links.iter().zip(&bounds).enumerate() {
@@ -459,6 +465,18 @@ impl App {
                     },
                 );
                 if first {
+                    focus_targets.push(response.id);
+                    if response.has_focus() {
+                        ui.painter().rect_stroke(
+                            area,
+                            2.,
+                            egui::Stroke::new(1., ui.visuals().hyperlink_color),
+                            egui::StrokeKind::Inside,
+                        );
+                        if !ui.clip_rect().contains_rect(area) {
+                            response.scroll_to_me(None);
+                        }
+                    }
                     response.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Link,
@@ -505,6 +523,7 @@ impl App {
                 self.custom_emoji.paint(ui, emoji_rect, id, color, fallback);
             }
         }
+        focus_targets
     }
 
     pub(crate) fn emoji_telegram(&self) -> Option<&crate::telegram::Telegram> {
@@ -603,7 +622,7 @@ mod tests {
         };
         let ctx = egui::Context::default();
         ctx.run_ui(egui::RawInput::default(), |ui| {
-            app.track_caption(ui, Some(&caption))
+            app.track_caption(ui, Some(&caption));
         })
         .textures_delta
         .clear();

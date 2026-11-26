@@ -2,6 +2,7 @@ use crate::{
     model::{Playlist, State, Track},
     persistence::{ChangeSet, Settings},
 };
+use gramwave_domain::playback::QueueRangeEdit;
 use gramwave_domain::{QueueEntryId, RepeatMode};
 use std::collections::HashSet;
 
@@ -37,6 +38,8 @@ pub(crate) enum CoreCommand {
     ToggleChatPin(i64),
     Start(Vec<Track>, usize),
     Insert(Track, bool),
+    InsertTracks(Vec<Track>, bool),
+    EditQueueRange(usize, Vec<QueueEntryId>, QueueRangeEdit),
     MoveQueueRow(usize, QueueEntryId, usize),
     Remove(usize),
     Clear,
@@ -175,6 +178,10 @@ impl AppCore {
             CoreCommand::Repeat(value) => Playback::Repeat(value),
             CoreCommand::Start(tracks, index) => Playback::Start(tracks, index),
             CoreCommand::Insert(track, next) => Playback::Insert(track, next),
+            CoreCommand::InsertTracks(tracks, next) => Playback::InsertTracks(tracks, next),
+            CoreCommand::EditQueueRange(start, ids, edit) => {
+                Playback::EditQueueRange(start, ids, edit)
+            }
             CoreCommand::MoveQueueRow(from, id, to) => Playback::MoveQueueRow(from, id, to),
             CoreCommand::Remove(index) => Playback::Remove(index),
             CoreCommand::Clear => Playback::Clear,

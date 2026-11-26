@@ -48,6 +48,21 @@ impl Harness {
             self.frame(vec![]);
         }
     }
+    fn list_scroll(&self, key: &str) -> (egui::Rect, f32) {
+        let id: egui::Id = self
+            .ctx
+            .data(|data| data.get_temp(egui::Id::new(key)))
+            .unwrap();
+        let viewport = self
+            .ctx
+            .data(|data| data.get_temp(id.with("test-viewport")))
+            .unwrap();
+        let offset = egui::scroll_area::State::load(&self.ctx, id)
+            .unwrap()
+            .offset
+            .y;
+        (viewport, offset)
+    }
     fn pointer(&mut self, p: egui::Pos2, pressed: bool) {
         self.frame(vec![
             egui::Event::PointerMoved(p),
@@ -62,6 +77,24 @@ impl Harness {
     fn click(&mut self, p: egui::Pos2) {
         self.pointer(p, true);
         self.pointer(p, false);
+    }
+    fn click_with(
+        &mut self,
+        pos: egui::Pos2,
+        button: egui::PointerButton,
+        modifiers: egui::Modifiers,
+    ) {
+        for pressed in [true, false] {
+            self.frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers,
+                },
+            ]);
+        }
     }
     fn key(&mut self, key: egui::Key) {
         self.key_with(key, egui::Modifiers::NONE);
@@ -102,4 +135,17 @@ fn queue_harness(count: i64) -> Harness {
     ));
     h.settle();
     h
+}
+
+fn menu_text(h: &mut Harness, label: &str) -> Vec<egui::Pos2> {
+    h.frame(vec![])
+        .shapes
+        .into_iter()
+        .filter_map(|painted| match painted.shape {
+            egui::Shape::Text(text) if text.galley.text() == label => {
+                Some(text.pos + text.galley.rect.center().to_vec2())
+            }
+            _ => None,
+        })
+        .collect()
 }

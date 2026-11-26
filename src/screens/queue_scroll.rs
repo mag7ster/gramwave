@@ -92,6 +92,12 @@ impl QueueScroll {
         )
     }
 
+    pub(super) fn browse(&mut self) {
+        self.following = false;
+        self.animation = None;
+        self.snap_at = None;
+    }
+
     pub(super) fn finish(
         &mut self,
         ui: &egui::Ui,

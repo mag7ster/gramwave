@@ -1,4 +1,5 @@
 use crate::model::Track;
+use gramwave_domain::playback::QueueRangeEdit;
 use gramwave_domain::{QueueEntryId, RepeatMode};
 pub enum AppCommand {
     Connect,
@@ -6,6 +7,7 @@ pub enum AppCommand {
     StartSession(Vec<Track>, usize),
     Authenticate(crate::telegram::AuthRequest),
     SaveTrack(Track),
+    SaveTracks(Vec<Track>),
     SavePlaylist(i64, [bool; 3]),
     RemoveOffline(gramwave_domain::TrackId, String),
     CancelOffline,
@@ -15,6 +17,12 @@ pub enum AppCommand {
     Settings(crate::persistence::Settings),
     Filters(i64, [bool; 3]),
     Insert(Track, bool),
+    InsertTracks(Vec<Track>, bool),
+    EditQueueRange {
+        start: usize,
+        expected: Vec<QueueEntryId>,
+        edit: QueueRangeEdit,
+    },
     MoveQueueRow {
         from: usize,
         entry_id: QueueEntryId,

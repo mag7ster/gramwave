@@ -1,4 +1,7 @@
-use super::WorkspacePane;
+use super::{
+    selection::{Scope, Selection},
+    WorkspacePane,
+};
 use eframe::egui::{self, Id, Key, Modifiers, Rect, Response, Ui};
 use std::collections::HashMap;
 
@@ -92,6 +95,7 @@ impl Keyboard {
         list: ListNavigation,
         has_menu: bool,
         key_at: impl Fn(usize) -> Id,
+        mut selection: Option<(&mut Selection, Scope)>,
     ) -> Option<usize> {
         if !self.enabled {
             return None;
@@ -102,9 +106,40 @@ impl Keyboard {
                 .iter()
                 .any(|&key| i.key_pressed(key))
         });
-        if let Some(source) = self.source.filter(|row| row.pane == pane && nav_pressed) {
+        let ctrl_tap = selection
+            .as_ref()
+            .is_some_and(|(selection, _)| selection.ctrl_tap);
+        let skip_menu = pane == WorkspacePane::Playlist
+            && selection
+                .as_ref()
+                .is_some_and(|(selection, scope)| selection.active(*scope));
+        let has_menu = has_menu && !skip_menu;
+        if let Some(source) = self
+            .source
+            .filter(|row| row.pane == pane && (nav_pressed || ctrl_tap))
+        {
             if let Some(i) = (0..len).find(|&i| key_at(i) == source.key) {
                 let ctx = ui.ctx();
+                if let Some((selection, scope)) = &mut selection {
+                    if ctrl_tap {
+                        selection.toggle(ctx, *scope, i, &key_at);
+                        self.focus_row(pane, key_at(i));
+                        return Some(i);
+                    }
+                    for (modifiers, add) in [(Modifiers::CTRL, true), (Modifiers::SHIFT, false)] {
+                        for (key, backwards, index) in [
+                            (Key::ArrowUp, true, i.saturating_sub(1)),
+                            (Key::ArrowDown, false, (i + 1).min(len - 1)),
+                        ] {
+                            if take_key(ctx, modifiers, key) {
+                                selection.extend(ctx, *scope, len, (i, index), add, &key_at);
+                                self.focus_row(pane, key_at(index));
+                                self.backward = backwards;
+                                return Some(index);
+                            }
+                        }
+                    }
+                }
                 let movement = if take_key(ctx, Modifiers::NONE, Key::ArrowUp) {
                     Some((i.saturating_sub(1), false, true))
                 } else if take_key(ctx, Modifiers::NONE, Key::ArrowDown) {
@@ -116,7 +151,7 @@ impl Keyboard {
                     && take_key(ctx, Modifiers::NONE, Key::Tab)
                 {
                     Some((i + 1, false, false))
-                } else if source.menu && take_key(ctx, Modifiers::SHIFT, Key::Tab) {
+                } else if has_menu && source.menu && take_key(ctx, Modifiers::SHIFT, Key::Tab) {
                     Some((i, false, true))
                 } else if i > 0 && take_key(ctx, Modifiers::SHIFT, Key::Tab) {
                     Some((i - 1, has_menu, true))
@@ -140,6 +175,20 @@ impl Keyboard {
             self.target = None;
         }
         index
+    }
+
+    pub(super) fn source_key(&self, pane: WorkspacePane) -> Option<Id> {
+        self.source
+            .filter(|row| row.pane == pane)
+            .map(|row| row.key)
+    }
+
+    pub(super) fn focus_row(&mut self, pane: WorkspacePane, key: Id) {
+        self.target = Some(Row {
+            pane,
+            key,
+            menu: false,
+        });
     }
 
     pub(super) fn row(
@@ -238,7 +287,11 @@ fn take_key(ctx: &egui::Context, modifiers: Modifiers, key: Key) -> bool {
         i.events.retain(|event| {
             !matches!(event, egui::Event::Key {
                 key: pressed_key, pressed: true, modifiers: pressed_modifiers, ..
-            } if *pressed_key == key && pressed_modifiers.matches_exact(modifiers))
+            } if *pressed_key == key && (if modifiers == Modifiers::CTRL {
+                super::selection::plain_ctrl(*pressed_modifiers)
+            } else {
+                pressed_modifiers.matches_exact(modifiers)
+            }))
         });
         i.events.len() != count
     });
@@ -264,13 +317,185 @@ pub(super) fn focus_outline(ui: &Ui, response: &Response) {
     }
 }
 
-pub(super) fn popup_focus(button: &Response, was_open: bool, first: Option<Id>) {
-    let ctx = &button.ctx;
-    if button.has_focus() && button.clicked() && ctx.input(|i| i.key_pressed(Key::Enter)) {
-        if let Some(id) = first {
-            ctx.memory_mut(|m| m.request_focus(id));
+#[derive(Clone, Default)]
+pub(super) struct MenuItems(Vec<(Id, Option<Id>)>);
+
+impl MenuItems {
+    pub(super) fn push(&mut self, ui: &Ui, main: &Response, alternate: Option<&Response>) {
+        focus_outline(ui, main);
+        if let Some(alternate) = alternate {
+            focus_outline(ui, alternate);
         }
-    } else if was_open && ctx.input(|i| i.key_pressed(Key::Escape)) {
-        button.request_focus();
+        self.0.push((main.id, alternate.map(|button| button.id)));
     }
+
+    pub(super) fn links(&mut self, links: impl IntoIterator<Item = Id>) {
+        self.0.extend(links.into_iter().map(|id| (id, None)));
+    }
+
+    fn contains(&self, focused: Option<Id>) -> bool {
+        focused.is_some_and(|id| {
+            self.0
+                .iter()
+                .any(|&(main, alt)| id == main || Some(id) == alt)
+        })
+    }
+
+    fn destination(&self, focused: Option<Id>, key: Key, backwards: bool) -> Option<Id> {
+        let Some(focused) = focused.filter(|id| self.contains(Some(*id))) else {
+            return match key {
+                Key::Tab if backwards => self.0.last().map(|&(main, alt)| alt.unwrap_or(main)),
+                Key::ArrowUp => self.0.last().map(|&(main, _)| main),
+                Key::Tab | Key::ArrowDown => self.0.first().map(|&(main, _)| main),
+                _ => None,
+            };
+        };
+        if key == Key::Tab {
+            let order: Vec<_> = self
+                .0
+                .iter()
+                .flat_map(|&(main, alt)| [Some(main), alt].into_iter().flatten())
+                .collect();
+            let index = order.iter().position(|&id| id == focused)?;
+            let step = if backwards { order.len() - 1 } else { 1 };
+            return Some(order[(index + step) % order.len()]);
+        }
+        let row = self
+            .0
+            .iter()
+            .position(|&(main, alt)| focused == main || Some(focused) == alt)?;
+        let (main, alt) = self.0[row];
+        let right = Some(focused) == alt;
+        match key {
+            Key::ArrowLeft => Some(main),
+            Key::ArrowRight => alt,
+            Key::ArrowUp | Key::ArrowDown => {
+                let step = if key == Key::ArrowUp {
+                    self.0.len() - 1
+                } else {
+                    1
+                };
+                let (main, alt) = self.0[(row + step) % self.0.len()];
+                Some(if right { alt.unwrap_or(main) } else { main })
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TrackMenu {
+    id: Id,
+    opener: Id,
+    items: MenuItems,
+}
+
+fn track_menu_key() -> Id {
+    Id::new("track-popup-keyboard")
+}
+
+pub(super) fn prepare_track_menu(ctx: &egui::Context) -> bool {
+    let Some(popup) = ctx.data(|data| data.get_temp::<TrackMenu>(track_menu_key())) else {
+        return false;
+    };
+    if !egui::Popup::is_id_open(ctx, popup.id) {
+        return false;
+    }
+    if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        egui::Popup::close_id(ctx, popup.id);
+        ctx.memory_mut(|memory| memory.request_focus(popup.opener));
+        return true;
+    }
+    if !popup.items.contains(ctx.memory(|m| m.focused())) {
+        take_key(ctx, Modifiers::NONE, Key::Enter);
+        take_key(ctx, Modifiers::NONE, Key::Space);
+    }
+    for (key, modifiers) in [
+        (Key::Tab, Modifiers::NONE),
+        (Key::Tab, Modifiers::SHIFT),
+        (Key::ArrowUp, Modifiers::NONE),
+        (Key::ArrowDown, Modifiers::NONE),
+        (Key::ArrowLeft, Modifiers::NONE),
+        (Key::ArrowRight, Modifiers::NONE),
+    ] {
+        if take_key(ctx, modifiers, key) {
+            if let Some(id) =
+                popup
+                    .items
+                    .destination(ctx.memory(|m| m.focused()), key, modifiers.shift)
+            {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        }
+    }
+    true
+}
+
+pub(super) fn show_track_menu(
+    row: &Response,
+    menu: &Response,
+    selected: bool,
+    mut contents: impl FnMut(&mut Ui, &mut MenuItems),
+) -> (bool, Option<Id>, bool) {
+    let ctx = &row.ctx;
+    let enter = selected
+        && row.has_focus()
+        && !egui::Popup::is_any_open(ctx)
+        && ctx.input(|i| i.key_pressed(Key::Enter));
+    let menu_id = egui::Popup::default_response_id(menu);
+    let row_id = egui::Popup::default_response_id(row);
+    let was_open_menu = egui::Popup::is_id_open(ctx, menu_id);
+    let was_open_row = egui::Popup::is_id_open(ctx, row_id);
+    let mut popup = egui::Popup::menu(menu);
+    if enter {
+        popup = popup.open_memory(Some(egui::SetOpenCommand::Bool(true)));
+    }
+    let mut draw = |ui: &mut Ui| {
+        let mut items = MenuItems::default();
+        contents(ui, &mut items);
+        items
+    };
+    let shown = popup.show(&mut draw).map(|response| {
+        (
+            menu_id,
+            if enter { row.id } else { menu.id },
+            was_open_menu,
+            response,
+        )
+    });
+    let context = egui::Popup::context_menu(row)
+        .show(&mut draw)
+        .map(|response| (row_id, row.id, was_open_row, response));
+    let popup = context.or(shown);
+    let keep_click = selected
+        && (row.secondary_clicked()
+            || menu.clicked_by(egui::PointerButton::Primary)
+            || menu.secondary_clicked()
+            || popup
+                .as_ref()
+                .is_some_and(|(_, _, _, popup)| !popup.response.clicked_elsewhere()));
+    let handled = enter || menu.clicked() || popup.is_some();
+    let selected_popup = selected
+        .then(|| popup.as_ref().map(|(id, _, _, _)| *id))
+        .flatten();
+    if let Some((id, opener, was_open, response)) = popup {
+        if egui::Popup::is_id_open(ctx, id) {
+            let items = response.inner;
+            let old = ctx.data(|data| data.get_temp::<TrackMenu>(track_menu_key()));
+            let opener = old
+                .filter(|old| was_open && old.id == id)
+                .map_or(opener, |old| old.opener);
+            if !was_open {
+                ctx.memory_mut(|memory| {
+                    if let Some(focused) = memory.focused() {
+                        memory.surrender_focus(focused);
+                    }
+                });
+            }
+            ctx.data_mut(|data| {
+                data.insert_temp(track_menu_key(), TrackMenu { id, opener, items })
+            });
+        }
+    }
+    (handled, selected_popup, keep_click)
 }

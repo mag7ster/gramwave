@@ -56,6 +56,73 @@ mod regression {
     }
 
     #[test]
+    fn range_edits_keep_the_current_occurrence_position_and_navigation() {
+        let mut session = Session::default();
+        let current = session.start(&tracks(), 1, false).unwrap().entry_id;
+        session.set_position_ms(42_000);
+        let original: Vec<_> = (0..5)
+            .map(|i| session.timeline().get(i).unwrap().entry_id)
+            .collect();
+        assert!(!session.edit_timeline_range(0, &original[1..5], QueueRangeEdit::Reverse));
+        assert!(session.edit_timeline_range(0, &original[..4], QueueRangeEdit::Reverse));
+        let reversed = [original[3], original[2], current, original[0], original[4]];
+        let mut session: Session =
+            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        assert!((0..5)
+            .map(|i| session.timeline().get(i).unwrap().entry_id)
+            .eq(reversed));
+        assert_eq!(session.timeline().current_index(), Some(2));
+        assert_eq!(session.current().unwrap().entry_id, current);
+        assert_eq!(session.position_ms(), 42_000);
+
+        let mut moved = session.clone();
+        assert!(moved.edit_timeline_range(0, &reversed[..4], QueueRangeEdit::MoveDown));
+        assert_eq!(moved.timeline().current_index(), Some(3));
+        assert!(moved.edit_timeline_range(1, &reversed[..4], QueueRangeEdit::MoveUp));
+        assert!((0..5)
+            .map(|i| moved.timeline().get(i).unwrap().entry_id)
+            .eq(reversed));
+        assert_eq!(session.previous().unwrap().entry_id, original[2]);
+        assert_eq!(
+            session
+                .advance(RepeatMode::Off, false, false)
+                .unwrap()
+                .entry_id,
+            current
+        );
+        assert_eq!(
+            session
+                .advance(RepeatMode::Off, false, false)
+                .unwrap()
+                .entry_id,
+            original[0]
+        );
+    }
+
+    #[test]
+    fn reversing_a_repeat_appearance_keeps_the_playing_occurrence_distinct() {
+        let mut session = Session::default();
+        let current = session.start(&tracks(), 0, false).unwrap().entry_id;
+        for _ in 0..5 {
+            session.advance(RepeatMode::All, false, true);
+        }
+        let ids: Vec<_> = (0..6)
+            .map(|i| session.timeline().get(i).unwrap().entry_id)
+            .collect();
+        assert_eq!(ids[0], ids[5]);
+        assert!(session.edit_timeline_range(0, &ids, QueueRangeEdit::Reverse));
+        assert_eq!(session.timeline().current_index(), Some(0));
+        assert_eq!(session.current().unwrap().entry_id, current);
+        assert_eq!(session.remaining()[4].message, 0);
+        assert_ne!(session.remaining()[4].entry_id, current);
+        session.remove(4);
+        assert!(session
+            .snapshot()
+            .iter()
+            .any(|entry| entry.entry_id == current));
+    }
+
+    #[test]
     fn rewind_selects_an_exact_repeat_appearance_and_matches_previous() {
         let mut s = Session::default();
         s.start(&tracks(), 1, false);

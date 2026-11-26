@@ -55,7 +55,15 @@ fn tab_and_arrows_reveal_rows_across_virtual_list_boundaries() {
     assert!(row(&h).2);
     h.key(Key::Enter);
     assert!(egui::Popup::is_any_open(&h.ctx));
-    assert_ne!(focused(&h), Some(menu));
+    assert_eq!(focused(&h), None);
+    h.key_with(Key::Tab, Modifiers::SHIFT);
+    let item = focused(&h).expect("last menu item");
+    assert!(h
+        .ctx
+        .read_response(item)
+        .unwrap()
+        .rect
+        .contains(menu_text(&mut h, "Copy title")[0]));
     assert_eq!(h.app.state.view().session.current().unwrap().message, 1);
     h.key(Key::Escape);
     assert_eq!(focused(&h), Some(menu));

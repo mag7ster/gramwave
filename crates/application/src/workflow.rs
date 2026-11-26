@@ -222,16 +222,8 @@ impl AppCore {
                 settings.recent_chats.clear();
                 self.handle(CoreCommand::Settings(settings));
             }
-            AppCommand::SaveTrack(track) => {
-                self.prune_audio_cache();
-                self.offline.work.retry.remove(&track.id());
-                self.offline
-                    .work
-                    .errors
-                    .remove(&(track.chat, track.message));
-                self.offline.enqueue(track, true);
-                self.offline.work.scan_retry = None;
-            }
+            AppCommand::SaveTrack(track) => self.save_tracks([track]),
+            AppCommand::SaveTracks(tracks) => self.save_tracks(tracks),
             AppCommand::SavePlaylist(chat, filters) => {
                 self.prune_audio_cache();
                 self.offline.cancel_scan();
@@ -348,6 +340,16 @@ impl AppCore {
             AppCommand::Insert(track, next) => {
                 self.handle(CoreCommand::Insert(track, next));
             }
+            AppCommand::InsertTracks(tracks, next) => {
+                self.handle(CoreCommand::InsertTracks(tracks, next));
+            }
+            AppCommand::EditQueueRange {
+                start,
+                expected,
+                edit,
+            } => {
+                self.handle(CoreCommand::EditQueueRange(start, expected, edit));
+            }
             AppCommand::MoveQueueRow { from, entry_id, to } => {
                 self.handle(CoreCommand::MoveQueueRow(from, entry_id, to));
             }
@@ -377,6 +379,19 @@ impl AppCore {
         self.persistence_effect(&mut effects);
         effects
     }
+    fn save_tracks(&mut self, tracks: impl IntoIterator<Item = Track>) {
+        self.prune_audio_cache();
+        for track in tracks {
+            self.offline.work.retry.remove(&track.id());
+            self.offline
+                .work
+                .errors
+                .remove(&(track.chat, track.message));
+            self.offline.enqueue(track, true);
+        }
+        self.offline.work.scan_retry = None;
+    }
+
     fn prune_audio_cache(&mut self) {
         self.offline.prune_cache(
             crate::offline::unix_seconds(std::time::SystemTime::now()),

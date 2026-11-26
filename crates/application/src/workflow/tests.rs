@@ -458,3 +458,33 @@ fn playlist_completion_follows_enabled_filters_and_saved_copies() {
     offline.publish(voice, "voice".into());
     assert!(offline.playlist_complete(&playlist));
 }
+
+#[test]
+fn group_queue_edits_persist_without_player_effects() {
+    use gramwave_domain::playback::QueueRangeEdit;
+
+    let mut state = State::default();
+    state
+        .session
+        .start(&[track(1), track(2), track(3), track(4)], 1, false);
+    state.session.set_position_ms(27_000);
+    let current = state.session.current().unwrap().entry_id;
+    let expected = (0..4)
+        .map(|i| state.session.timeline().get(i).unwrap().entry_id)
+        .collect();
+    let mut core = AppCore::new(state);
+    core.playback.state = crate::playback::PlaybackState::Playing;
+    let effects = core.command(AppCommand::EditQueueRange {
+        start: 0,
+        expected,
+        edit: QueueRangeEdit::Reverse,
+    });
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Player(_) | Effect::PreparePlayback { .. })));
+    let session = &core.view().session;
+    assert_eq!(session.current().unwrap().entry_id, current);
+    assert_eq!(session.position_ms(), 27_000);
+    assert_eq!(session.timeline().current_index(), Some(2));
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Persist(changes) if changes.session.as_ref() == Some(session))));
+}

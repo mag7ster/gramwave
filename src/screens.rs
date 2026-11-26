@@ -2,14 +2,19 @@ use crate::application::commands::AppCommand;
 use crate::{design, tr, App, RepeatMode};
 use design::{button, Icon};
 use eframe::egui;
-use gramwave_domain::{playback::QueueTimeline, QueueEntryId};
+use gramwave_domain::{
+    playback::{QueueRangeEdit, QueueTimeline},
+    QueueEntryId,
+};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 mod keyboard;
 mod queue_scroll;
+mod selection;
 pub(crate) use keyboard::Keyboard;
-use keyboard::{empty_label, focus_outline, popup_focus, ListNavigation};
+use keyboard::{empty_label, focus_outline, ListNavigation, MenuItems};
+pub(crate) use selection::Selection;
 
 const TRACK_SCROLL_GUTTER: i8 = 12;
 const TRACK_ROW_PADDING: f32 = 4.;
@@ -260,9 +265,11 @@ impl App {
         let ctx = root.ctx().clone();
         self.image_wanted.clear();
         self.track_wanted.clear();
+        let track_menu_open = keyboard::prepare_track_menu(&ctx);
         design::style(&ctx, self.state.view().light);
         root.set_style(ctx.global_style());
-        if !self.settings_open
+        if !track_menu_open
+            && !self.settings_open
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {
@@ -331,11 +338,16 @@ impl App {
         let transport_rect = player.transport_rect(&ctx, viewport);
         let workspace = player.has_workspace();
         let dense = player == PlayerLayout::Dense;
+        self.selection.begin(
+            &ctx,
+            workspace && !self.settings_open && self.offline_confirm.is_none(),
+        );
         if let Some(pane) = self.keyboard.begin(
             &ctx,
             workspace
                 && !self.settings_open
                 && self.offline_confirm.is_none()
+                && !track_menu_open
                 && !egui::Popup::is_any_open(&ctx),
         ) {
             if !dock {
@@ -419,6 +431,7 @@ impl App {
         self.settings_ui(&ctx);
         self.offline_confirmation_ui(&ctx);
         self.error_ui(&ctx);
+        self.selection.finish(&ctx);
         self.poll_chat_search(&ctx);
         self.request_visible_media(&ctx);
     }
@@ -694,7 +707,7 @@ impl App {
             let stride = ROW_HEIGHT + ROW_GAP + ui.spacing().item_spacing.y;
             let nav = ListNavigation::new(WorkspacePane::Library, recent.len(), stride);
             let key_at = |i: usize| egui::Id::new(self.state.view().playlists[recent[i]].id);
-            self.keyboard.step(ui, nav, false, key_at);
+            self.keyboard.step(ui, nav, false, key_at, None);
             let first_visible =
                 ((clip.top() - ui.next_widget_position().y) / stride).floor() as usize;
             let visible_slots = (clip.height() / stride).ceil().max(1.) as usize;
@@ -1675,7 +1688,15 @@ impl App {
                 self.open_chat(selected);
             }
         }
+        let scope = selection::scope(chat_id, &self.search, self.sort, filters);
+        let key_at = |i: usize| {
+            let track = &tracks[i];
+            egui::Id::new((chat_id, track.library_id, track.id()))
+        };
+        self.selection
+            .present_playlist(ui.ctx(), scope, &tracks, key_at);
         let mut action = None;
+        let mut batch = None;
         let mut list_frame = track_list_frame().begin(ui);
         let list_ui = &mut list_frame.content_ui;
         let scroll = list_scroll_area(list_ui)
@@ -1683,11 +1704,21 @@ impl App {
             .show_rows(list_ui, design::ROW_HEIGHT, tracks.len(), |ui, range| {
                 let stride = design::ROW_HEIGHT + ui.spacing().item_spacing.y;
                 let nav = ListNavigation::new(WorkspacePane::Playlist, tracks.len(), stride);
-                let key_at = |i: usize| {
-                    let track = &tracks[i];
-                    egui::Id::new((chat_id, track.library_id, track.id()))
-                };
-                if let Some(i) = self.keyboard.step(ui, nav, true, key_at) {
+                let height = (tracks.len() as f32 * stride - ui.spacing().item_spacing.y).max(0.);
+                let list = egui::Rect::from_min_size(
+                    ui.max_rect().left_top() - egui::vec2(0., range.start as f32 * stride),
+                    egui::vec2(ui.available_width(), height),
+                );
+                let (focus, _) =
+                    self.selection
+                        .pointer(ui, scope, tracks.len(), key_at, list, stride);
+                if let Some(i) = focus {
+                    ui.memory_mut(|memory| memory.request_focus(ui.id().with(key_at(i))));
+                }
+                if let Some(i) =
+                    self.keyboard
+                        .step(ui, nav, true, key_at, Some((&mut self.selection, scope)))
+                {
                     let rect = egui::Rect::from_min_size(
                         ui.max_rect().left_top()
                             + egui::vec2(0., (i as f32 - range.start as f32) * stride),
@@ -1718,8 +1749,16 @@ impl App {
                         egui::Sense::hover(),
                     );
                     // Register the row first; the later menu owns its independent hit target.
-                    let response =
-                        ui.interact(rect, ui.id().with(key_at(i)), keyboard::row_sense(ui, rect));
+                    let response = ui.interact(
+                        rect,
+                        ui.id().with(key_at(i)),
+                        if ui.is_rect_visible(rect) {
+                            egui::Sense::click_and_drag()
+                        } else {
+                            egui::Sense::CLICK | egui::Sense::DRAG
+                        },
+                    );
+                    let selected_row = self.selection.contains(scope, key_at(i));
                     self.keyboard
                         .row(ui, nav, i, key_at(i), false, (&response, rect));
                     let p = design::colors(ui);
@@ -1728,15 +1767,14 @@ impl App {
                         response.hovered(),
                         0.14,
                     );
-                    if active || response.has_focus() || hover > 0. {
+                    let highlight = p
+                        .track_fill(active, selected_row)
+                        .or_else(|| response.has_focus().then_some(p.selected));
+                    if highlight.is_some() || hover > 0. {
                         ui.painter().rect_filled(
                             rect,
                             8.,
-                            if active || response.has_focus() {
-                                p.selected
-                            } else {
-                                p.raised.gamma_multiply(hover)
-                            },
+                            highlight.unwrap_or_else(|| p.raised.gamma_multiply(hover)),
                         );
                     }
                     if active {
@@ -1749,6 +1787,10 @@ impl App {
                             p.accent,
                         );
                     }
+                    if selected_row {
+                        selection::paint(ui, rect);
+                    }
+                    focus_outline(ui, &response);
                     let mut menu_clicked = false;
                     ui.scope_builder(
                         egui::UiBuilder::new()
@@ -1836,17 +1878,32 @@ impl App {
                                 let menu = ui.add(
                                     egui::Button::new("…")
                                         .min_size(egui::Vec2::splat(36.))
-                                        .sense(keyboard::row_sense(ui, rect)),
+                                        .sense(if self.selection.active(scope) {
+                                            egui::Sense::CLICK
+                                        } else {
+                                            keyboard::row_sense(ui, rect)
+                                        }),
                                 );
                                 self.keyboard
                                     .row(ui, nav, i, key_at(i), true, (&menu, rect));
                                 focus_outline(ui, &menu);
-                                let popup_id = egui::Popup::default_response_id(&menu);
-                                let was_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-                                let mut first = None;
-                                let mut contents = |ui: &mut egui::Ui| {
+                                self.selection.start(
+                                    &response,
+                                    &menu,
+                                    scope,
+                                    (i, key_at(i)),
+                                    self.keyboard.source_key(nav.pane),
+                                    None,
+                                );
+                                let contents = |ui: &mut egui::Ui, items: &mut MenuItems| {
                                     ui.visuals_mut().override_text_color = Some(p.text);
                                     ui.visuals_mut().widgets.inactive.fg_stroke.color = p.text;
+                                    if selected_row && self.selection.is_group() {
+                                        if let Some(action) = playlist_selection_menu(ui, items) {
+                                            batch = Some((action, response.id));
+                                        }
+                                        return;
+                                    }
                                     for (kind, label) in [
                                         (0, tr("Play")),
                                         (1, tr("Play next")),
@@ -1863,7 +1920,7 @@ impl App {
                                         (5, tr("Copy title")),
                                     ] {
                                         let button = ui.button(label);
-                                        first.get_or_insert(button.id);
+                                        items.push(ui, &button, None);
                                         #[cfg(test)]
                                         if kind == 0 {
                                             self.test_play_buttons.insert(t.message, button.rect);
@@ -1892,31 +1949,41 @@ impl App {
                                         ui.label(tr("Download failed · Save offline to retry"));
                                         ui.label(error.to_string());
                                     }
-                                    self.track_caption(ui, t.caption.as_ref());
+                                    items.links(self.track_caption(ui, t.caption.as_ref()));
                                 };
-                                let popup = egui::Popup::menu(&menu).show(&mut contents);
-                                response.context_menu(&mut contents);
-                                popup_focus(&menu, was_open, first);
+                                let (handled, popup, keep_click) = keyboard::show_track_menu(
+                                    &response,
+                                    &menu,
+                                    selected_row,
+                                    contents,
+                                );
+                                self.selection.remember_popup(popup, keep_click);
                                 #[cfg(test)]
                                 self.test_rows.insert(t.message, (rect, menu.rect));
                                 #[cfg(test)]
                                 self.test_row_ids.insert(t.message, response.id);
-                                menu_clicked = menu.clicked() || popup.is_some();
+                                menu_clicked = handled;
                             });
                         },
                     );
                     if response.clicked() && !menu_clicked {
                         response.request_focus();
                     }
-                    if !menu_clicked && response.clicked() && !response.double_clicked() {
+                    if !menu_clicked
+                        && !self.selection.block_click()
+                        && response.clicked()
+                        && !response.double_clicked()
+                    {
                         action = Some((6, i));
                     }
                 }
             });
         list_frame.end(ui);
         #[cfg(test)]
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(egui::Id::new("test-playlist-scroll"), scroll.id));
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::new("test-playlist-scroll"), scroll.id);
+            data.insert_temp(scroll.id.with("test-viewport"), scroll.inner_rect);
+        });
         design::middle_scroll(ui, scroll.id, scroll.inner_rect, scroll.content_size.y);
         let more = self.state.view().playlists[selected].has_more();
         if more && self.state.library().indexing_chat().is_none() && !self.demo {
@@ -1925,6 +1992,26 @@ impl App {
                     >= scroll.content_size.y - 120.;
             if ui.button(tr("Load more music")).clicked() || at_bottom {
                 self.load_chat(selected, false);
+            }
+        }
+        if let Some((batch, row)) = batch {
+            ui.memory_mut(|memory| memory.request_focus(row));
+            let mut selected_tracks: Vec<_> = tracks
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| self.selection.contains(scope, key_at(*i)))
+                .map(|(_, track)| track.metadata())
+                .collect();
+            match batch {
+                PlaylistSelectionAction::Insert { next, reverse } => {
+                    if reverse {
+                        selected_tracks.reverse();
+                    }
+                    self.execute(AppCommand::InsertTracks(selected_tracks, next));
+                }
+                PlaylistSelectionAction::SaveOffline => {
+                    self.execute(AppCommand::SaveTracks(selected_tracks))
+                }
             }
         }
         if let Some((kind, i)) = action {
@@ -1947,6 +2034,60 @@ impl App {
         }
     }
 }
+enum PlaylistSelectionAction {
+    Insert { next: bool, reverse: bool },
+    SaveOffline,
+}
+
+fn playlist_selection_menu(
+    ui: &mut egui::Ui,
+    items: &mut MenuItems,
+) -> Option<PlaylistSelectionAction> {
+    ui.set_width(184.);
+    let mut action = None;
+    for (next, label, reverse_label) in [
+        (true, tr("Play next"), tr("Play next in reverse order")),
+        (
+            false,
+            tr("Add to queue"),
+            tr("Add to queue in reverse order"),
+        ),
+    ] {
+        ui.horizontal(|ui| {
+            let forward = ui.button(label);
+            let reverse = ui
+                .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.visuals_mut().widgets.inactive.weak_bg_fill = design::colors(ui).raised;
+                    let button = ui.add(egui::Button::new("⇅").min_size(egui::Vec2::splat(36.)));
+                    button.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            &reverse_label,
+                        )
+                    });
+                    button.on_hover_text(reverse_label)
+                })
+                .inner;
+            items.push(ui, &forward, Some(&reverse));
+            if forward.clicked() || reverse.clicked() {
+                action = Some(PlaylistSelectionAction::Insert {
+                    next,
+                    reverse: reverse.clicked(),
+                });
+                ui.close();
+            }
+        });
+    }
+    let save = ui.button(tr("Save offline"));
+    items.push(ui, &save, None);
+    if save.clicked() {
+        action = Some(PlaylistSelectionAction::SaveOffline);
+        ui.close();
+    }
+    action
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApplicationMenuAction {
     Settings,
@@ -2282,27 +2423,32 @@ fn queue_drag(
     queue: QueueTimeline<'_>,
     key: egui::Id,
     row_id: impl Fn(usize) -> egui::Id,
+    allow_start: bool,
 ) -> (Option<LiftedQueueRow>, Option<AppCommand>) {
     let ctx = ui.ctx();
     let current = queue
         .current_index()
         .map(|i| (i, queue.get(i).unwrap().entry_id));
     let mut drag = ctx.data(|data| data.get_temp::<QueueDrag>(key));
-    let (down, released, cancelled, origin, pointer, dt) = ui.input(|i| {
+    let (down, released, cancelled, origin, pointer) = ui.input(|i| {
         (
             i.pointer.primary_down(),
             i.pointer.primary_released(),
             !i.focused || i.key_pressed(egui::Key::Escape),
             i.pointer.press_origin(),
             i.pointer.interact_pos(),
-            i.stable_dt.min(0.05),
         )
     });
-    if drag.is_none() && down {
-        drag = ctx.drag_started_id().zip(origin).and_then(|(id, origin)| {
+    if drag.is_none() && down && allow_start && !cancelled {
+        drag = ctx.dragged_id().zip(origin).and_then(|(id, origin)| {
             let slot = (0..queue.len()).find(|&i| row_id(i) == id)?;
             let track = queue.get(slot)?;
             let response = ctx.read_response(id)?;
+            if queue_cover_rect(response.rect).contains(origin)
+                || pointer.is_none_or(|pos| pos.distance(origin) < 4.)
+            {
+                return None;
+            }
             Some(QueueDrag {
                 id,
                 from: slot,
@@ -2339,8 +2485,7 @@ fn queue_drag(
         stop();
         return (None, None);
     }
-    let viewport = egui::Rect::from_x_y_ranges(list.x_range(), ui.clip_rect().y_range())
-        .intersect(ui.clip_rect());
+    let viewport = selection::drag_viewport(ui, list);
     let inside = viewport.contains(pointer);
     let rect = egui::Rect::from_min_size(
         pointer - drag.grab,
@@ -2372,21 +2517,17 @@ fn queue_drag(
     ctx.data_mut(|data| data.insert_temp(key, drag));
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
     if inside {
-        let edge = (viewport.height() / 3.).min(36.);
-        let top = (viewport.top() + edge - pointer.y).max(0.);
-        let bottom = (pointer.y - viewport.bottom() + edge).max(0.);
-        let speed = (bottom - top) * 18.;
-        if (speed < 0. && list.top() < viewport.top())
-            || (speed > 0. && list.bottom() > viewport.bottom())
-        {
-            ui.scroll_with_delta_animation(
-                egui::vec2(0., -speed * dt),
-                egui::style::ScrollAnimation::none(),
-            );
-            ctx.request_repaint();
-        }
+        selection::scroll_drag_edge(ui, list, viewport, pointer.y);
     }
     (Some(LiftedQueueRow { from, slot, rect }), None)
+}
+
+fn repeated_upcoming(queue: QueueTimeline<'_>) -> HashSet<QueueEntryId> {
+    let mut seen = HashSet::new();
+    queue
+        .upcoming_ids()
+        .filter(|&id| !seen.insert(id))
+        .collect()
 }
 
 fn queue_row_id(
@@ -2407,6 +2548,13 @@ fn queue_row_id(
     }
 }
 
+fn queue_cover_rect(rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(rect.left() + TRACK_ROW_PADDING, rect.center().y - 22.),
+        egui::Vec2::splat(44.),
+    )
+}
+
 fn queue_row_contents(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -2416,11 +2564,9 @@ fn queue_row_contents(
 ) -> egui::Response {
     let inset = rect.shrink2(egui::vec2(TRACK_ROW_PADDING, 6.));
     let center_y = inset.center().y;
-    let cover_pos = egui::pos2(inset.left(), center_y - 22.);
-    let mut cover_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(egui::Rect::from_min_size(cover_pos, egui::Vec2::splat(44.))),
-    );
+    let cover = queue_cover_rect(rect);
+    let cover_pos = cover.min;
+    let mut cover_ui = ui.new_child(egui::UiBuilder::new().max_rect(cover));
     if past {
         cover_ui.multiply_opacity(0.62);
     }
@@ -2562,6 +2708,7 @@ impl App {
         }
         let mut action = None;
         let mut reordering = false;
+        let mut edited_range = None;
         #[cfg(test)]
         self.test_queue_rows.clear();
         let mut list_frame = if extend_rows {
@@ -2594,6 +2741,7 @@ impl App {
         } else {
             target.max(offset.min(rows_height - design::ROW_HEIGHT))
         };
+        let mut selection_scrolled = false;
         let queue_scroll = list_scroll_area(list_ui)
             .id_salt("queue-list")
             .vertical_scroll_offset(offset)
@@ -2610,19 +2758,29 @@ impl App {
                 );
                 let key = ui.id().with("reorder");
                 let nav = ListNavigation::new(WorkspacePane::Queue, queue.len(), stride);
-                let mut seen = HashSet::new();
-                let repeated = queue
-                    .upcoming_ids()
-                    .filter(|&id| !seen.insert(id))
-                    .collect();
+                let repeated = repeated_upcoming(queue);
                 let key_at = |i: usize| queue_row_id(queue, &repeated, key, i);
-                if let Some(i) = self.keyboard.step(ui, nav, true, key_at) {
+                let scope = selection::QUEUE;
+                self.selection.present_queue(ui.ctx(), queue.len(), key_at);
+                let rows = list.with_max_y(list.top() + rows_height);
+                let (focus, scrolling) =
+                    self.selection
+                        .pointer(ui, scope, queue.len(), key_at, rows, stride);
+                selection_scrolled = scrolling;
+                if let Some(i) = focus {
+                    ui.memory_mut(|memory| memory.request_focus(key_at(i)));
+                }
+                if let Some(i) =
+                    self.keyboard
+                        .step(ui, nav, true, key_at, Some((&mut self.selection, scope)))
+                {
                     let rect = queue_row_rect(list, stride, i as f32);
                     if !ui.is_rect_visible(rect) {
                         self.keyboard.reveal(ui, rect, nav, i);
                     }
                 }
-                let (lifted, moved) = queue_drag(ui, list, stride, queue, key, key_at);
+                let allow_drag = !self.selection.tracking(scope) && !self.selection.block_click();
+                let (lifted, moved) = queue_drag(ui, list, stride, queue, key, key_at, allow_drag);
                 reordering = lifted.is_some();
                 action = moved;
                 let palette = design::colors(ui);
@@ -2675,44 +2833,98 @@ impl App {
                             &track.title,
                         )
                     });
+                    let selected_row = self.selection.contains(scope, id);
                     if lifted.is_none() && row.hovered() {
-                        ui.ctx().set_cursor_icon(if current {
-                            egui::CursorIcon::Grab
-                        } else {
-                            egui::CursorIcon::PointingHand
-                        });
+                        ui.ctx().set_cursor_icon(
+                            if ui.input(|input| {
+                                !input.modifiers.ctrl
+                                    && !input.modifiers.shift
+                                    && input
+                                        .pointer
+                                        .hover_pos()
+                                        .is_some_and(|pos| !queue_cover_rect(rect).contains(pos))
+                            }) {
+                                egui::CursorIcon::Grab
+                            } else {
+                                egui::CursorIcon::PointingHand
+                            },
+                        );
                     }
-                    let fill = if current || row.has_focus() {
-                        palette.selected
-                    } else if row.hovered() {
-                        palette.raised
-                    } else {
-                        palette.panel
-                    };
+                    let fill = palette
+                        .track_fill(current, selected_row)
+                        .unwrap_or_else(|| {
+                            if row.has_focus() {
+                                palette.selected
+                            } else if row.hovered() {
+                                palette.raised
+                            } else {
+                                palette.panel
+                            }
+                        });
                     ui.painter().rect_filled(rect, 8., fill);
                     let mut row_ui =
                         ui.new_child(egui::UiBuilder::new().id(id.with("body")).max_rect(rect));
                     let menu = queue_row_contents(&mut row_ui, rect, &track, past, current);
                     self.keyboard.row(ui, nav, i, id, true, (&menu, rect));
+                    self.selection.start(
+                        &row,
+                        &menu,
+                        scope,
+                        (i, id),
+                        self.keyboard.source_key(nav.pane),
+                        Some(queue_cover_rect(rect)),
+                    );
+                    if selected_row {
+                        selection::paint(ui, rect);
+                    }
                     focus_outline(&row_ui, &row);
                     focus_outline(&row_ui, &menu);
                     #[cfg(test)]
                     self.test_queue_rows
                         .insert(entry.entry_id, (rect, menu.rect, row.id));
-                    if lifted.is_none() && !current && !menu.clicked() && row.clicked() {
-                        action = Some(AppCommand::PlayQueueRow {
-                            index: i,
-                            entry_id: entry.entry_id,
-                        });
-                        if row.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    let contents = |ui: &mut egui::Ui, items: &mut MenuItems| {
+                        if let Some(range) = self
+                            .selection
+                            .queue_range()
+                            .filter(|_| selected_row && self.selection.is_group())
                         {
-                            ui.memory_mut(|m| {
-                                m.request_focus(key.with(("current", entry.entry_id)))
-                            });
+                            let (start, count) = (*range.start(), range.clone().count());
+                            for (label, edit) in [
+                                (tr("Move up"), QueueRangeEdit::MoveUp),
+                                (tr("Move down"), QueueRangeEdit::MoveDown),
+                                (tr("Reverse selected tracks"), QueueRangeEdit::Reverse),
+                            ] {
+                                if let Some(destination) =
+                                    edit.destination(start, count, queue.len())
+                                {
+                                    let button = ui.button(label);
+                                    items.push(ui, &button, None);
+                                    if button.clicked() {
+                                        let expected = range
+                                            .clone()
+                                            .map(|at| queue.get(at).unwrap().entry_id)
+                                            .collect();
+                                        action = Some(AppCommand::EditQueueRange {
+                                            start,
+                                            expected,
+                                            edit,
+                                        });
+                                        let relative = if edit == QueueRangeEdit::Reverse {
+                                            *range.end() - i
+                                        } else {
+                                            i - start
+                                        };
+                                        edited_range = Some((
+                                            key,
+                                            destination..=destination + count - 1,
+                                            destination + relative,
+                                        ));
+                                        ui.close();
+                                    }
+                                }
+                            }
+                            return;
                         }
-                    }
-                    let mut first = None;
-                    let mut contents = |ui: &mut egui::Ui| {
                         let move_to = |to| AppCommand::MoveQueueRow {
                             from: i,
                             entry_id: entry.entry_id,
@@ -2729,7 +2941,7 @@ impl App {
                         ] {
                             if available {
                                 let button = ui.button(label);
-                                first.get_or_insert(button.id);
+                                items.push(ui, &button, None);
                                 if button.clicked() {
                                     action = Some(command);
                                     ui.close();
@@ -2737,11 +2949,31 @@ impl App {
                             }
                         }
                     };
-                    let was_open =
-                        egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&menu));
-                    egui::Popup::menu(&menu).show(&mut contents);
-                    row.context_menu(&mut contents);
-                    popup_focus(&menu, was_open, first);
+                    let (handled, popup, keep_click) =
+                        keyboard::show_track_menu(&row, &menu, selected_row, contents);
+                    self.selection.remember_popup(popup, keep_click);
+                    if lifted.is_none()
+                        && !handled
+                        && !self.selection.block_click()
+                        && row.clicked()
+                    {
+                        if row.clicked_by(egui::PointerButton::Primary) {
+                            self.selection.clear(ui.ctx());
+                        }
+                        if !current {
+                            action = Some(AppCommand::PlayQueueRow {
+                                index: i,
+                                entry_id: entry.entry_id,
+                            });
+                            if row.has_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                            {
+                                ui.memory_mut(|m| {
+                                    m.request_focus(key.with(("current", entry.entry_id)))
+                                });
+                            }
+                        }
+                    }
                 }
                 if let Some(lifted) = lifted {
                     let track = self.media_track(queue.get(lifted.from).unwrap().into());
@@ -2781,8 +3013,13 @@ impl App {
             });
         list_frame.end(ui);
         #[cfg(test)]
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(egui::Id::new("test-queue-scroll"), queue_scroll.id));
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::new("test-queue-scroll"), queue_scroll.id);
+            data.insert_temp(
+                queue_scroll.id.with("test-viewport"),
+                queue_scroll.inner_rect,
+            );
+        });
         design::middle_scroll(
             ui,
             queue_scroll.id,
@@ -2791,11 +3028,23 @@ impl App {
         );
         let middle = design::middle_scroll_active(ui.ctx(), queue_scroll.id);
         follow.finish(ui, &queue_scroll, target, busy, reordering, middle);
+        if selection_scrolled {
+            follow.browse();
+        }
         ui.ctx()
             .data_mut(|data| data.insert_temp(scroll_key, follow));
         if let Some(action) = action {
             let persist = !matches!(action, AppCommand::PlayQueueRow { .. });
             self.execute(action);
+            if let Some((key, range, focus)) = edited_range {
+                let queue = self.state.view().session.timeline();
+                let repeated = repeated_upcoming(queue);
+                let key_at = |i| queue_row_id(queue, &repeated, key, i);
+                if *range.end() < queue.len() {
+                    self.selection.set_queue(range, key_at);
+                    self.keyboard.focus_row(WorkspacePane::Queue, key_at(focus));
+                }
+            }
             ui.request_repaint();
             if persist {
                 self.persist();

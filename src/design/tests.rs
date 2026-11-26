@@ -71,7 +71,14 @@ mod regression {
     fn both_palettes_meet_text_and_control_contrast() {
         for light in [false, true] {
             let p = palette(light);
-            for surface in [p.background, p.panel, p.raised, p.selected] {
+            let current = p.track_fill(true, false).unwrap();
+            let selected = p.track_fill(false, true).unwrap();
+            let both = p.track_fill(true, true).unwrap();
+            assert_ne!(current, selected);
+            assert_ne!(current, both);
+            assert_ne!(selected, both);
+            assert!(contrast(p.accent, both) >= 4.5);
+            for surface in [p.background, p.panel, p.raised, current, selected, both] {
                 assert!(contrast(p.text, surface) >= 4.5);
                 assert!(contrast(p.muted, surface) >= 4.5);
                 assert!(contrast(p.error, surface) >= 4.5);

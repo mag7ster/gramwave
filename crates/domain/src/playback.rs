@@ -4,7 +4,7 @@ use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 mod timeline;
-pub use timeline::QueueTimeline;
+pub use timeline::{QueueRangeEdit, QueueTimeline};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
     #[default]
@@ -187,16 +187,27 @@ impl Session {
     }
 
     pub fn insert(&mut self, track: impl Into<TrackMetadata>, next: bool) {
-        let id = self.entry(track.into());
+        self.insert_many([track], next);
+    }
+
+    pub fn insert_many<T: Into<TrackMetadata>>(
+        &mut self,
+        tracks: impl IntoIterator<Item = T>,
+        next: bool,
+    ) {
+        let ids: Vec<_> = tracks
+            .into_iter()
+            .map(|track| self.entry(track.into()))
+            .collect();
         let before = next.then(|| self.remaining.first().copied()).flatten();
         let at = before
             .and_then(|id| self.order.iter().position(|old| *old == id))
             .unwrap_or(self.order.len());
-        self.order.insert(at, id);
+        self.order.splice(at..at, ids.iter().copied());
         if next {
-            self.remaining.insert(0, id)
+            self.remaining.splice(..0, ids);
         } else {
-            self.remaining.push(id)
+            self.remaining.extend(ids);
         }
     }
     pub fn remove(&mut self, index: usize) {

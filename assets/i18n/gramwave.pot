@@ -33,6 +33,10 @@ msgstr ""
 msgid "Add to queue"
 msgstr ""
 
+#: src/screens.rs:2049
+msgid "Add to queue in reverse order"
+msgstr ""
+
 #: src/application/cache.rs:461 src/application/cache.rs:463
 msgid "All chats"
 msgstr ""
@@ -498,6 +502,10 @@ msgstr ""
 msgid "Play next"
 msgstr ""
 
+#: src/screens.rs:2045
+msgid "Play next in reverse order"
+msgstr ""
+
 #: src/ui.rs:129
 msgid "Playback"
 msgstr ""
@@ -634,6 +642,10 @@ msgstr ""
 
 #: src/screens.rs:367
 msgid "Retry search"
+msgstr ""
+
+#: src/screens.rs:2890
+msgid "Reverse selected tracks"
 msgstr ""
 
 #: src/screens.rs:1171

@@ -1,6 +1,27 @@
 use super::{QueueEntry, QueueEntryId, QueueView, Session};
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueRangeEdit {
+    MoveUp,
+    MoveDown,
+    Reverse,
+}
+
+impl QueueRangeEdit {
+    pub fn destination(self, start: usize, count: usize, len: usize) -> Option<usize> {
+        let end = start.checked_add(count)?;
+        if count == 0 || end > len {
+            return None;
+        }
+        match self {
+            Self::MoveUp => start.checked_sub(1),
+            Self::MoveDown => (end < len).then_some(start + 1),
+            Self::Reverse => (count > 1).then_some(start),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct QueueTimeline<'a> {
     preceding: QueueView<'a>,
@@ -119,14 +140,7 @@ impl Session {
 
         let old_past = timeline.past_len();
         let has_current = timeline.current_index().is_some();
-        let mut rows: Vec<_> = (0..timeline.len())
-            .map(|i| (timeline.get(i).unwrap().entry_id, i < old_past))
-            .collect();
-        let moved_unique = rows
-            .iter()
-            .filter(|(id, _)| *id == expected)
-            .nth(1)
-            .is_none();
+        let mut rows = self.timeline_rows();
         let moved = rows.remove(from);
         rows.insert(to, moved);
         let past = if has_current {
@@ -140,24 +154,85 @@ impl Session {
             old_past + usize::from(from >= old_past && to < old_past)
                 - usize::from(from < old_past && to >= old_past)
         };
-        let upcoming = past + usize::from(has_current);
+        self.apply_timeline_order(rows, past, from..from + 1);
+    }
+
+    pub fn edit_timeline_range(
+        &mut self,
+        start: usize,
+        expected: &[QueueEntryId],
+        edit: QueueRangeEdit,
+    ) -> bool {
+        let timeline = self.timeline();
+        let Some(destination) = edit.destination(start, expected.len(), timeline.len()) else {
+            return false;
+        };
+        let end = start + expected.len();
+        if (start..end)
+            .zip(expected)
+            .any(|(i, &id)| timeline.get(i).unwrap().entry_id != id)
+        {
+            return false;
+        }
+        if expected.len() == 1 {
+            self.move_timeline_row(start, expected[0], destination);
+            return true;
+        }
+        let mut rows = self.timeline_rows();
+        let past = timeline.past_len();
+        match edit {
+            QueueRangeEdit::MoveUp => rows[start - 1..end].rotate_left(1),
+            QueueRangeEdit::MoveDown => rows[start..=end].rotate_right(1),
+            QueueRangeEdit::Reverse => rows[start..end].reverse(),
+        }
+        let new_past = timeline.current_index().map_or(past, |current| {
+            rows.iter()
+                .position(|&(_, origin)| origin == current)
+                .unwrap()
+        });
+        self.apply_timeline_order(rows, new_past, start..end);
+        true
+    }
+
+    fn timeline_rows(&self) -> Vec<(QueueEntryId, usize)> {
+        let timeline = self.timeline();
+        (0..timeline.len())
+            .map(|i| (timeline.get(i).unwrap().entry_id, i))
+            .collect()
+    }
+
+    fn apply_timeline_order(
+        &mut self,
+        mut rows: Vec<(QueueEntryId, usize)>,
+        past: usize,
+        moved: std::ops::Range<usize>,
+    ) {
+        let old_past = self.timeline().past_len();
+        let upcoming = past + usize::from(self.current.is_some());
+        let mut seen = HashSet::new();
+        let repeated: HashSet<_> = rows
+            .iter()
+            .filter_map(|&(id, _)| (!seen.insert(id)).then_some(id))
+            .collect();
         let mut occupied: HashSet<_> = rows
             .iter()
             .enumerate()
-            .filter_map(|(i, &(id, was_past))| (i < upcoming || !was_past).then_some(id))
+            .filter_map(|(i, &(id, origin))| (i < upcoming || origin >= old_past).then_some(id))
             .collect();
         let in_order: HashSet<_> = self.order.iter().copied().collect();
         let mut order_changes = HashMap::new();
-        for (i, (id, was_past)) in rows.iter_mut().enumerate() {
-            if i >= upcoming && *was_past {
+        for (i, (id, origin)) in rows.iter_mut().enumerate() {
+            let was_past = *origin < old_past;
+            let moved = moved.contains(origin);
+            if i >= upcoming && was_past {
                 if !occupied.insert(*id) {
                     *id = self.entry(self.entries[id].track.clone());
                 }
-                if i == to || !in_order.contains(id) {
-                    order_changes.insert(*id, i);
+                if moved || !in_order.contains(id) {
+                    order_changes.entry(*id).or_insert(i);
                 }
-            } else if i == to && in_order.contains(id) && (!*was_past || moved_unique) {
-                order_changes.insert(*id, i);
+            } else if moved && in_order.contains(id) && (!was_past || !repeated.contains(id)) {
+                order_changes.entry(*id).or_insert(i);
             }
         }
         if !order_changes.is_empty() {
