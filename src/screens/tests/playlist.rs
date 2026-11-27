@@ -2,6 +2,44 @@ use super::*;
 use crate::screens::playlist::track_labels;
 
 #[test]
+fn loading_notice_waits_for_an_empty_open_playlist() {
+    use gramwave_application::library::LibraryCommand;
+
+    let mut h = Harness::new();
+    let mut state = h.app.state.view().clone();
+    state.playlists[0].done = [false; 3];
+    h.app.state = gramwave_application::AppCore::new(state);
+    let start_indexing = |h: &mut Harness| {
+        h.app.state.library_command(LibraryCommand::Connected(1));
+        h.app.state.library_command(LibraryCommand::Open {
+            chat: 0,
+            refresh: true,
+        });
+    };
+    start_indexing(&mut h);
+    h.settle();
+    assert!(menu_text(&mut h, "Loading music from this chat…").is_empty());
+    assert!(menu_text(&mut h, "Loading music…").is_empty());
+
+    let messages = h.app.state.view().playlists[0]
+        .tracks
+        .iter()
+        .map(|track| track.message)
+        .collect();
+    h.app.state.library_command(LibraryCommand::Source(
+        gramwave_application::telegram::TelegramUpdate::Deleted {
+            chat: 0,
+            messages,
+            from_cache: false,
+        },
+    ));
+    start_indexing(&mut h);
+    assert!(menu_text(&mut h, "Loading music…").is_empty());
+    h.settle();
+    assert!(!menu_text(&mut h, "Loading music…").is_empty());
+}
+
+#[test]
 fn long_metadata_fits_virtual_list_row_height() {
     let ctx = egui::Context::default();
     design::style(&ctx, false);
@@ -463,16 +501,13 @@ fn warmed_playlist_covers_are_painted_after_scrolling_in_both_directions() {
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let first = loop {
+        h.app.process(&h.ctx);
         let frame = h.frame(vec![]);
         if let Some(first) = cover_at(&h, &frame, 0) {
-            // Give the offscreen images the same chance to complete as the first row.
-            let all = h
-                .ctx
-                .loaders()
-                .texture
-                .lock()
-                .iter()
-                .any(|loader| loader.byte_size() >= 6 * 96 * 96 * 4);
+            let all = (0..6).all(|i| {
+                let track = h.app.media_track(h.app.playlist_tracks(0)[i].metadata());
+                h.app.track_cover(&h.ctx, &track).is_some()
+            });
             if all {
                 break first;
             }
@@ -518,16 +553,16 @@ fn removing_track_selected_and_all_downloads_preserves_cover_and_cache_schedule(
         let id = h.app.state.view().playlists[0].tracks[0].id();
         let path = h.app.artwork_path(1).unwrap().to_owned();
         let deadline = h.app.maintain_cache(std::time::Instant::now()).unwrap();
-        let size = egui::Vec2::splat(TRACK_ARTWORK_SIZE);
+        let track = h.app.media_track(h.app.playlist_tracks(0)[0].metadata());
         let wait_until = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let texture = loop {
-            match artwork_image(&path, TRACK_ARTWORK_SIZE).load_for_size(&h.ctx, size) {
-                Ok(egui::load::TexturePoll::Ready { texture }) => break texture.id,
-                _ => {
-                    assert!(std::time::Instant::now() < wait_until, "cover did not load");
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
+            h.app.process(&h.ctx);
+            h.frame(vec![]);
+            if let Some(texture) = h.app.track_cover(&h.ctx, &track) {
+                break texture.id;
             }
+            assert!(std::time::Instant::now() < wait_until, "cover did not load");
+            std::thread::sleep(std::time::Duration::from_millis(2));
         };
 
         if removal == "track" {
@@ -562,10 +597,7 @@ fn removing_track_selected_and_all_downloads_preserves_cover_and_cache_schedule(
         h.app.process(&h.ctx);
         assert_eq!(h.app.artwork_path(1), Some(path.as_str()));
         assert_eq!(
-            artwork_image(&path, TRACK_ARTWORK_SIZE)
-                .load_for_size(&h.ctx, size)
-                .unwrap()
-                .texture_id(),
+            h.app.track_cover(&h.ctx, &track).map(|texture| texture.id),
             Some(texture),
         );
     }

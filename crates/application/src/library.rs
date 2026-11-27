@@ -226,15 +226,20 @@ impl LibraryCore {
             .or(track.image_path);
         track
     }
+    pub fn knows_playlist_artwork(&self, chat: i64) -> bool {
+        self.chat_artwork.contains_key(&chat)
+    }
     pub fn playlist_artwork(&self, chat: i64) -> RuntimeArtwork {
         let mut art = self.chat_artwork.get(&chat).cloned().unwrap_or_default();
         art.path = self.artwork_path(art.file).map(str::to_owned).or(art.path);
         art
     }
     pub(crate) fn cache_playlist_artwork(&mut self, playlist: &MediaPlaylist) {
-        let mut artwork = playlist.artwork();
+        self.cache_chat_artwork(playlist.id, playlist.artwork());
+    }
+    pub(crate) fn cache_chat_artwork(&mut self, chat: i64, mut artwork: RuntimeArtwork) {
         self.register_local_artwork(artwork.file, &mut artwork.path);
-        self.chat_artwork.insert(playlist.id, artwork);
+        self.chat_artwork.insert(chat, artwork);
         self.media_version = self.media_version.wrapping_add(1);
     }
     pub(crate) fn changed(&mut self) {

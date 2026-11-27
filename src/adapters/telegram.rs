@@ -43,6 +43,10 @@ type Resolutions = Arc<
         >,
     >,
 >;
+pub(crate) type PlaylistHead = Arc<tokio::sync::OnceCell<Value>>;
+type PlaylistHeads = Arc<Mutex<HashMap<(i64, String), (Instant, PlaylistHead)>>>;
+pub(crate) const PLAYLIST_HEAD_AGE: Duration = Duration::from_secs(300);
+
 #[derive(Clone)]
 pub struct Telegram {
     send: mpsc::Sender<Value>,
@@ -54,6 +58,7 @@ pub struct Telegram {
     cache_access: Arc<tokio::sync::RwLock<()>>,
     artwork_cache: Arc<tokio::sync::RwLock<()>>,
     resolved: Resolutions,
+    playlist_heads: PlaylistHeads,
     pub connection: u64,
 }
 impl Telegram {
@@ -188,6 +193,7 @@ impl Telegram {
                 cache_access: Default::default(),
                 artwork_cache: Default::default(),
                 resolved,
+                playlist_heads: Default::default(),
                 connection,
             },
             out,
@@ -321,6 +327,67 @@ impl Telegram {
             .map(|s| format!("https://t.me/{s}"))
             .unwrap_or_default())
     }
+    pub(crate) fn ready_playlist_head(&self, chat: i64, filter: &str) -> Option<Value> {
+        let heads = self.playlist_heads.lock().unwrap();
+        let (started, cell) = heads.get(&(chat, filter.to_owned()))?;
+        (started.elapsed() < PLAYLIST_HEAD_AGE)
+            .then(|| cell.get().cloned())
+            .flatten()
+    }
+
+    pub(crate) fn reserve_playlist_head(&self, chat: i64, filter: &str) -> PlaylistHead {
+        let key = (chat, filter.to_owned());
+        let mut heads = self.playlist_heads.lock().unwrap();
+        heads.retain(|_, (started, _)| started.elapsed() < PLAYLIST_HEAD_AGE);
+        if heads.len() >= 48 && !heads.contains_key(&key) {
+            if let Some(oldest) = heads
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(key, _)| key.clone())
+            {
+                heads.remove(&oldest);
+            }
+        }
+        heads
+            .entry(key)
+            .or_insert_with(|| (Instant::now(), Default::default()))
+            .1
+            .clone()
+    }
+
+    pub(crate) async fn request_reserved_head(
+        &self,
+        request: Value,
+        cell: &PlaylistHead,
+        cancel: &CancellationToken,
+    ) -> Result<Value, AppError> {
+        tokio::select! {
+            _ = cancel.cancelled() => Err(AppError::Cancelled),
+            result = cell.get_or_try_init(|| self.call_async(request, cancel)) => result.cloned(),
+        }
+    }
+
+    pub(crate) async fn playlist_head(
+        &self,
+        request: Value,
+        cancel: &CancellationToken,
+    ) -> Result<Value, AppError> {
+        let key = (
+            request["chat_id"].as_i64().unwrap_or_default(),
+            request["filter"]["@type"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        let cached = self.playlist_heads.lock().unwrap().remove(&key);
+        if let Some((_, cell)) = cached.filter(|(started, _)| started.elapsed() < PLAYLIST_HEAD_AGE)
+        {
+            self.request_reserved_head(request, &cell, cancel).await
+        } else {
+            self.call_async(request, cancel).await
+        }
+    }
+
     pub(crate) async fn artwork(
         &self,
         file: i64,
@@ -676,6 +743,7 @@ impl Telegram {
             cache_access: Default::default(),
             artwork_cache: Default::default(),
             resolved: Default::default(),
+            playlist_heads: Default::default(),
         }
     }
 

@@ -126,13 +126,32 @@ pub fn labelled_button(ui: &mut egui::Ui, icon: Icon, label: String) -> bool {
     .clicked()
 }
 pub fn playback_button(ui: &mut egui::Ui, icon: Icon, label: &'static str) -> bool {
+    playback_control(ui, Some(icon), label)
+}
+
+pub fn playback_control(ui: &mut egui::Ui, icon: Option<Icon>, label: &'static str) -> bool {
     let label = crate::tr(label);
-    accent_button(ui, |ink| {
-        egui::Button::image(icon.image(ink, 22.).alt_text(&label))
-            .corner_radius(22)
-            .min_size(egui::vec2(44., 44.))
-    })
-    .clicked()
+    let mut spinner_ink = egui::Color32::TRANSPARENT;
+    let response = accent_button(ui, |ink| {
+        let button = if let Some(icon) = icon {
+            egui::Button::image(icon.image(ink, 22.).alt_text(&label))
+        } else {
+            spinner_ink = ink;
+            egui::Button::new("")
+        };
+        button.corner_radius(22).min_size(egui::Vec2::splat(44.))
+    });
+    if icon.is_none() {
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
+        });
+        egui::Spinner::new().color(spinner_ink).paint_at(
+            ui,
+            egui::Rect::from_center_size(response.rect.center(), egui::Vec2::splat(22.)),
+        );
+        return response.on_hover_text(label).clicked();
+    }
+    response.clicked()
 }
 fn accent_button<'a>(
     ui: &mut egui::Ui,

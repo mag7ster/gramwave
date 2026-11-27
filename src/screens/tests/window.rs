@@ -276,9 +276,117 @@ fn scrollbars_stay_outside_the_rows_and_menus() {
         if width == 1240. {
             let sidebar = egui::panel::PanelState::load(&h.ctx, egui::Id::new("sidebar")).unwrap();
             let gap = sidebar.outer_rect.right() - chats.right();
-            assert!((4. ..=5.).contains(&gap), "sidebar scrollbar gap: {gap}");
+            assert!((0. ..=1.).contains(&gap), "sidebar scrollbar gap: {gap}");
         }
     }
+}
+
+#[test]
+fn chat_search_and_playlist_rows_share_the_same_edges_with_or_without_scroll() {
+    let mut h = Harness::new();
+    h.app.pane = WorkspacePane::Library;
+    for width in [1240., 900.] {
+        h.size.x = width;
+        for height in [800., 430.] {
+            h.size.y = height;
+            for active in [false, true] {
+                h.app.chat_search_active = active;
+                h.settle();
+                let (search, row): (egui::Rect, egui::Rect) = h.ctx.data(|data| {
+                    (
+                        data.get_temp(egui::Id::new(("test-search-rect", "chat-search")))
+                            .unwrap(),
+                        data.get_temp(egui::Id::new(("test-chat-row", 0_i64)))
+                            .unwrap(),
+                    )
+                });
+                assert!((search.left() - row.left()).abs() < 1.);
+                assert!(
+                    (search.right() - row.right()).abs() < 1.,
+                    "{width} {height} {search:?} {row:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn search_warms_chat_avatars_before_scrolling_to_them() {
+    use gramwave_application::{library::LibraryCommand, media::MediaPlaylist};
+    use std::time::{Duration, Instant};
+
+    let mut h = Harness::new();
+    h.app.pane = WorkspacePane::Library;
+    h.app.chat_search_active = true;
+    h.app.state = gramwave_application::AppCore::new(Default::default());
+    let covers = tempfile::tempdir().unwrap();
+    let image = image::RgbImage::from_pixel(8, 8, image::Rgb([30, 90, 160]));
+    let mut paths = std::collections::HashMap::new();
+    for chat in 100..180_i64 {
+        let path = covers.path().join(format!("{chat}.png"));
+        image.save(&path).unwrap();
+        paths.insert(chat, path.to_str().unwrap().to_owned());
+    }
+    let (sent, requests) = std::sync::mpsc::channel();
+    let tg = crate::adapters::telegram::Telegram::mock_rpc(move |request| {
+        assert_eq!(request["@type"], "downloadFile", "{request}");
+        let id = request["file_id"].as_i64().unwrap();
+        sent.send(id).unwrap();
+        serde_json::json!({
+            "@type":"file", "id":id,
+            "local":{"path": paths[&id], "is_downloading_completed":true}
+        })
+    });
+    h.app
+        .library_command(LibraryCommand::Connected(tg.connection));
+    for chat in 100..180_i64 {
+        h.app.library_command(LibraryCommand::Source(
+            gramwave_application::telegram::TelegramUpdate::Chat(
+                MediaPlaylist {
+                    id: chat,
+                    title: format!("Chat {chat}"),
+                    image_file: if chat < 112 { 0 } else { chat },
+                    done: [true; 3],
+                    ..Default::default()
+                },
+                Some([true, false]),
+            ),
+        ));
+    }
+    h.app.tg = Some(tg);
+    h.frame(vec![]);
+    assert_eq!(h.app.state.library().media_requests_in_flight(), 4);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let texture = loop {
+        h.app.process(&h.ctx);
+        h.frame(vec![]);
+        if let Some(texture) = h.app.chat_cover(&h.ctx, 179) {
+            break texture.id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "distant search avatar did not warm"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let (scroll, viewport): (egui::Id, egui::Rect) = h
+        .ctx
+        .data(|data| data.get_temp(egui::Id::new("test-chat-scroll")).unwrap());
+    let mut state = egui::scroll_area::State::load(&h.ctx, scroll).unwrap();
+    assert_eq!(state.offset.y, 0.);
+    let last: egui::Rect = h.ctx.data(|data| {
+        data.get_temp(egui::Id::new(("test-chat-row", 179_i64)))
+            .unwrap()
+    });
+    state.offset.y = last.bottom() - viewport.bottom();
+    state.store(&h.ctx, scroll);
+    let frame = h.frame(vec![]);
+    assert!(frame.shapes.iter().any(|painted| {
+        matches!(&painted.shape, egui::Shape::Rect(rect)
+            if viewport.contains(rect.rect.center())
+                && rect.brush.as_ref().is_some_and(|brush| brush.fill_texture_id == texture))
+    }));
+    assert_eq!(requests.try_iter().filter(|&id| id == 179).count(), 1);
 }
 
 #[test]

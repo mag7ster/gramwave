@@ -180,6 +180,7 @@ fn queue_row_contents(
     ui: &mut egui::Ui,
     rect: egui::Rect,
     track: &crate::Track,
+    artwork: Option<egui::load::SizedTexture>,
     past: bool,
     current: bool,
     highlighted: bool,
@@ -192,12 +193,7 @@ fn queue_row_contents(
     if past {
         cover_ui.multiply_opacity(0.62);
     }
-    art(
-        &mut cover_ui,
-        &track.title,
-        track.image_path.as_deref(),
-        44.,
-    );
+    art(&mut cover_ui, &track.title, artwork, 44.);
     let palette = design::colors(ui);
     if current {
         ui.painter().rect_filled(
@@ -515,6 +511,7 @@ impl App {
                         &mut row_ui,
                         rect,
                         &track,
+                        self.track_cover(ui.ctx(), &track),
                         past,
                         current,
                         current || selected_row || row.has_focus(),
@@ -666,6 +663,7 @@ impl App {
                         &mut overlay,
                         lifted.rect,
                         &track,
+                        self.track_cover(ui.ctx(), &track),
                         lifted.from < queue.past_len(),
                         current,
                         current,

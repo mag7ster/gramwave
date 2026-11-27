@@ -139,7 +139,7 @@ pub fn track(chat: i64, v: &serde_json::Value) -> Option<Track> {
             .or_else(|| local_path(&a["thumbnail"]["file"])),
     })
 }
-fn local_path(file: &serde_json::Value) -> Option<String> {
+pub(super) fn local_path(file: &serde_json::Value) -> Option<String> {
     (file["local"]["is_downloading_completed"] == true)
         .then(|| {
             file["local"]["path"]
@@ -267,6 +267,16 @@ pub(crate) fn update(v: serde_json::Value) -> Option<TelegramUpdate> {
                 v["chat_id"].as_i64()?,
                 personal_chat_list(&v["chat_list"])?,
                 v["@type"] == "updateChatAddedToList",
+            )
+        }
+        "updateChatPhoto" => {
+            let small = &v["photo"]["small"];
+            TelegramUpdate::ChatArtwork(
+                v["chat_id"].as_i64()?,
+                gramwave_application::media::RuntimeArtwork {
+                    file: small["id"].as_i64().unwrap_or_default(),
+                    path: local_path(small),
+                },
             )
         }
         "updateChatTitle" => {

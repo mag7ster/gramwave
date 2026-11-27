@@ -33,6 +33,7 @@ impl Resident for App {
     }
     fn window_gone(&mut self) {
         self.custom_emoji.release_textures();
+        self.covers.get_mut().release_textures();
         self.hidden = false;
         self.tray_focus = None;
         self.wayland = false;

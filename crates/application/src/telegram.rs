@@ -71,6 +71,7 @@ pub enum TelegramUpdate {
     Chat(MediaPlaylist, Option<[bool; 2]>),
     ChatListMembership(i64, PersonalChatList, bool),
     ChatTitle(i64, String),
+    ChatArtwork(i64, crate::media::RuntimeArtwork),
     ChatEmojiStatus(i64, Option<crate::model::EmojiStatus>),
     Message {
         id: TrackId,

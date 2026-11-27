@@ -176,6 +176,19 @@ impl App {
                     }));
                     return;
                 };
+                if refresh {
+                    let tracks = crate::discovery::ready_playlist_tracks(&tg, &playlist);
+                    if !tracks.is_empty() {
+                        self.core_event(AppEvent::Library(LibraryEvent::Patch {
+                            request,
+                            patch: gramwave_application::media::MediaPatch {
+                                chat: playlist.id,
+                                tracks,
+                                ..Default::default()
+                            },
+                        }));
+                    }
+                }
                 let tx = self.tx.clone();
                 let wake = self.wake.clone();
                 let cancel = operation.cancel.clone();

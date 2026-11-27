@@ -110,7 +110,7 @@ pub fn apply(app: &mut App, scenario: &str) {
         _ => {}
     }
     app.state = gramwave_application::AppCore::with_offline(state, offline.data());
-    if scenario == "artwork" {
+    if matches!(scenario, "artwork" | "recent-chats") {
         artwork(app);
     }
     if matches!(scenario, "playing" | "paused" | "loading" | "error") {
@@ -187,5 +187,24 @@ fn artwork(app: &mut App) {
         tracks,
         ..Default::default()
     }));
+    let chats: Vec<_> = app
+        .state
+        .view()
+        .playlists
+        .iter()
+        .map(|playlist| playlist.id)
+        .collect();
+    for (index, chat) in chats.into_iter().enumerate() {
+        let cover = index % covers.len();
+        app.library_command(LibraryCommand::Source(
+            gramwave_application::telegram::TelegramUpdate::ChatArtwork(
+                chat,
+                gramwave_application::media::RuntimeArtwork {
+                    file: cover as i64 + 1,
+                    path: Some(covers[cover].clone()),
+                },
+            ),
+        ));
+    }
     app.demo_artwork = Some(directory);
 }

@@ -316,10 +316,6 @@ msgstr ""
 msgid "Loading chat list…"
 msgstr ""
 
-#: src/screens.rs:1001
-msgid "Loading music from this chat…"
-msgstr ""
-
 #: src/screens.rs:1020
 msgid "Loading music…"
 msgstr ""

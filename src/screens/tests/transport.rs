@@ -23,6 +23,39 @@ impl PlayerBackend for Clock {
 }
 
 #[test]
+fn loading_track_animates_the_play_button_and_leaves_it_clickable() {
+    for size in [egui::vec2(1240., 800.), egui::vec2(500., 125.)] {
+        let mut h = Harness::new();
+        h.size = size;
+        crate::demo::apply(&mut h.app, "loading");
+        h.settle();
+        assert!(menu_text(&mut h, "Loading track…").is_empty());
+        let frame = h.frame(vec![]);
+        let button = frame
+            .shapes
+            .iter()
+            .find_map(|painted| match &painted.shape {
+                egui::Shape::Rect(shape)
+                    if shape.corner_radius == egui::CornerRadius::same(22)
+                        && (shape.rect.width() - 44.).abs() < 1.
+                        && shape.rect.center().y > size.y / 2. - 20. =>
+                {
+                    Some(shape.rect)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(frame.shapes.iter().any(|painted| match &painted.shape {
+            egui::Shape::Path(path) =>
+                path.points.len() >= 8 && path.points.iter().all(|&point| button.contains(point)),
+            _ => false,
+        }));
+        h.click(button.center());
+        assert!(h.app.state.playback().state().paused());
+    }
+}
+
+#[test]
 fn play_pause_remains_clickable_during_resize() {
     let mut h = queue_harness(3);
     let play = |output: egui::FullOutput| {

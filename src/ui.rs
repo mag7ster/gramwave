@@ -535,6 +535,16 @@ impl App {
             return None;
         }
         let now = std::time::Instant::now();
+        if window_present
+            && !self.demo
+            && matches!(
+                self.state.auth().state(),
+                gramwave_application::telegram::AuthorizationState::Starting
+                    | gramwave_application::telegram::AuthorizationState::Parameters
+            )
+        {
+            self.warm_initial_covers(ctx);
+        }
         let cache = self.maintain_cache(now);
         let offline = self.pump_offline(now);
 
@@ -715,6 +725,7 @@ impl App {
             return Ok(());
         }
         self.shutdown_finished = true;
+        self.covers.get_mut().save();
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let remaining = || deadline.saturating_duration_since(std::time::Instant::now());
         self.process(&egui::Context::default());

@@ -16,6 +16,55 @@ fn response(v: Value) -> Result<Value, AppError> {
     }
 }
 
+pub(crate) const MEDIA_FILTERS: [&str; 3] = [
+    "searchMessagesFilterAudio",
+    "searchMessagesFilterDocument",
+    "searchMessagesFilterVoiceNote",
+];
+
+pub(crate) async fn warm_playlist_head(
+    tg: &Telegram,
+    chat: i64,
+    kind: usize,
+    reserved: &super::telegram::PlaylistHead,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<gramwave_application::media::MediaTrack>, AppError> {
+    let batch = tg.request_reserved_head(
+        json!({"@type":"searchChatMessages","chat_id":chat,"topic_id":null,"query":"","sender_id":null,"from_message_id":0,"offset":0,"limit":100,"filter":{"@type":MEDIA_FILTERS[kind]}}),
+        reserved,
+        cancel,
+    ).await?;
+    let tracks = head_tracks(chat, &batch)?.collect();
+    Ok(tracks)
+}
+
+fn head_tracks(
+    chat: i64,
+    batch: &Value,
+) -> Result<impl Iterator<Item = gramwave_application::media::MediaTrack> + '_, AppError> {
+    let (messages, _) = search_page(batch, 0)?;
+    Ok(messages
+        .iter()
+        .filter_map(move |message| track(chat, message)))
+}
+
+pub(crate) fn ready_playlist_tracks(
+    tg: &Telegram,
+    playlist: &Playlist,
+) -> Vec<gramwave_application::media::MediaTrack> {
+    let mut tracks = Vec::new();
+    for (kind, filter) in MEDIA_FILTERS.into_iter().enumerate() {
+        if playlist.filters[kind] {
+            if let Some(batch) = tg.ready_playlist_head(playlist.id, filter) {
+                if let Ok(head) = head_tracks(playlist.id, &batch) {
+                    tracks.extend(head);
+                }
+            }
+        }
+    }
+    tracks
+}
+
 fn search_page(batch: &Value, cursor: i64) -> Result<(&[Value], i64), AppError> {
     let messages = batch["messages"]
         .as_array()
@@ -154,6 +203,7 @@ fn chat_metadata(c: &Value, filters: [bool; 3]) -> Option<MediaPlaylist> {
         emoji_status: super::telegram_mapping::emoji_status(&c["emoji_status"]),
         filters,
         image_file: c["photo"]["small"]["id"].as_i64().unwrap_or(0),
+        image_path: super::telegram_mapping::local_path(&c["photo"]["small"]),
         ..Default::default()
     })
 }
@@ -403,7 +453,13 @@ pub(crate) async fn refresh_library(
     refresh_async(
         p,
         || !cancel.is_cancelled(),
-        |value| tg.call_async(value, cancel),
+        |value| async move {
+            if value["@type"] == "searchChatMessages" && value["from_message_id"] == 0 {
+                tg.playlist_head(value, cancel).await
+            } else {
+                tg.call_async(value, cancel).await
+            }
+        },
         emit,
     )
     .await

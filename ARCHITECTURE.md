@@ -84,8 +84,13 @@ unchanged through the scheduler. Panics, cancellation and overload produce addre
 terminal delivery is tracked through shutdown. Progress uses a replaceable slot.
 The UI processes bounded batches and caches filtered/sorted playlist metadata by
 library version, filters, search and sort parameters. Visible rows resolve
-current media and offline state when drawn. The open playlist prefetches
-thumbnail files in bounded batches and prepares textures near the viewport.
+current media and offline state when drawn. The desktop prioritizes visible
+covers, the current and upcoming tracks, and the chat under the pointer.
+Chat search warms avatars near the viewport first, then the remaining results
+in bounded batches. Pinned and recent chats warm their first screen. A cold chat can share the
+first page of its track list between hover and open. The desktop bounds
+thumbnail downloads and decoded textures, and keeps a verified index of local
+TDLib thumbnail paths for repeat launches.
 Producers publish before waking the desktop shell. The main loop waits for
 events or the next deadline for playback position, search, retries or visible
 timed UI. On Linux the same waker interrupts the shell's wait in the tray.

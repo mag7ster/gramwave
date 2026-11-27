@@ -54,6 +54,7 @@ pub(crate) struct CacheState {
     local_freed: u64,
     remote_freed: u64,
     custom_days: bool,
+    pub(super) clearing_images: bool,
 }
 
 impl App {
@@ -146,6 +147,12 @@ impl App {
                 *remaining &= !scheduled;
             }
         }
+        if matches!(job, CacheJob::Clear)
+            && access.filter.categories[CacheCategory::Images as usize]
+        {
+            self.cache.clearing_images = true;
+            self.covers.get_mut().clear(access.filter.chat);
+        }
         if matches!(job, CacheJob::Clear) && access.filter.categories[CacheCategory::Audio as usize]
         {
             self.clear_local_audio(access.filter.chat);
@@ -192,6 +199,7 @@ impl App {
             return;
         }
         self.cache.job = None;
+        self.cache.clearing_images = false;
         if let Some(sizes) = offline_sizes {
             self.cache.offline_sizes = sizes;
         }

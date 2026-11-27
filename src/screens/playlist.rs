@@ -56,7 +56,7 @@ impl App {
         &mut self,
         ui: &mut egui::Ui,
         title: &str,
-        artwork: Option<&str>,
+        artwork: Option<egui::load::SizedTexture>,
         emoji: Option<gramwave_application::model::EmojiStatus>,
         full: f32,
         visible: f32,
@@ -185,7 +185,7 @@ impl App {
                 .push(self.state.library().playlist_artwork(p.id).file);
         }
         let title = p.title.clone();
-        let artwork = self.state.library().playlist_artwork(p.id).path;
+        let artwork = self.chat_cover(ui.ctx(), chat_id);
         let url = p.url.clone();
         let can_play = p
             .tracks
@@ -213,7 +213,7 @@ impl App {
             self.playlist_heading(
                 ui,
                 &title,
-                artwork.as_deref(),
+                artwork,
                 emoji_status,
                 full_heading,
                 show_heading,
@@ -414,24 +414,19 @@ impl App {
                 self.state.view().playlists[selected].filters,
             ));
         }
-        let loading = self.state.library().indexing_chat() == Some(chat_id);
-        let notice = (!self.settings_open)
+        if let Some(notice) = (!self.settings_open)
             .then(|| self.inline_notice(ui.ctx(), false))
-            .flatten();
-        if full_heading > 0. || loading || notice.is_some() {
-            // Reserve the status line in the full layout to avoid shifting the list while loading.
-            let height = if loading || notice.is_some() {
-                24.
-            } else {
-                24. * full_heading
-            };
-            ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
-                if let Some(notice) = notice {
-                    ui.weak(notice);
-                } else if loading {
-                    ui.small(tr("Loading music from this chat…"));
-                }
-            });
+            .flatten()
+        {
+            ui.weak(notice);
+        }
+        let loading_id = ui.id().with("empty-playlist");
+        let waiting = tracks.is_empty()
+            && self.search.is_empty()
+            && self.state.library().indexing_chat() == Some(chat_id)
+            && self.state.view().playlists[selected].has_more();
+        if !waiting {
+            ui.data_mut(|data| data.remove::<(i64, f64)>(loading_id));
         }
         if tracks.is_empty() {
             if !compact {
@@ -445,8 +440,23 @@ impl App {
                 tr("All filters are off")
             } else if !self.search.is_empty() {
                 tr("No matching tracks")
-            } else if self.state.library().indexing_chat().is_some() {
-                tr("Loading music…")
+            } else if waiting {
+                let time = ui.input(|input| input.time);
+                let started = ui.data_mut(|data| {
+                    let started = data.get_temp_mut_or(loading_id, (chat_id, time));
+                    if started.0 != chat_id {
+                        *started = (chat_id, time);
+                    }
+                    started.1
+                });
+                let remaining = 0.2 - (time - started);
+                if remaining > 0. {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_secs_f64(remaining));
+                    String::new()
+                } else {
+                    tr("Loading music…")
+                }
             } else {
                 tr("No music in this chat yet")
             };
@@ -588,7 +598,12 @@ impl App {
                                 })),
                             );
                             let cover_left = ui.next_widget_position().x;
-                            art(ui, &t.title, t.image_path.as_deref(), TRACK_ARTWORK_SIZE);
+                            art(
+                                ui,
+                                &t.title,
+                                self.track_cover(ui.ctx(), t),
+                                TRACK_ARTWORK_SIZE,
+                            );
                             let offline = if t.pinned.is_some() {
                                 Some("✓")
                             } else if self

@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::{path::PathBuf, sync::mpsc};
 
 mod artwork;
+pub(crate) mod covers;
 pub(crate) enum Event {
     Noop,
     NextPlaybackPrepared(
@@ -29,6 +30,14 @@ pub(crate) enum Event {
     Link(String),
     SourceChatError(String),
     ForgetArtwork(String),
+    CoverDecoded(u64, String, Result<covers::DecodedCover, covers::CoverMiss>),
+    PlaylistHead(
+        u64,
+        i64,
+        usize,
+        gramwave_application::tasks::RequestId,
+        Result<Vec<gramwave_application::media::MediaTrack>, gramwave_application::AppError>,
+    ),
     Emoji(
         gramwave_application::tasks::RequestId,
         Vec<(i64, crate::adapters::emoji::EmojiAsset)>,
@@ -57,6 +66,7 @@ pub(crate) struct DesktopApp {
     playlist_cache: std::cell::RefCell<Option<PlaylistCache>>,
     artwork_view: Option<artwork::PlaylistView>,
     artwork_prefetch: artwork::Prefetch,
+    pub(crate) covers: std::cell::RefCell<covers::Covers>,
     pub(crate) options: crate::launch::LaunchOptions,
     pub(crate) progress: std::sync::Arc<crate::adapters::offline::Progress>,
     pub(crate) tasks: application::tasks::Scheduler,
@@ -183,6 +193,7 @@ impl DesktopApp {
             playlist_cache: Default::default(),
             artwork_view: None,
             artwork_prefetch: Default::default(),
+            covers: std::cell::RefCell::new(covers::Covers::open(&root, demo)),
             options: options.clone(),
             tasks,
             #[cfg(test)]
@@ -365,31 +376,20 @@ impl DesktopApp {
             return;
         }
         self.request_custom_emoji(ctx);
+        if self.cache.clearing_images {
+            return;
+        }
         let now = std::time::Instant::now();
         let mut tracks = std::mem::take(&mut self.track_wanted);
         let mut images = std::mem::take(&mut self.image_wanted);
         let mut retry = None;
-        for track in tracks.drain(..) {
-            let id = track.id();
-            self.library_command(LibraryCommand::RequestMedia {
-                track: track.into(),
-                now,
-            });
-            retry = retry
-                .into_iter()
-                .chain(
-                    self.state
-                        .library()
-                        .media_retry_at(id)
-                        .filter(|at| *at > now),
-                )
-                .min();
-        }
         for id in images.drain(..) {
             let force = self
                 .artwork_path(id)
-                .is_some_and(|path| !std::path::Path::new(path).is_file());
-            self.library_command(LibraryCommand::RequestArtwork { id, now, force });
+                .is_some_and(|path| self.cover_needs_file(path));
+            if self.state.library().media_requests_in_flight() < 4 {
+                self.library_command(LibraryCommand::RequestArtwork { id, now, force });
+            }
             retry = retry
                 .into_iter()
                 .chain(
@@ -400,9 +400,28 @@ impl DesktopApp {
                 )
                 .min();
         }
+        for track in tracks.drain(..) {
+            let id = track.id();
+            if self.state.library().media_requests_in_flight() < 4 {
+                self.library_command(LibraryCommand::RequestMedia {
+                    track: track.into(),
+                    now,
+                });
+            }
+            retry = retry
+                .into_iter()
+                .chain(
+                    self.state
+                        .library()
+                        .media_retry_at(id)
+                        .filter(|at| *at > now),
+                )
+                .min();
+        }
         self.track_wanted = tracks;
         self.image_wanted = images;
         self.request_playlist_artwork(ctx, artwork_view, now);
+        self.pump_cover_decodes(ctx);
         if let Some(at) = retry {
             ctx.request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
         }
@@ -631,6 +650,11 @@ impl DesktopApp {
         }
         for update in updates {
             processed += 1;
+            if let TelegramUpdate::File(file) = &update {
+                if let Some(path) = file.path.as_deref().filter(|_| file.complete) {
+                    self.covers.get_mut().file_ready(path);
+                }
+            }
             match update {
                 TelegramUpdate::Authorization(state) => self.core_event(
                     gramwave_application::workflow::AppEvent::Authorization(state),
@@ -640,6 +664,8 @@ impl DesktopApp {
                 ),
             }
         }
+        let connection = self.tg.as_ref().map(|telegram| telegram.connection);
+        self.covers.get_mut().new_connection(connection);
         self.custom_emoji
             .set_connection(self.emoji_telegram().map(|telegram| telegram.connection));
         let mut received = 0;
@@ -660,7 +686,13 @@ impl DesktopApp {
                     result,
                     offline_sizes,
                 } => self.cache_finished(connection, job, result, offline_sizes),
-                Event::ForgetArtwork(path) => ctx.forget_image(&format!("file://{path}")),
+                Event::ForgetArtwork(path) => self.covers.get_mut().evicted(&path),
+                Event::CoverDecoded(generation, path, result) => {
+                    self.covers.get_mut().complete(generation, path, result)
+                }
+                Event::PlaylistHead(connection, chat, kind, request, result) => {
+                    self.playlist_head_finished(connection, chat, kind, request, result)
+                }
                 Event::Emoji(request, assets) => self.custom_emoji.complete(request, assets),
                 Event::CacheHandoff { id, path, result } => {
                     self.handoff_running = false;

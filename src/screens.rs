@@ -161,6 +161,8 @@ fn search_field(
 ) -> Option<egui::Response> {
     let (rect, field) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.), egui::Sense::CLICK);
+    #[cfg(test)]
+    ui.data_mut(|data| data.insert_temp(egui::Id::new(("test-search-rect", id)), rect));
     let p = design::colors(ui);
     ui.painter().rect_filled(rect, 9., p.raised);
     let mut row = ui.new_child(
@@ -264,6 +266,7 @@ impl App {
         let ctx = root.ctx().clone();
         self.image_wanted.clear();
         self.track_wanted.clear();
+        self.clear_hover_observation();
         let track_menu_open = keyboard::prepare_track_menu(&ctx);
         design::style(&ctx, self.state.view().light);
         root.set_style(ctx.global_style());
@@ -877,24 +880,16 @@ fn cover(ui: &mut egui::Ui, title: &str, size: f32) {
 
 pub(crate) const TRACK_ARTWORK_SIZE: f32 = 44.;
 
-pub(crate) fn artwork_image(path: &str, size: f32) -> egui::Image<'static> {
-    egui::Image::new(format!("file://{path}"))
-        .fit_to_exact_size(egui::Vec2::splat(size))
-        .corner_radius(6)
-}
-
-fn art(ui: &mut egui::Ui, title: &str, path: Option<&str>, size: f32) {
-    if let Some(path) = path {
-        let image = artwork_image(path, size);
-        if matches!(
-            image.load_for_size(ui.ctx(), egui::vec2(size, size)),
-            Ok(egui::load::TexturePoll::Ready { .. })
-        ) {
-            ui.add(image);
-            return;
-        }
+fn art(ui: &mut egui::Ui, title: &str, texture: Option<egui::load::SizedTexture>, size: f32) {
+    if let Some(texture) = texture {
+        ui.add(
+            egui::Image::from_texture(texture)
+                .fit_to_exact_size(egui::Vec2::splat(size))
+                .corner_radius(6),
+        );
+    } else {
+        cover(ui, title, size);
     }
-    cover(ui, title, size);
 }
 
 #[cfg(test)]

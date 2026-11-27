@@ -75,16 +75,22 @@ impl App {
         if button(&mut playback, Icon::Previous, "Previous") {
             self.execute(AppCommand::Previous);
         }
-        if design::playback_button(
+        let loading = self.state.playback().shows_loading();
+        let icon = if self.state.playback().state().paused()
+            || self.state.view().session.current().is_none()
+        {
+            Icon::Play
+        } else {
+            Icon::Pause
+        };
+        if design::playback_control(
             &mut playback,
-            if self.state.playback().state().paused()
-                || self.state.view().session.current().is_none()
-            {
-                Icon::Play
+            (!loading).then_some(icon),
+            if loading {
+                "Loading track…"
             } else {
-                Icon::Pause
+                "Play / pause"
             },
-            "Play / pause",
         ) {
             self.execute(AppCommand::Pause(!self.state.playback().state().paused()));
         }
@@ -241,7 +247,7 @@ impl App {
                 art(
                     ui,
                     track.map(|t| t.title.as_str()).unwrap_or("TG"),
-                    track.and_then(|t| t.image_path.as_deref()),
+                    track.and_then(|t| self.track_cover(ui.ctx(), t)),
                     48.,
                 );
                 ui.vertical(|ui| {
@@ -262,9 +268,6 @@ impl App {
                             .truncate()
                             .show_tooltip_when_elided(false),
                     );
-                    if self.state.playback().shows_loading() {
-                        ui.small(tr("Loading track…"));
-                    }
                 });
             });
         }

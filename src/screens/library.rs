@@ -11,19 +11,19 @@ use std::collections::HashMap;
 
 impl App {
     pub(super) fn library_screen(&mut self, ui: &mut egui::Ui, docked: bool) {
-        let trigger = search_field(
-            ui,
-            &mut self.chat_query,
-            "chat-search",
-            tr("Find a chat"),
-            Some(&mut self.chat_search_active),
-        );
+        let trigger = egui::Frame::NONE
+            .inner_margin(egui::Margin {
+                right: if docked { -4 } else { TRACK_SCROLL_GUTTER },
+                ..egui::Margin::ZERO
+            })
+            .show(ui, |ui| self.chat_search_field(ui))
+            .inner;
         let duration = if self.chat_search_active { 0.23 } else { 0.18 };
         let progress = change_progress(ui, "chat-list-mode", self.chat_search_active, duration);
         if docked {
             egui::Frame::NONE
                 .inner_margin(egui::Margin {
-                    right: -TRACK_SCROLL_GUTTER,
+                    right: -16,
                     ..egui::Margin::ZERO
                 })
                 .show(ui, |ui| self.library_chats(ui, progress, trigger.as_ref()));
@@ -33,6 +33,16 @@ impl App {
         if let Some(trigger) = trigger {
             focus_outline(ui, &trigger);
         }
+    }
+
+    fn chat_search_field(&mut self, ui: &mut egui::Ui) -> Option<egui::Response> {
+        search_field(
+            ui,
+            &mut self.chat_query,
+            "chat-search",
+            tr("Find a chat"),
+            Some(&mut self.chat_search_active),
+        )
     }
 
     fn library_chats(
@@ -92,7 +102,12 @@ impl App {
         let mut open = None;
         let mut toggle = None;
         let mut recent_action = None;
-        let chats_scroll = list_scroll_area(ui).id_salt("chat-list").show(ui, |ui| {
+        let mut hovered = None;
+        let area = list_scroll_area(ui).id_salt("chat-list");
+        let scroll = &mut ui.spacing_mut().scroll;
+        scroll.floating = true;
+        scroll.floating_allocated_width = 0.;
+        let draw = |ui: &mut egui::Ui| {
             if recent_len > 0 {
                 ui.horizontal(|ui| {
                     ui.weak(tr("Recent"));
@@ -126,6 +141,17 @@ impl App {
             let first_visible =
                 ((clip.top() - ui.next_widget_position().y) / stride).floor() as usize;
             let visible_slots = (clip.height() / stride).ceil().max(1.) as usize;
+            if self.chat_search_active {
+                let start = first_visible.min(recent.len());
+                let end = (start + visible_slots + 1).min(recent.len());
+                self.note_search_artwork(
+                    recent
+                        .iter()
+                        .map(|&i| self.state.view().playlists[i].id)
+                        .collect(),
+                    start..end,
+                );
+            }
             for (row, i) in recent.into_iter().enumerate() {
                 if recent_len > 0 && row == recent_len {
                     ui.separator();
@@ -165,7 +191,12 @@ impl App {
                                 art(
                                     ui,
                                     &p.title,
-                                    self.state.library().playlist_artwork(p.id).path.as_deref(),
+                                    ui.is_rect_visible(egui::Rect::from_min_size(
+                                        ui.next_widget_position(),
+                                        egui::Vec2::splat(ART_SIZE),
+                                    ))
+                                    .then(|| self.chat_cover(ui.ctx(), p.id))
+                                    .flatten(),
                                     ART_SIZE,
                                 );
                                 chat_title(ui, &p.title, p.emoji_status.is_some(), 14., 1);
@@ -185,6 +216,8 @@ impl App {
                 } else {
                     ui.scope(draw).inner
                 };
+                #[cfg(test)]
+                ui.data_mut(|data| data.insert_temp(egui::Id::new(("test-chat-row", id)), rect));
                 ui.add_space(ROW_GAP);
                 if phase == 0. {
                     if self.keyboard.targets(nav.pane, egui::Id::new(id)) {
@@ -214,6 +247,9 @@ impl App {
                     self.image_wanted
                         .push(self.state.library().playlist_artwork(p.id).file);
                 }
+                if self.chat_search_active && response.hovered() {
+                    hovered = Some((id, response.rect.height()));
+                }
                 if response.clicked() {
                     open = Some(id);
                 }
@@ -235,12 +271,23 @@ impl App {
                     }
                 });
             }
-        });
+        };
+        let chats_scroll = area
+            .content_margin(egui::Margin {
+                right: TRACK_SCROLL_GUTTER,
+                ..egui::Margin::ZERO
+            })
+            .show(ui, draw);
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
             data.insert_temp(
                 egui::Id::new("test-chat-scroll"),
-                (chats_scroll.id, chats_scroll.inner_rect),
+                (
+                    chats_scroll.id,
+                    chats_scroll.inner_rect.with_max_x(
+                        chats_scroll.inner_rect.right() - f32::from(TRACK_SCROLL_GUTTER),
+                    ),
+                ),
             )
         });
         design::middle_scroll(
@@ -254,6 +301,20 @@ impl App {
         }
         if let Some(command) = recent_action {
             self.execute(command);
+        }
+        if let Some((chat, height)) = hovered {
+            let (velocity, scrolling) =
+                ui.input(|input| (input.pointer.velocity().y.abs(), input.is_scrolling()));
+            let moved = ui.data_mut(|data| {
+                let offset = data.get_temp_mut_or(
+                    chats_scroll.id.with("warm-offset"),
+                    chats_scroll.state.offset.y,
+                );
+                let moved = *offset != chats_scroll.state.offset.y;
+                *offset = chats_scroll.state.offset.y;
+                moved
+            });
+            self.note_chat_hover(chat, velocity * 0.1 > height / 3., scrolling || moved);
         }
         if let Some(id) = open {
             self.execute(if self.chat_search_active {

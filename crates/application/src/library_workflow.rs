@@ -180,6 +180,9 @@ impl AppCore {
                 TelegramUpdate::ChatListMembership(chat, list, member) => {
                     self.update_chat_list(chat, list, member);
                 }
+                TelegramUpdate::ChatArtwork(id, artwork) => {
+                    self.library.cache_chat_artwork(id, artwork);
+                }
                 TelegramUpdate::ChatTitle(chat, title) => {
                     if let Some(playlist) = self.state.playlists.iter().find(|p| p.id == chat) {
                         let mut playlist = playlist.clone();
