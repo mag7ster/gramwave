@@ -7,7 +7,7 @@ use crate::application::commands::AppCommand;
 use crate::{design, tr, App};
 use design::Icon;
 use eframe::egui;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 impl App {
     pub(super) fn library_screen(&mut self, ui: &mut egui::Ui, docked: bool) {
@@ -46,16 +46,10 @@ impl App {
         const ROW_HEIGHT: f32 = ART_SIZE + ROW_MARGIN * 2.;
         const ROW_GAP: f32 = 3.;
         const STAGGER: f32 = 0.45;
-        let state = self.state.view();
         let query = self.chat_query.trim();
         let search = self.state.library().search();
-        let mut indices = state.sidebar_chats(self.chat_search_active, query);
-        let mut seen = HashSet::new();
-        indices.retain(|&i| seen.insert(state.playlists[i].id));
+        let mut indices = self.chat_search_indices(self.chat_search_active, query);
         if self.chat_search_active && !query.is_empty() && search.query == query {
-            indices.extend(state.playlists.iter().enumerate().filter_map(|(i, p)| {
-                (p.in_chat_search() && search.ids.contains(&p.id) && seen.insert(p.id)).then_some(i)
-            }));
             if search.loading() {
                 ui.weak(tr("Searching chats…"));
             }

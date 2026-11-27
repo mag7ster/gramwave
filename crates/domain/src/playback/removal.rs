@@ -97,29 +97,38 @@ fn remove_fragments(
     }
 }
 
+fn ranges(indices: impl Iterator<Item = usize>) -> Vec<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for index in indices {
+        match ranges.last_mut() {
+            Some(range) if range.end == index => range.end += 1,
+            _ => ranges.push(index..index + 1),
+        }
+    }
+    ranges
+}
+
 impl Session {
     pub fn remove_timeline_rows<'a>(
         &mut self,
-        start: usize,
-        expected: &[QueueEntryId],
+        expected: &[(usize, QueueEntryId)],
         pending: impl DoubleEndedIterator<Item = &'a QueueRemoval>,
     ) -> Option<QueueRemoval> {
         let queue = self.timeline();
-        let end = start.checked_add(expected.len())?;
         if expected.is_empty()
-            || end > queue.len()
-            || (start..end)
-                .zip(expected)
-                .any(|(index, id)| queue.get(index).unwrap().entry_id != *id)
+            || expected.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+            || expected
+                .iter()
+                .any(|&(index, id)| queue.get(index).is_none_or(|entry| entry.entry_id != id))
         {
             return None;
         }
 
-        let selected: HashSet<_> = expected.iter().copied().collect();
+        let selected: HashSet<_> = expected.iter().map(|&(_, id)| id).collect();
         let entries = selected.iter().map(|id| self.entries[id].clone()).collect();
         let current = queue
             .current_index()
-            .filter(|i| (start..end).contains(i))
+            .filter(|index| expected.binary_search_by_key(index, |&(at, _)| at).is_ok())
             .map(|_| (self.current.unwrap(), self.position_ms));
         let mut fragments = Vec::new();
         let upcoming = queue.upcoming_start();
@@ -129,11 +138,13 @@ impl Session {
             (Section::History, preceding, &mut self.history),
             (Section::Remaining, upcoming, &mut self.remaining),
         ] {
-            let from = start.max(base).min(base + list.len()) - base;
-            let to = end.max(base).min(base + list.len()) - base;
-            if from < to {
-                remove_fragments(list, section, std::iter::once(from..to), &mut fragments);
-            }
+            let bounds = base..base + list.len();
+            let indices = expected
+                .iter()
+                .map(|&(index, _)| index)
+                .filter(|index| bounds.contains(index))
+                .map(|index| index - base);
+            remove_fragments(list, section, ranges(indices).into_iter(), &mut fragments);
         }
         if current.is_some() {
             self.current = None;
@@ -148,19 +159,13 @@ impl Session {
             .chain(&self.remaining)
             .copied()
             .collect();
-        let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
-        for (i, id) in self.order.iter().enumerate() {
-            if selected.contains(id) && !still_visible.contains(id) {
-                match ranges.last_mut() {
-                    Some(range) if range.end == i => range.end += 1,
-                    _ => ranges.push(i..i + 1),
-                }
-            }
-        }
+        let order_ranges = ranges(self.order.iter().enumerate().filter_map(|(i, id)| {
+            (selected.contains(id) && !still_visible.contains(id)).then_some(i)
+        }));
         remove_fragments(
             &mut self.order,
             Section::Order,
-            ranges.into_iter(),
+            order_ranges.into_iter(),
             &mut fragments,
         );
         self.collect();
@@ -297,7 +302,7 @@ mod tests {
                     pending.push((
                         i,
                         session
-                            .remove_timeline_rows(at, &[id], pending.iter().map(|(_, rows)| rows))
+                            .remove_timeline_rows(&[(at, id)], pending.iter().map(|(_, rows)| rows))
                             .unwrap(),
                     ));
                 }
@@ -321,13 +326,17 @@ mod tests {
         session.start(&(1..=5).map(track).collect::<Vec<_>>(), 1, false);
         session.set_position_ms(37_000);
         let selected: Vec<_> = (0..3)
-            .map(|index| session.timeline().get(index).unwrap().entry_id)
+            .map(|index| (index, session.timeline().get(index).unwrap().entry_id))
+            .collect();
+        let invalid: Vec<_> = selected
+            .iter()
+            .map(|&(index, id)| (index + 1, id))
             .collect();
         assert!(session
-            .remove_timeline_rows(1, &selected, std::iter::empty::<&QueueRemoval>())
+            .remove_timeline_rows(&invalid, std::iter::empty::<&QueueRemoval>())
             .is_none());
         let removal = session
-            .remove_timeline_rows(0, &selected, std::iter::empty::<&QueueRemoval>())
+            .remove_timeline_rows(&selected, std::iter::empty::<&QueueRemoval>())
             .unwrap();
         assert!(removal.removed_current());
         assert_eq!(session.jump_to(0).unwrap().message, 4);
@@ -356,7 +365,7 @@ mod tests {
         assert_eq!(session.current().unwrap().entry_id, id);
         let original = orders(&session);
         let removal = session
-            .remove_timeline_rows(0, &[id], std::iter::empty::<&QueueRemoval>())
+            .remove_timeline_rows(&[(0, id)], std::iter::empty::<&QueueRemoval>())
             .unwrap();
         assert_eq!(session.current().unwrap().entry_id, id);
         assert_eq!(orders(&session), original);

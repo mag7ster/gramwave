@@ -360,22 +360,14 @@ impl AppCore {
             AppCommand::Remove(index) => {
                 self.handle(CoreCommand::Remove(index));
             }
-            AppCommand::RemoveQueueRows {
-                start,
-                expected,
-                now,
-            } => {
+            AppCommand::RemoveQueueRows { expected, now } => {
                 use crate::playback::{PendingQueueRemoval, QueueRemovalNotice};
                 use std::time::Duration;
 
                 self.playback.expire_queue_removals(now);
                 self.save_playback_position(self.playback.snapshot);
                 let pending = self.playback.queue_removals.iter().map(|entry| &entry.rows);
-                if let Some(rows) = self
-                    .state
-                    .session
-                    .remove_timeline_rows(start, &expected, pending)
-                {
+                if let Some(rows) = self.state.session.remove_timeline_rows(&expected, pending) {
                     let paused = self.playback.state.paused();
                     if rows.removed_current() {
                         play = self.state.session.jump_to(0).as_ref().map(Into::into);

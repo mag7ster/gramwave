@@ -57,6 +57,7 @@ fastframe-icons = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" 
 egui_extras = { version = "0.36.2", features = ["svg", "image", "file"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 ksni = { version = "0.3.7", features = ["blocking"] }
 raw-window-handle = "0.6"
 wayland-client = { version = "0.31", features = ["system"] }

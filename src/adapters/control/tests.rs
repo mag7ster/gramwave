@@ -10,48 +10,100 @@ fn cli_arguments_are_explicit_and_validated_before_connecting() {
         vec![],
         vec!["select", "0"],
         vec!["queue-play", "0"],
+        vec!["queue-play", "--id", "0"],
+        vec!["queue-play", "1", "--id", "2"],
         vec!["seek", "NaN"],
         vec!["seek", "inf"],
         vec!["seek", "-1"],
         vec!["next", "1"],
-        vec!["queue", "-1"],
+        vec!["queue-add"],
+        vec!["queue-add", "0-1"],
+        vec!["queue-remove", "9-3"],
+        vec!["queue-reverse", "1--3"],
         vec!["open"],
         vec!["shuffle", "yes"],
         vec!["status", "extra", "extra"],
+        vec!["--quit"],
+        vec!["quit", "status"],
+        vec!["search", "  "],
     ] {
         assert!(parse(&args(&words)).is_err(), "{words:?}");
     }
     assert!(matches!(
-        parse(&args(&["open", "-123"])).unwrap(),
+        parse(&args(&["open", "-123"])).unwrap().unwrap(),
         Request::Open { chat_id: -123 }
     ));
     assert!(matches!(
-        parse(&args(&["select", "5"])).unwrap(),
+        parse(&args(&["select", "5"])).unwrap().unwrap(),
         Request::Select { row: 5 }
     ));
     assert!(matches!(
-        parse(&args(&["repeat", "all"])).unwrap(),
+        parse(&args(&["repeat", "all"])).unwrap().unwrap(),
         Request::Repeat {
             mode: RepeatMode::All
         }
     ));
     assert!(matches!(
-        parse(&args(&["playlist", "50"])).unwrap(),
+        parse(&args(&["playlist", "50"])).unwrap().unwrap(),
         Request::Playlist { offset: 50 }
     ));
     assert!(matches!(
-        parse(&args(&["queue"])).unwrap(),
+        parse(&args(&["queue"])).unwrap().unwrap(),
         Request::Queue { offset: 0 }
     ));
     assert!(matches!(
-        parse(&args(&["queue-play", "18446744073709551615"])).unwrap(),
+        parse(&args(&["queue-play", "--id", "18446744073709551615"]))
+            .unwrap()
+            .unwrap(),
         Request::QueuePlay {
             entry_id: QueueEntryId(u64::MAX)
         }
     ));
+    assert!(matches!(
+        parse(&args(&["queue-play", "5"])).unwrap(),
+        Some(Request::QueuePlayRow { row: 5 })
+    ));
+    assert!(matches!(
+        parse(&args(&["queue", "-20"])).unwrap(),
+        Some(Request::Queue { offset: -20 })
+    ));
+    let Some(Request::QueueAdd {
+        rows,
+        next: true,
+        reverse: true,
+    }) = parse(&args(&["queue-add", "2", "--next", "5-8", "--reverse"])).unwrap()
+    else {
+        panic!("expected queue-add with both flags");
+    };
+    assert_eq!(rows.len(), 2);
+    assert_eq!((rows[1].first, rows[1].last), (5, 8));
     assert!(parse(&args(&["--help"]))
         .unwrap_err()
+        .to_string()
         .contains("queue-play"));
+    for words in [["--json", "quit"], ["quit", "--json"]] {
+        assert!(parse(&args(&words)).unwrap().is_none());
+    }
+    for words in [["--json", "status"], ["status", "--json"]] {
+        assert!(matches!(
+            parse(&args(&words)).unwrap(),
+            Some(Request::Status)
+        ));
+    }
+}
+
+#[test]
+fn text_queue_uses_row_numbers_and_keeps_metadata_on_one_line() {
+    let data = serde_json::json!({
+        "items": [{"row": 1, "entry_id": u64::MAX, "title": "Night\nTrain", "artist": "Jazz\u{1b}[31m"}],
+        "current": {"row": 4, "title": "On air"},
+        "next_offset": -2,
+    });
+    let text = output::text(Some(&Request::Queue { offset: -3 }), &data);
+    assert_eq!(text.lines().next(), Some("1  Jazz [31m — Night Train"));
+    assert_eq!(text.lines().nth(1), Some("> 4  On air"));
+    assert!(text.contains("--ctl queue -2"));
+    assert!(!text.contains('\u{1b}'));
 }
 
 #[test]

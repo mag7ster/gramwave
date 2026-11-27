@@ -28,12 +28,19 @@ impl Services {
         } else {
             data_root()
         };
-        Self::open(root, options.demo, options.desktop_integrations, wake)
+        Self::open(
+            root,
+            options.demo,
+            options.desktop_integrations,
+            options.headless,
+            wake,
+        )
     }
     pub(crate) fn open(
         root: PathBuf,
         demo: bool,
         desktop_integrations: bool,
+        headless: bool,
         wake: Waker,
     ) -> Result<Self, String> {
         let (repository, state, offline) = if demo {
@@ -71,12 +78,11 @@ impl Services {
         let desktop = !demo || desktop_integrations;
         let media = desktop.then(|| {
             let wake = wake.clone();
-            fastframe_now_playing::NowPlaying::start(
-                fastframe_now_playing::App::new(APP_ID, APP_NAME),
-                move || wake.wake(),
-            )
+            let mut app = fastframe_now_playing::App::new(APP_ID, APP_NAME);
+            app.can_raise = !headless;
+            fastframe_now_playing::NowPlaying::start(app, move || wake.wake())
         });
-        let tray = if desktop {
+        let tray = if desktop && !headless {
             Tray::spawn(wake.clone())
         } else {
             None

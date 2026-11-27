@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+mod daemon;
 mod services;
 use crate::{demo, App};
 use eframe::egui;
@@ -41,14 +43,18 @@ impl Resident for App {
             .unwrap_or(std::time::Duration::MAX);
         if self.quitting {
             Headless::Quit
-        } else if self
-            .show_requested
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        } else if !self.options.headless
+            && self
+                .show_requested
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
             Headless::Show
         } else {
             Headless::WaitFor(wait)
         }
+    }
+    fn start_hidden(&mut self) -> bool {
+        self.options.headless
     }
     fn shutdown(&mut self) {
         if let Err(error) = self.shutdown_core() {
@@ -59,22 +65,44 @@ impl Resident for App {
     }
 }
 pub fn run() -> eframe::Result {
+    let options = crate::launch::options();
+    if options.daemon {
+        #[cfg(target_os = "linux")]
+        return daemon::launch(options.demo).map_err(application_error);
+        #[cfg(not(target_os = "linux"))]
+        return Err(application_error(crate::tr(
+            "--daemon is available on Linux",
+        )));
+    }
     let waker = Waker::default();
     let show = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = show.clone();
     let wake = waker.clone();
-    let slot = crate::adapters::control::slot(crate::launch::options().demo);
+    let slot = crate::adapters::control::slot(options.demo);
     let (control_tx, control_rx) = std::sync::mpsc::sync_channel(8);
-    let _guard = match slot.claim("show", move |request| {
+    let request = if options.headless { "present" } else { "show" };
+    let _guard = match slot.claim(request, move |request| {
         if request == "show" {
+            if options.headless {
+                return Some("headless".into());
+            }
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
             wake.wake();
             Some("ok".into())
+        } else if request == "present" {
+            Some("running".into())
         } else {
             crate::adapters::control::bridge(request, &control_tx, || wake.wake())
         }
     }) {
         fastframe_instance::Claim::First(g) => g,
+        fastframe_instance::Claim::Running(reply) if options.headless || reply == "headless" => {
+            println!(
+                "{}",
+                crate::tr("The player is already running. Quit it before changing launch modes.")
+            );
+            return Ok(());
+        }
         _ => return Ok(()),
     };
     let mut app = App::new(waker.clone())
@@ -89,7 +117,8 @@ pub fn run() -> eframe::Result {
     #[cfg(target_os = "linux")]
     let app_id = crate::adapters::window_activation::app_id(app.demo);
     fastframe_titlebar::set_enabled(true);
-    Shell::new(app, &waker).run(|lease| {
+    let shell = Shell::new(app, &waker).start_hidden(options.headless);
+    shell.run(|lease| {
         let viewport = egui::ViewportBuilder::default()
             .with_inner_size(crate::launch::options().window_size())
             .with_decorations(!fastframe_titlebar::enabled())
@@ -155,9 +184,11 @@ pub fn run() -> eframe::Result {
         )
     })?;
     if let Some(error) = shutdown_error.lock().unwrap().take() {
-        return Err(eframe::Error::AppCreation(Box::new(std::io::Error::other(
-            error,
-        ))));
+        return Err(application_error(error));
     }
     Ok(())
+}
+
+fn application_error(error: String) -> eframe::Error {
+    eframe::Error::AppCreation(Box::new(std::io::Error::other(error)))
 }

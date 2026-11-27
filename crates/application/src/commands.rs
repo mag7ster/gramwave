@@ -30,8 +30,7 @@ pub enum AppCommand {
     },
     Remove(usize),
     RemoveQueueRows {
-        start: usize,
-        expected: Vec<QueueEntryId>,
+        expected: Vec<(usize, QueueEntryId)>,
         now: std::time::Instant,
     },
     UndoQueueRemoval {

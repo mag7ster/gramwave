@@ -89,6 +89,12 @@ thumbnail files in bounded batches and prepares textures near the viewport.
 Producers publish before waking the desktop shell. The main loop waits for
 events or the next deadline for playback position, search, retries or visible
 timed UI. On Linux the same waker interrupts the shell's wait in the tray.
+The `--headless` launch starts in that loop. `--daemon` runs the same binary in
+a separate session and checks that the child can answer control requests before
+returning. The local socket carries typed requests encoded as JSON. The CLI
+formats replies for the terminal or prints JSON when given `--json`.
+`--ctl quit` uses the normal shutdown path and waits for the identified
+process to exit.
 
 SQLite, TDLib receiving and mpv have dedicated owner threads. Telegram's managed
 transport uses oneshot responses, a 60-second RPC deadline and short receive
@@ -200,7 +206,8 @@ cargo test --workspace --locked --features native-tests --lib -- --test-threads=
 Native checks require the libmpv development package, TDLib and permission to
 bind loopback sockets.
 Desktop checks run scripts/check-control.py and scripts/check-mpris.py in a graphical
-D-Bus session. Capture demo screenshots in both light and dark themes. Default demo
+D-Bus session. Run `scripts/check-control.py --headless` to exercise the CLI and
+detached startup without a display. Capture demo screenshots in both light and dark themes. Default demo
 starts no SQLite, Telegram, mpv, tray or MPRIS services; desktop integrations require
 --desktop-integrations. Authenticated playback, audible output and tray/window
 restoration require manual verification before release.

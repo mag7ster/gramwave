@@ -384,6 +384,9 @@ impl App {
 
 impl App {
     fn show_window(&self, ctx: &egui::Context, window_present: bool) {
+        if self.options.headless {
+            return;
+        }
         if !window_present {
             self.show_requested
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -525,6 +528,12 @@ impl App {
         self.process(ctx);
         self.process_player_events();
         self.process_control();
+        if self.quitting {
+            if window_present {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return None;
+        }
         let now = std::time::Instant::now();
         let cache = self.maintain_cache(now);
         let offline = self.pump_offline(now);
@@ -541,7 +550,7 @@ impl App {
 
         self.frames += 1;
         let mut smoke = None;
-        if self.options.smoke_test {
+        if self.options.smoke_test && !self.options.headless {
             let screenshot_at = self.preview_started + Duration::from_secs(2);
             let quit_at = self.preview_started + Duration::from_millis(3500);
             if now >= screenshot_at && !self.preview_captured {

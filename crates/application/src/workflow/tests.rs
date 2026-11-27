@@ -506,8 +506,7 @@ fn undo_current_loads_its_checkpoint_with_the_original_pause_state() {
     }));
 
     core.command(AppCommand::RemoveQueueRows {
-        start: 0,
-        expected: vec![old],
+        expected: vec![(0, old)],
         now,
     });
     assert_eq!(core.view().session.current().unwrap().message, 2);

@@ -416,8 +416,7 @@ impl App {
                 reordering = lifted.is_some();
                 action = moved;
                 let remove = |range: std::ops::RangeInclusive<usize>| AppCommand::RemoveQueueRows {
-                    start: *range.start(),
-                    expected: range.map(|i| queue.get(i).unwrap().entry_id).collect(),
+                    expected: range.map(|i| (i, queue.get(i).unwrap().entry_id)).collect(),
                     now,
                 };
                 if lifted.is_none() && allow_drag {

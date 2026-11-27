@@ -232,7 +232,8 @@ fn remembers_the_opened_playlist_independently_of_the_playing_queue() {
     state.session.start(&state.playlists[0].tracks, 0, false);
     db.apply(ChangeSet::between(None, &state)).unwrap();
     let with_storage = |db, state| {
-        let mut services = Services::open(PathBuf::new(), true, false, Default::default()).unwrap();
+        let mut services =
+            Services::open(PathBuf::new(), true, false, false, Default::default()).unwrap();
         services.core = AppCore::new(state);
         services.repository = Some(Box::new(db));
         App::from_services(services, Default::default())
@@ -262,7 +263,8 @@ fn queue_panel_visibility_survives_closing_and_reopening() {
     let path = temp.path().join("library.sqlite");
     let reopen = || {
         let (db, state) = Store::open(&path).unwrap();
-        let mut services = Services::open(PathBuf::new(), true, false, Default::default()).unwrap();
+        let mut services =
+            Services::open(PathBuf::new(), true, false, false, Default::default()).unwrap();
         services.core = AppCore::new(state);
         services.repository = Some(Box::new(db));
         App::from_services(services, Default::default())

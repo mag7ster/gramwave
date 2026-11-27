@@ -142,7 +142,7 @@ impl DesktopApp {
     #[cfg(test)]
     pub(crate) fn new_at(root: PathBuf, demo: bool) -> Self {
         let services =
-            crate::bootstrap::Services::open(root, demo, false, Default::default()).unwrap();
+            crate::bootstrap::Services::open(root, demo, false, false, Default::default()).unwrap();
         Self::from_services(services, Default::default())
     }
     fn from_services(
@@ -305,6 +305,29 @@ impl DesktopApp {
             Err(error) => self.error = error,
         }
     }
+    pub(crate) fn chat_search_indices(&self, searching: bool, query: &str) -> Vec<usize> {
+        let state = self.state.view();
+        let mut indices = state.sidebar_chats(searching, query);
+        let mut seen = std::collections::HashSet::new();
+        indices.retain(|&i| seen.insert(state.playlists[i].id));
+        let search = self.state.library().search();
+        if searching && !query.is_empty() && search.query == query {
+            indices.extend(
+                state
+                    .playlists
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, playlist)| {
+                        (playlist.in_chat_search()
+                            && search.ids.contains(&playlist.id)
+                            && seen.insert(playlist.id))
+                        .then_some(i)
+                    }),
+            );
+        }
+        indices
+    }
+
     pub(crate) fn poll_chat_search(&mut self, ctx: &egui::Context) {
         let query = if self.chat_search_active {
             self.chat_query.clone()
