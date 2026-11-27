@@ -41,12 +41,12 @@ Choose **Quit** in the tray menu or press **Ctrl+Shift+Q** to exit completely.
 
 ## Build and run
 
-Install a recent stable Rust toolchain and the libmpv development package.
+Install a recent stable Rust toolchain and the ALSA development package.
 Cargo downloads TDLib automatically. On Fedora, install the native dependencies
 with `dnf`.
 
 ```sh
-sudo dnf install mpv-devel openssl-libs zlib-ng-compat libcxx libcxxabi llvm-libunwind
+sudo dnf install alsa-lib-devel cmake pkgconf-pkg-config gcc-c++ openssl-libs zlib-ng-compat libcxx libcxxabi llvm-libunwind
 ```
 
 Create a Telegram application to get an API ID and API hash. Put the ID on the
@@ -72,5 +72,5 @@ and [verification](ARCHITECTURE.md#verification).
 ## License
 
 [MIT](LICENSE). Built with [TDLib](https://github.com/tdlib/td),
-[mpv](https://mpv.io), [egui](https://github.com/emilk/egui) and
+[Rodio](https://github.com/RustAudio/rodio), [egui](https://github.com/emilk/egui) and
 [fastframe](https://github.com/crmne/fastframe).

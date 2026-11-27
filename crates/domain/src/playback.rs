@@ -285,27 +285,47 @@ impl Session {
         self.history.extend(skipped);
         self.current().cloned()
     }
+    pub fn repeat_cycle(&self, shuffle: bool) -> Vec<QueueEntryId> {
+        let mut cycle = self.order.clone();
+        if shuffle {
+            cycle.shuffle(&mut rand::thread_rng());
+            if let (Some(current), Some(first)) = (self.current(), cycle.first()) {
+                if same(current, &self.entries[first]) {
+                    if let Some(index) = cycle
+                        .iter()
+                        .position(|id| !same(current, &self.entries[id]))
+                    {
+                        cycle.swap(0, index);
+                    }
+                }
+            }
+        }
+        cycle
+    }
+    pub fn repeat_cycle_first(&self, cycle: &[QueueEntryId]) -> Option<&QueueEntry> {
+        cycle.first().and_then(|id| self.entries.get(id))
+    }
     pub fn advance(&mut self, repeat: RepeatMode, shuffle: bool, eof: bool) -> Option<QueueEntry> {
+        self.advance_with_cycle(repeat, shuffle, eof, None)
+    }
+    pub fn advance_with_cycle(
+        &mut self,
+        repeat: RepeatMode,
+        shuffle: bool,
+        eof: bool,
+        cycle: Option<Vec<QueueEntryId>>,
+    ) -> Option<QueueEntry> {
         self.position_ms = 0;
         if eof && repeat == RepeatMode::One && self.current.is_some() {
             return self.current().cloned();
         }
         if self.remaining.is_empty() && repeat == RepeatMode::All {
-            self.remaining = self.order.clone();
-            self.reorder(shuffle);
-            if shuffle
-                && self
-                    .current()
-                    .is_some_and(|c| self.remaining().first().is_some_and(|t| same(c, t)))
-            {
-                let different = self
-                    .remaining()
-                    .iter()
-                    .position(|t| !same(t, self.current().unwrap()));
-                if let Some(i) = different {
-                    self.remaining.swap(0, i);
-                }
-            }
+            self.remaining = cycle
+                .filter(|cycle| {
+                    cycle.len() == self.order.len()
+                        && cycle.iter().all(|id| self.entries.contains_key(id))
+                })
+                .unwrap_or_else(|| self.repeat_cycle(shuffle));
         }
         self.jump_to(0)
     }

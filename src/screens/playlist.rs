@@ -568,7 +568,7 @@ impl App {
                             .layout(egui::Layout::left_to_right(egui::Align::Center)),
                         |ui| {
                             let indicator = if active {
-                                Some(if self.state.playback().state().loading() {
+                                Some(if self.state.playback().shows_loading() {
                                     "…"
                                 } else if self.state.playback().state().paused() {
                                     "Ⅱ"

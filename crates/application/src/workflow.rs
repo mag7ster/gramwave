@@ -133,6 +133,50 @@ impl AppCore {
     pub fn playback(&self) -> &crate::playback::PlaybackCore {
         &self.playback
     }
+    pub fn enable_streamed_next(&mut self, enabled: bool) {
+        self.playback.streamed_next = enabled;
+    }
+
+    pub fn next_streamed_playback(
+        &mut self,
+    ) -> Option<(crate::media::MediaTrack, u64, Option<String>)> {
+        use crate::playback::PlaybackState;
+        use gramwave_domain::RepeatMode;
+        if !self.playback.streamed_next
+            || !matches!(
+                self.playback.state,
+                PlaybackState::Playing | PlaybackState::Paused
+            )
+        {
+            return None;
+        }
+        let session = &self.state.session;
+        let current = session.current()?;
+        let next = if self.state.repeat == RepeatMode::One {
+            current
+        } else if let Some(next) = session.remaining().first() {
+            next
+        } else if self.state.repeat == RepeatMode::All {
+            let cycle = self
+                .playback
+                .repeat_cycle
+                .get_or_insert_with(|| session.repeat_cycle(self.state.shuffle));
+            session.repeat_cycle_first(cycle)?
+        } else {
+            return None;
+        };
+        let revision = self.revision(next.id());
+        let offline = self
+            .offline
+            .local_path(
+                next.id(),
+                crate::offline::unix_seconds(std::time::SystemTime::now()),
+                self.state.cache_policy.days,
+            )
+            .map(str::to_owned);
+        Some((self.media_track(next.into()), revision, offline))
+    }
+
     pub fn next_local_playback(&self) -> Option<QueuedPlayback> {
         use crate::playback::PlaybackState;
         use gramwave_domain::RepeatMode;
@@ -175,6 +219,7 @@ impl AppCore {
         let mut effects = Vec::new();
         let advancing = matches!(&command, AppCommand::Next | AppCommand::Advance(_));
         let mut play = None;
+        let mut prepared_next = None;
         let mut pause_after_load = None;
         match command {
             AppCommand::Connect => {
@@ -287,7 +332,14 @@ impl AppCore {
             AppCommand::PlayQueueRow { index, entry_id } => {
                 play = self.handle(CoreCommand::PlayQueueRow(index, entry_id))
             }
-            AppCommand::Next => play = self.handle(CoreCommand::Advance(false)),
+            AppCommand::Next => {
+                let current = self.state.session.current().map(|track| track.entry_id);
+                prepared_next = self
+                    .next_streamed_playback()
+                    .map(|(track, revision, _)| (track.entry_id, revision))
+                    .filter(|(entry, _)| Some(*entry) != current);
+                play = self.handle(CoreCommand::Advance(false));
+            }
             AppCommand::Advance(eof) => play = self.handle(CoreCommand::Advance(eof)),
             AppCommand::Previous => {
                 if !self.playback.state.loading() && self.playback.snapshot.position > 3. {
@@ -310,7 +362,9 @@ impl AppCore {
                             self.playback.state,
                             crate::playback::PlaybackState::Stopped
                                 | crate::playback::PlaybackState::Failed
-                        ) || self.playback.snapshot.duration <= 0.)
+                        ) || (self.playback.snapshot.duration <= 0.
+                            && self.playback.snapshot.checkpoint_position.is_none()
+                            && !self.playback.snapshot.seeking))
                     {
                         play = self.state.session.current().map(Into::into);
                     } else {
@@ -368,6 +422,7 @@ impl AppCore {
                 self.save_playback_position(self.playback.snapshot);
                 let pending = self.playback.queue_removals.iter().map(|entry| &entry.rows);
                 if let Some(rows) = self.state.session.remove_timeline_rows(&expected, pending) {
+                    self.playback.repeat_cycle = None;
                     let paused = self.playback.state.paused();
                     if rows.removed_current() {
                         play = self.state.session.jump_to(0).as_ref().map(Into::into);
@@ -399,6 +454,7 @@ impl AppCore {
                     .position(|removal| removal.notice.id == id)
                 {
                     let removal = self.playback.queue_removals.remove(index);
+                    self.playback.repeat_cycle = None;
                     let pending = self.playback.queue_removals.iter().map(|entry| &entry.rows);
                     if self
                         .state
@@ -426,7 +482,22 @@ impl AppCore {
             | AppCommand::ClearRecentChats => {}
         }
         if let Some(track) = play {
-            self.prepare_playback(track, &mut effects);
+            if let Some((entry_id, revision)) = prepared_next.filter(|&(entry, revision)| {
+                entry == track.entry_id && revision == self.revision(track.id())
+            }) {
+                let request = self.playback.begin(track, revision).key();
+                self.playback.promoting_next = true;
+                effects.extend([
+                    Effect::ClearSeek,
+                    Effect::Player(PlayerCommand::PromoteNext {
+                        request,
+                        entry_id,
+                        revision,
+                    }),
+                ]);
+            } else {
+                self.prepare_playback(track, &mut effects);
+            }
             if let Some(paused) = pause_after_load {
                 self.playback.state.set_paused(paused);
             }
@@ -658,16 +729,70 @@ impl AppCore {
                     }
                 }
             }
-            AppEvent::Player(event @ (PlaybackEvent::Loaded | PlaybackEvent::Advanced(_))) => {
-                let advanced = if let PlaybackEvent::Advanced(next) = event {
-                    if self.playback.state.loading() || self.state.session.current().is_none() {
-                        return effects;
+            AppEvent::Player(PlaybackEvent::NextBuffering(request))
+                if self.playback.promoting_next && self.playback.accepts(request) =>
+            {
+                self.playback.waiting_for_next_pcm = true;
+            }
+            AppEvent::Player(PlaybackEvent::NextUnavailable(request))
+                if self.playback.promoting_next && self.playback.accepts(request) =>
+            {
+                if let Some(track) = self.playback.target.clone() {
+                    let paused = self.playback.state.paused();
+                    self.prepare_playback(track, &mut effects);
+                    self.playback.state.set_paused(paused);
+                }
+            }
+            AppEvent::Player(
+                event @ (PlaybackEvent::Loaded
+                | PlaybackEvent::Advanced(_)
+                | PlaybackEvent::NextPromoted(_, _)),
+            ) => {
+                let advanced = match event {
+                    PlaybackEvent::NextPromoted(request, next) => {
+                        if !self.playback.promoting_next || !self.playback.accepts(request) {
+                            return effects;
+                        }
+                        let Some(track) = self.playback.target.clone() else {
+                            return effects;
+                        };
+                        if track.entry_id != next.entry_id
+                            || self.revision(track.id()) != next.revision
+                        {
+                            let paused = self.playback.state.paused();
+                            self.prepare_playback(track, &mut effects);
+                            self.playback.state.set_paused(paused);
+                            return effects;
+                        }
+                        self.playback.promoting_next = false;
+                        self.playback.waiting_for_next_pcm = false;
+                        self.playback.active = None;
+                        Some(next)
                     }
-                    if self.next_local_playback().as_ref() != Some(&next) {
-                        return self.command(AppCommand::Advance(true));
+                    PlaybackEvent::Advanced(next) => {
+                        if self.playback.state.loading() || self.state.session.current().is_none() {
+                            return effects;
+                        }
+                        let expected = if self.playback.streamed_next {
+                            self.next_streamed_playback()
+                                .is_some_and(|(track, revision, _)| {
+                                    track.entry_id == next.entry_id && revision == next.revision
+                                })
+                        } else {
+                            self.next_local_playback().as_ref() == Some(&next)
+                        };
+                        if !expected {
+                            return self.command(AppCommand::Advance(true));
+                        }
+                        self.playback.target = self.handle(CoreCommand::Advance(true));
+                        self.playback.revision = next.revision;
+                        Some(next)
                     }
-                    self.playback.target = self.handle(CoreCommand::Advance(true));
-                    self.playback.revision = next.revision;
+                    PlaybackEvent::Loaded if self.playback.promoting_next => return effects,
+                    _ => None,
+                };
+                let was_advanced = advanced.is_some();
+                if let Some(next) = advanced {
                     if let Some(track) = &self.playback.target {
                         self.offline.mark_used(
                             track.id(),
@@ -683,11 +808,8 @@ impl AppCore {
                         Effect::ClearSeek,
                         Effect::Notice(crate::notice::Notice::Clear),
                     ]);
-                    true
-                } else {
-                    false
-                };
-                if advanced || self.playback.state.loading() {
+                }
+                if self.playback.state.loading() || was_advanced {
                     let chat = self.state.session.current().map(|track| track.chat);
                     if chat.is_some() && self.state.last_played_chat != chat {
                         let mut settings = crate::persistence::Settings::from(&self.state);

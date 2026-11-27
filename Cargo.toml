@@ -14,10 +14,11 @@ members = ["crates/domain", "crates/application"]
 resolver = "2"
 
 [features]
-default = ["mpv", "download-tdlib", "vulkan"]
-native-tests = ["mpv"]
+default = ["audio", "webm-emoji", "download-tdlib", "vulkan"]
+native-tests = ["audio", "webm-emoji"]
 release-branding = []
-mpv = ["dep:rsmpv"]
+audio = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:rodio", "dep:rtrb", "dep:symphonia", "dep:symphonia-adapter-libopus"]
+webm-emoji = ["dep:rusty_vp9", "dep:webm-iterable"]
 telegram = ["dep:tdlib-rs"]
 download-tdlib = ["telegram", "tdlib-rs/download-tdlib"]
 vulkan = ["eframe/wgpu_no_default_features", "dep:wgpu"]
@@ -29,6 +30,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "
 tokio-util = { version = "0.7", features = ["rt"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 http-range-header = "0.4"
+hyper = { version = "1", features = ["client", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
+rtrb = { version = "0.3", optional = true }
+symphonia = { version = "0.6.1", default-features = false, features = ["aac", "adpcm", "aiff", "alac", "flac", "id3v2", "isomp4", "mkv", "mpa", "ogg", "pcm", "vorbis", "wav"], optional = true }
+symphonia-adapter-libopus = { version = "0.3", optional = true }
+rusty_vp9 = { version = "0.3.0", optional = true }
+webm-iterable = { version = "0.7.1", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.3"
 tempfile = "3"
@@ -39,7 +49,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 rusqlite = { version = "0.43.0", features = ["bundled", "backup"] }
-rsmpv = { version = "0.2.1", default-features = false, optional = true }
 qrcode = { version = "0.14", default-features = false }
 fastframe-now-playing = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
@@ -69,3 +78,6 @@ winit = { version = "0.30", default-features = false }
 [build-dependencies]
 tdlib-rs = { version = "=1.4.0", optional = true }
 fastframe-i18n = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4", features = ["build"] }
+
+[patch.crates-io]
+symphonia-format-isomp4 = { path = "vendor/symphonia-format-isomp4" }

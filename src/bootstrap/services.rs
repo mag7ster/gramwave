@@ -58,18 +58,19 @@ impl Services {
             crate::adapters::offline::recover_metadata(&root.join("offline"), &mut offline);
             (Some(Box::new(store) as Box<dyn Repository>), state, offline)
         };
+        let tasks = Scheduler::new();
         let (player, player_error) = if demo {
             (None, String::new())
         } else {
-            #[cfg(feature = "mpv")]
-            match crate::adapters::audio::Player::new(wake.clone()) {
+            #[cfg(feature = "audio")]
+            match crate::adapters::audio_output::Player::new(wake.clone(), tasks.handle()) {
                 Ok(player) => (
                     Some(Box::new(player) as Box<dyn PlayerBackend>),
                     String::new(),
                 ),
                 Err(error) => (None, error),
             }
-            #[cfg(not(feature = "mpv"))]
+            #[cfg(not(feature = "audio"))]
             (
                 None,
                 crate::tr("This build does not include audio playback"),
@@ -94,7 +95,7 @@ impl Services {
             repository,
             player,
             player_error,
-            tasks: Scheduler::new(),
+            tasks,
             media,
             tray,
             demo,

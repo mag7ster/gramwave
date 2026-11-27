@@ -205,3 +205,42 @@ fn streaming_seek_temporarily_prioritizes_its_range_and_offline_then_resumes() {
         drop(offline);
     });
 }
+
+#[test]
+fn speculative_range_yields_to_playback_on_the_same_file() {
+    let (sent, received) = mpsc::channel();
+    let tg = Telegram::mock_rpc(move |request| {
+        if request["@type"] == "downloadFile" {
+            sent.send((
+                request["priority"].as_u64().unwrap(),
+                request["offset"].as_u64().unwrap(),
+                request["limit"].as_u64().unwrap(),
+            ))
+            .unwrap();
+        }
+        json!({"ok": true})
+    });
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let cancel = CancellationToken::new();
+        let current = tg.begin_stream_download(1, 50, 0, &cancel).await.unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            (32, 50, 0)
+        );
+        let next = tg.begin_stream_download(1, 0, 1024, &cancel).await.unwrap();
+        assert!(received.try_recv().is_err());
+        drop(current);
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            (4, 0, 1024)
+        );
+        let promoted = tg.begin_stream_download(1, 25, 0, &cancel).await.unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).unwrap(),
+            (32, 25, 0)
+        );
+        drop(next);
+        assert!(received.try_recv().is_err());
+        drop(promoted);
+    });
+}

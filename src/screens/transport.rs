@@ -262,7 +262,7 @@ impl App {
                             .truncate()
                             .show_tooltip_when_elided(false),
                     );
-                    if self.state.playback().state().loading() {
+                    if self.state.playback().shows_loading() {
                         ui.small(tr("Loading track…"));
                     }
                 });
@@ -317,7 +317,7 @@ impl App {
                 current.map_or(0., |track| track.duration as f64)
             } else if playback.loading() {
                 0.
-            } else if self.demo {
+            } else if self.demo || snapshot.duration <= 0. {
                 current.as_ref().map_or(0., |track| track.duration as f64)
             } else {
                 snapshot.duration

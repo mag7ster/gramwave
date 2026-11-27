@@ -39,11 +39,11 @@ impl App {
         let loaded = matches!(
             self.state.playback().state(),
             PlaybackState::Playing | PlaybackState::Paused
-        ) && snapshot.duration > 0.;
+        ) && (snapshot.duration > 0. || snapshot.checkpoint_position.is_some());
         (position_ms > 0 && !loaded).then_some(position_ms as f64 / 1000.)
     }
 
-    fn process_player_events(&mut self) {
+    pub(crate) fn process_player_events(&mut self) {
         use gramwave_application::ports::PlaybackEvent;
         let events = self.player.as_ref().map(|p| p.drain()).unwrap_or_default();
         let generation = self.state.playback().generation();

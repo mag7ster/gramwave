@@ -1,7 +1,7 @@
 use crate::{App, Event};
 use gramwave_application::{
-    ports::PlayerCommand,
-    tasks::JobClass,
+    ports::{PlayerCommand, QueuedPlayback},
+    tasks::{JobClass, Operation, RequestId},
     workflow::{AppEvent, Effect, PreparedPlayback},
     AppError,
 };
@@ -23,6 +23,13 @@ impl App {
         self.run_effects(effects);
     }
     pub(crate) fn core_command(&mut self, command: gramwave_application::commands::AppCommand) {
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.prepares_streamed_next())
+        {
+            self.process_player_events();
+        }
         let snapshot = self
             .player
             .as_ref()
@@ -261,6 +268,13 @@ impl App {
                     self.opened_chat = Some(chat);
                 }
                 Effect::Disconnect => {
+                    let pending = self.preparing_next.is_some();
+                    self.cancel_next_preparation();
+                    if self.queued_playback.take().is_some() || pending {
+                        if let Some(player) = &self.player {
+                            let _ = player.command(PlayerCommand::QueueNext(None));
+                        }
+                    }
                     if let Some(server) = &self.server {
                         server.stop();
                     }
@@ -271,6 +285,13 @@ impl App {
                 }
 
                 Effect::Prefetch(track) => {
+                    if self
+                        .player
+                        .as_ref()
+                        .is_some_and(|player| player.prepares_streamed_next())
+                    {
+                        continue;
+                    }
                     if self
                         .state
                         .offline()
@@ -303,7 +324,10 @@ impl App {
                 Effect::Player(command) => {
                     match &command {
                         PlayerCommand::Load { path, .. } => self.set_playback_path(path),
-                        PlayerCommand::Stop => self.queued_playback = None,
+                        PlayerCommand::Stop => {
+                            self.queued_playback = None;
+                            self.cancel_next_preparation();
+                        }
                         _ => {}
                     }
                     if let Some(player) = &self.player {
@@ -437,9 +461,120 @@ impl App {
                 }
             }
         }
-        if let Some(player) = &self.player {
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.prepares_streamed_next())
+        {
+            self.prepare_streamed_next(advanced);
+        } else if let Some(player) = &self.player {
             let next = self.state.next_local_playback();
             if advanced || next != self.queued_playback {
+                let _ = player.command(PlayerCommand::QueueNext(next.clone()));
+                self.queued_playback = next;
+            }
+        }
+    }
+
+    fn cancel_next_preparation(&mut self) {
+        if let Some((_, _, operation)) = self.preparing_next.take() {
+            operation.cancel.cancel();
+        }
+    }
+
+    fn prepare_streamed_next(&mut self, advanced: bool) {
+        if self.state.playback().promoting_next() {
+            return;
+        }
+        let next = self.state.next_streamed_playback();
+        if !advanced
+            && next.as_ref().is_some_and(|(track, revision, _)| {
+                self.preparing_next
+                    .as_ref()
+                    .is_some_and(|(entry_id, old_revision, _)| {
+                        *entry_id == track.entry_id && old_revision == revision
+                    })
+            })
+        {
+            return;
+        }
+        let pending = self.preparing_next.is_some();
+        self.cancel_next_preparation();
+        let previous = self.queued_playback.take();
+        let Some((mut track, revision, offline)) = next else {
+            if (pending || previous.is_some()) && !advanced {
+                let _ = self
+                    .player
+                    .as_ref()
+                    .unwrap()
+                    .command(PlayerCommand::QueueNext(None));
+            }
+            return;
+        };
+        let entry_id = track.entry_id;
+        let build = |path| QueuedPlayback {
+            entry_id,
+            revision,
+            path,
+        };
+        let path = offline
+            .filter(|path| std::path::Path::new(path).is_file())
+            .or_else(|| {
+                playback_location(&self.stream_base, track.file, track.cached.as_deref()).ok()
+            });
+        let operation = Operation::new(self.state.playback().generation());
+        let request = operation.key();
+        self.preparing_next = Some((entry_id, revision, operation.clone()));
+        if let Some(path) = path {
+            self.next_playback_prepared(request, Some(build(path)));
+        } else {
+            let Some(tg) = self.tg.clone().filter(|_| !self.stream_base.is_empty()) else {
+                self.next_playback_prepared(request, None);
+                self.cancel_next_preparation();
+                return;
+            };
+            let _ = self
+                .player
+                .as_ref()
+                .unwrap()
+                .command(PlayerCommand::QueueNextPending);
+            let base = self.stream_base.clone();
+            let cancel = operation.cancel.clone();
+            self.operation_event(
+                JobClass::Background,
+                operation,
+                async move {
+                    let prepared = async {
+                        track = crate::media_loader::resolve_async(&tg, &track.metadata(), &cancel)
+                            .await
+                            .ok()?;
+                        let path =
+                            playback_location(&base, track.file, track.cached.as_deref()).ok()?;
+                        Some(QueuedPlayback {
+                            entry_id,
+                            revision,
+                            path,
+                        })
+                    }
+                    .await;
+                    Event::NextPlaybackPrepared(request, prepared)
+                },
+                move |_| Event::NextPlaybackPrepared(request, None),
+            );
+        }
+    }
+
+    pub(crate) fn next_playback_prepared(
+        &mut self,
+        request: RequestId,
+        next: Option<QueuedPlayback>,
+    ) {
+        if self
+            .preparing_next
+            .as_ref()
+            .is_some_and(|(_, _, operation)| operation.key() == request)
+        {
+            if let Some(player) = &self.player {
                 let _ = player.command(PlayerCommand::QueueNext(next.clone()));
                 self.queued_playback = next;
             }
@@ -476,7 +611,7 @@ fn playback_location(base: &str, file: i64, cached: Option<&str>) -> Result<Stri
     if let Some(path) = cached.filter(|p| std::path::Path::new(p).is_file()) {
         return Ok(path.into());
     }
-    if base.is_empty() {
+    if base.is_empty() || file <= 0 {
         return Err(AppError::Unavailable("Streaming"));
     }
     Ok(format!("{base}/{file}"))

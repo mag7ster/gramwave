@@ -2,14 +2,26 @@
 pub enum PlaybackEvent {
     Loaded,
     Advanced(QueuedPlayback),
+    NextBuffering(crate::tasks::RequestId),
+    NextPromoted(crate::tasks::RequestId, QueuedPlayback),
+    NextUnavailable(crate::tasks::RequestId),
     Finished,
     Stopped,
     Failed(crate::AppError),
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {
-    Load { path: String, start_ms: u64 },
+    Load {
+        path: String,
+        start_ms: u64,
+    },
     QueueNext(Option<QueuedPlayback>),
+    QueueNextPending,
+    PromoteNext {
+        request: crate::tasks::RequestId,
+        entry_id: gramwave_domain::QueueEntryId,
+        revision: u64,
+    },
     Pause(bool),
     Stop,
     Seek(f64),
@@ -34,6 +46,9 @@ pub struct PlayerSnapshot {
     pub volume: f64,
 }
 pub trait PlayerBackend {
+    fn prepares_streamed_next(&self) -> bool {
+        false
+    }
     fn command(&self, command: PlayerCommand) -> Result<(), crate::AppError>;
     fn shutdown(&mut self, _timeout: std::time::Duration) -> Result<(), crate::AppError> {
         Ok(())

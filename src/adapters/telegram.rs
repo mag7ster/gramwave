@@ -391,42 +391,65 @@ impl Telegram {
         full: bool,
         cancel: &CancellationToken,
     ) -> Result<DownloadLease, AppError> {
+        let request = DownloadRange {
+            priority: if full { 8 } else { 32 },
+            offset,
+            limit: 0,
+        };
+        self.begin_range(file, request, cancel).await
+    }
+
+    pub(super) async fn begin_stream_download(
+        &self,
+        file: i64,
+        offset: u64,
+        limit: u64,
+        cancel: &CancellationToken,
+    ) -> Result<DownloadLease, AppError> {
+        let request = DownloadRange {
+            priority: if limit == 0 { 32 } else { 4 },
+            offset,
+            limit,
+        };
+        self.begin_range(file, request, cancel).await
+    }
+
+    async fn begin_range(
+        &self,
+        file: i64,
+        range: DownloadRange,
+        cancel: &CancellationToken,
+    ) -> Result<DownloadLease, AppError> {
         let cache = self.cache_read(cancel).await?;
         let (gate, state) = {
             let mut downloads = self.downloads.lock().unwrap();
             let entry = downloads.entry(file).or_default();
-            entry.users += 1;
-            if full {
-                entry.full += 1;
-            } else {
-                *entry.streams.entry(offset).or_default() += 1;
-            }
+            *entry.ranges.entry(range).or_default() += 1;
             (entry.gate.clone(), entry.state.subscribe())
         };
         let lease = DownloadLease {
             _cache: cache,
             tg: self.clone(),
             file,
-            full,
-            offset,
+            range,
             state,
         };
         let _gate = tokio::select! {_=cancel.cancelled()=>return Err(AppError::Cancelled),lock=gate.lock()=>lock};
         let request = {
             let downloads = self.downloads.lock().unwrap();
             let entry = &downloads[&file];
-            let desired = if !full {
-                offset
+            let highest = *entry.ranges.last_key_value().unwrap().0;
+            let desired = if range.priority == highest.priority {
+                range
             } else {
-                entry.streams.keys().next_back().copied().unwrap_or(0)
+                entry.desired(highest)
             };
-            (!entry.started || desired != entry.offset).then_some(desired)
+            (entry.active != Some(desired)).then_some(desired)
         };
-        if let Some(offset) = request {
-            self.call_async(json!({"@type":"downloadFile","file_id":file,"priority":if full {8}else{32},"offset":offset,"limit":0,"synchronous":false}),cancel).await?;
+        if let Some(range) = request {
+            self.call_async(range.request(file), cancel).await?;
             if let Some(entry) = self.downloads.lock().unwrap().get_mut(&file) {
-                entry.started = true;
-                entry.offset = offset;
+                entry.active = Some(range);
             }
         }
         Ok(lease)
@@ -525,67 +548,60 @@ fn record_download_state(downloads: &Downloads, value: &Value) -> Option<Telegra
     update.then(|| TelegramUpdate::File(file.into_file()))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct DownloadRange {
+    priority: u8,
+    offset: u64,
+    limit: u64,
+}
+impl DownloadRange {
+    fn request(self, file: i64) -> Value {
+        json!({"@type":"downloadFile","file_id":file,"priority":self.priority,"offset":self.offset,"limit":self.limit,"synchronous":false})
+    }
+}
 #[derive(Default)]
 struct DownloadEntry {
-    streams: std::collections::BTreeMap<u64, usize>,
-    users: usize,
-    full: usize,
-    started: bool,
-    offset: u64,
+    ranges: std::collections::BTreeMap<DownloadRange, usize>,
+    active: Option<DownloadRange>,
     gate: Arc<tokio::sync::Mutex<()>>,
     state: watch::Sender<DownloadState>,
 }
+impl DownloadEntry {
+    fn desired(&self, highest: DownloadRange) -> DownloadRange {
+        self.active
+            .filter(|range| range.priority == highest.priority && self.ranges.contains_key(range))
+            .unwrap_or(highest)
+    }
+}
 pub(crate) struct DownloadLease {
     _cache: tokio::sync::OwnedRwLockReadGuard<()>,
-    offset: u64,
     tg: Telegram,
     file: i64,
-    full: bool,
+    range: DownloadRange,
     pub(super) state: watch::Receiver<DownloadState>,
 }
 impl Drop for DownloadLease {
     fn drop(&mut self) {
-        let action = {
-            let mut downloads = self.tg.downloads.lock().unwrap();
-            if let Some(entry) = downloads.get_mut(&self.file) {
-                entry.users -= 1;
-                if self.full {
-                    entry.full -= 1;
-                } else if let Some(count) = entry.streams.get_mut(&self.offset) {
-                    *count -= 1;
-                    if *count == 0 {
-                        entry.streams.remove(&self.offset);
-                    }
-                }
-                if entry.users == 0 {
-                    downloads.remove(&self.file);
-                    // Queue cancellation before another lease can start this file.
-                    self.tg.request(json!({
-                        "@type":"cancelDownloadFile","file_id":self.file,"only_if_pending":false
-                    }));
-                    return;
-                } else {
-                    let desired = if entry.streams.contains_key(&entry.offset) {
-                        entry.offset
-                    } else {
-                        entry.streams.keys().next_back().copied().unwrap_or(0)
-                    };
-                    if entry.started && desired != entry.offset {
-                        entry.offset = desired;
-                        Some((desired, if entry.streams.is_empty() { 8 } else { 32 }))
-                    } else {
-                        None
-                    }
-                }
-            } else {
-                None
-            }
+        let mut downloads = self.tg.downloads.lock().unwrap();
+        let Some(entry) = downloads.get_mut(&self.file) else {
+            return;
         };
-        if let Some((offset, priority)) = action {
-            self.tg.request(json!({
-                "@type":"downloadFile","file_id":self.file,"priority":priority,
-                "offset":offset,"limit":0,"synchronous":false
-            }));
+        let count = entry.ranges.get_mut(&self.range).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            entry.ranges.remove(&self.range);
+        }
+        if let Some((&highest, _)) = entry.ranges.last_key_value() {
+            let desired = entry.desired(highest);
+            if entry.active.is_some() && entry.active != Some(desired) {
+                entry.active = Some(desired);
+                self.tg.request(desired.request(self.file));
+            }
+        } else {
+            downloads.remove(&self.file);
+            self.tg.request(
+                json!({"@type":"cancelDownloadFile","file_id":self.file,"only_if_pending":false}),
+            );
         }
     }
 }

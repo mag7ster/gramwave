@@ -2,14 +2,14 @@ use super::{telegram::Telegram, telegram_mapping::telegram_int64};
 use eframe::egui::{Color32, ColorImage};
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
-use std::{io::Read, process::Stdio, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::{io::Read, time::Duration};
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
-const SIZE: usize = 64;
-const FPS: u32 = 24;
-const MAX_FRAMES: usize = FPS as usize * 3;
-const MAX_FILE: usize = 512 * 1024;
+pub(super) const SIZE: usize = 64;
+pub(super) const FPS: u32 = 24;
+pub(super) const MAX_FRAMES: usize = FPS as usize * 3;
+pub(super) const MAX_FILE: usize = 512 * 1024;
 const MAX_JSON: usize = 1024 * 1024;
 pub(crate) const DEMO_ID: i64 = 1;
 const DEMO_TGS: &[u8] = br#"{
@@ -141,7 +141,10 @@ async fn load(
         return None;
     }
     if format["@type"] == "stickerFormatWebm" {
-        return webm(&raw, cancel).await;
+        #[cfg(feature = "webm-emoji")]
+        return super::emoji_webm::decode(raw, cancel).await;
+        #[cfg(not(feature = "webm-emoji"))]
+        return None;
     }
     let tgs = format["@type"] == "stickerFormatTgs";
     let cancel = cancel.clone();
@@ -229,81 +232,6 @@ pub(crate) fn tgs_frames(json: &[u8], cancel: &CancellationToken) -> Option<Anim
     })
 }
 
-async fn webm(raw: &[u8], cancel: &CancellationToken) -> Option<Animation> {
-    let filter = format!("fps={FPS},scale={SIZE}:{SIZE}:force_original_aspect_ratio=decrease,format=rgba,pad={SIZE}:{SIZE}:(ow-iw)/2:(oh-ih)/2:color=black@0");
-    let mut ffmpeg = tokio::process::Command::new("ffmpeg")
-        .args([
-            "-nostdin",
-            "-v",
-            "error",
-            "-max_alloc",
-            "16777216",
-            "-filter_threads",
-            "1",
-            "-threads",
-            "1",
-            "-max_pixels",
-            "262144",
-            "-protocol_whitelist",
-            "pipe",
-            "-f",
-            "matroska",
-            "-c:v",
-            "libvpx-vp9",
-            "-i",
-            "pipe:0",
-            "-map",
-            "0:v:0",
-            "-an",
-            "-sn",
-            "-dn",
-            "-vf",
-            &filter,
-            "-frames:v",
-            &MAX_FRAMES.to_string(),
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "pipe:1",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .ok()?;
-    let mut input = ffmpeg.stdin.take()?;
-    let frame_bytes = SIZE * SIZE * 4;
-    let max = MAX_FRAMES * frame_bytes;
-    let mut output = ffmpeg.stdout.take()?.take((max + 1) as u64);
-    let mut bytes = Vec::new();
-    let decode = async {
-        tokio::try_join!(
-            async move { input.write_all(raw).await },
-            output.read_to_end(&mut bytes),
-        )
-        .ok()?;
-        if bytes.is_empty()
-            || bytes.len() > max
-            || bytes.len() % frame_bytes != 0
-            || !ffmpeg.wait().await.ok()?.success()
-        {
-            return None;
-        }
-        let frames: Vec<_> = bytes
-            .chunks_exact(frame_bytes)
-            .map(|frame| ColorImage::from_rgba_unmultiplied([SIZE; 2], frame))
-            .collect();
-        let duration = Duration::from_secs_f32(frames.len() as f32 / FPS as f32);
-        Some(Animation { frames, duration })
-    };
-    tokio::select! {
-        _ = cancel.cancelled() => None,
-        result = tokio::time::timeout(Duration::from_secs(5), decode) => result.ok().flatten(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,23 +250,5 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         assert!(tgs_frames(DEMO_TGS, &cancel).is_none());
-    }
-
-    #[cfg(feature = "native-tests")]
-    #[tokio::test]
-    async fn animated_webm_preserves_transparency() {
-        let raw = tokio::process::Command::new("ffmpeg")
-            .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i",
-                   "color=c=red@0.2:s=100x100:r=24:d=0.25,format=yuva420p,drawbox=x=10:y=10:w=45:h=45:color=blue:t=fill:replace=1",
-                   "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-f", "webm", "pipe:1"])
-            .output().await.unwrap();
-        assert!(raw.status.success());
-        let animation = webm(&raw.stdout, &CancellationToken::new()).await.unwrap();
-        assert!(animation.frames.len() > 1);
-        assert!(animation
-            .frames
-            .iter()
-            .flat_map(|frame| &frame.pixels)
-            .any(|pixel| pixel.a() < 250));
     }
 }

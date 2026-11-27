@@ -96,23 +96,18 @@ formats replies for the terminal or prints JSON when given `--json`.
 `--ctl quit` uses the normal shutdown path and waits for the identified
 process to exit.
 
-SQLite, TDLib receiving and mpv have dedicated owner threads. Telegram's managed
+SQLite, TDLib receiving and audio output have dedicated owner threads. Telegram's managed
 transport uses oneshot responses, a 60-second RPC deadline and short receive
 intervals. Dropping or cancelling a future removes its registry entry immediately;
 late replies are discarded. Gateway requests/updates and auth operations are typed.
 JSON and the C API stay in adapters; tdlib-rs 1.4.0 remains pinned and supplies API
 types. A closed allowlist preserves read-only behavior and online=false.
 
-The desktop's default `mpv` feature links libmpv through `rsmpv`. Development
-builds with `--no-default-features` can run the demo without libmpv or TDLib.
-The owner thread owns the mpv handle, executes commands and samples native
-properties outside the snapshot mutex.
-A brief lock publishes a complete typed snapshot; readers never wait for native
-property calls. Submission and native failures use AppError. Commands/events are correlated with
-loads and mpv playlist entry IDs, so stale EOF and manual Stop cannot advance a
-new queue entry. Native events and submitted commands wake the owner. The
-owner only samples position on a timer while playing or seeking. Initialization
-errors retain the original cause.
+The `audio` feature uses Symphonia for audio decoding, libopus for Opus,
+and Rodio over CPAL for output. Decoder workers read network data and fill
+bounded PCM rings outside the audio callback. One persistent Rodio source
+combines tracks in the output device's format. Generations fence stale EOF
+and worker results after Stop, Seek or a new load.
 
 HTTP uses axum on 127.0.0.1 with a random port and a getrandom token. GET and HEAD
 support single byte ranges via http-range-header. Unsatisfiable ranges return 416;
@@ -128,7 +123,7 @@ cancels the TDLib transfer only when its last consumer disappears.
 TDLib's temporary media cache is measured and trimmed through its storage API.
 The desktop serializes cleanup with statistics reads. Audio and artwork use
 separate cache leases. Manual cleanup runs available categories and retains the
-rest until their leases and any active Telegram stream release access. mpv keeps
+rest until their leases and any active Telegram stream release access. The decoder keeps
 an opened local file usable while its cache path is removed. SQLite,
 authorization data and published offline copies are outside the cleanup scope. An unpinned file can remain in the
 automatic audio cache at the same path. Gramwave accounts for these files by
@@ -137,7 +132,7 @@ Custom emoji use the same temporary media cache.
 Caption entities and chat status IDs are persisted alongside library metadata.
 The desktop decodes emoji off the UI thread and repaints visible animations.
 
-Shutdown stops commands, cancels operations, stops streaming/mpv, closes Telegram,
+Shutdown stops commands, cancels operations, stops streaming and audio output, closes Telegram,
 awaits task results and flushes/stops the repository against one 15-second deadline.
 Timeout is an error and Drop performs no repeated blocking wait. A stuck native
 thread cannot be forcibly killed by Rust and may remain until process exit.
@@ -182,13 +177,37 @@ Set `GRAMWAVE_TELEGRAM_CONFIG` at build time to enable Telegram sign-in in eithe
 of these variants.
 
 - OpenGL with downloaded TDLib uses
-  `cargo build --release --locked --no-default-features --features mpv,download-tdlib`.
+  `cargo build --release --locked --no-default-features --features audio,webm-emoji,download-tdlib`.
 - With an installed TDLib 1.8.61, set `GRAMWAVE_TDLIB_DIR` to its installation
-  prefix and run `cargo build --release --locked --no-default-features --features mpv,telegram,vulkan`.
+  prefix and run `cargo build --release --locked --no-default-features --features audio,webm-emoji,telegram,vulkan`.
 
 Source chat and message links use `gio` and a registered `tg://` handler such as
-Telegram Desktop. Transparent video emoji use FFmpeg's `libvpx-vp9` decoder and
-fall back to a thumbnail or the associated Unicode emoji when decoding fails.
+Telegram Desktop. Transparent video emoji use webm-iterable for the container
+and rusty_vp9 for the colour stream and the alpha stream in BlockAdditional ID 1.
+They fall back to a thumbnail or the associated Unicode emoji on decode failure.
+The decoder checks VP9 dimensions before allocating planes, including hidden
+frames, and preserves the renderer's input, frame, time and cancellation limits.
+
+### Streaming and queue transitions
+
+The application reserves the next queue occurrence and resolves its local path
+or loopback stream during playback. Speculative Telegram reads use lower
+priority and ranges of up to 1 MiB. Once the next track has PCM available,
+Rodio can switch at a frame boundary on natural EOF or manual Next. If the
+matching stream still needs bytes, it continues at playback priority.
+A manual promotion is addressed to its request and advances the queue once.
+
+CBR MP3 with a valid Info header can seek directly to an undownloaded range.
+VBR or unclassified MP3 uses accurate frame scanning, which can wait for the
+intervening bytes. The saved position updates after PCM at the requested
+position is ready. Native tests cover a split-tone VBR track, direct CBR range
+requests and cancellation.
+
+Ogg can open from its initial pages. The local Cargo patch pins the ISO/MP4
+demuxer from Symphonia 0.6.1 and skips known-size media payloads during the
+index scan. This lets M4A preparation fetch a trailing index independently
+while intervening audio is still unavailable. Remove the patch when the
+published demuxer passes `m4a_prefetch_reads_the_index_from_the_tail`.
 
 ## Verification
 
@@ -203,11 +222,12 @@ cargo build --workspace --locked --release --no-default-features
 cargo test --workspace --locked --features native-tests --lib -- --test-threads=1
 ```
 
-Native checks require the libmpv development package, TDLib and permission to
-bind loopback sockets.
+Native checks use the platform audio development libraries, TDLib with default
+features, and permission to bind loopback sockets. The opt-in CPAL test also
+needs an output device or an ALSA null device.
 Desktop checks run scripts/check-control.py and scripts/check-mpris.py in a graphical
 D-Bus session. Run `scripts/check-control.py --headless` to exercise the CLI and
 detached startup without a display. Capture demo screenshots in both light and dark themes. Default demo
-starts no SQLite, Telegram, mpv, tray or MPRIS services; desktop integrations require
+starts no SQLite, Telegram, audio output, tray or MPRIS services; desktop integrations require
 --desktop-integrations. Authenticated playback, audible output and tray/window
 restoration require manual verification before release.

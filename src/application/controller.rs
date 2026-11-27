@@ -9,6 +9,10 @@ use std::{path::PathBuf, sync::mpsc};
 mod artwork;
 pub(crate) enum Event {
     Noop,
+    NextPlaybackPrepared(
+        application::tasks::RequestId,
+        Option<application::ports::QueuedPlayback>,
+    ),
     Cache {
         connection: u64,
         job: super::cache::CacheJob,
@@ -83,6 +87,11 @@ pub(crate) struct DesktopApp {
     pub(crate) cache_playback: super::cache::CachePlayback,
     pub(crate) local_playback: Option<(crate::domain::TrackId, String)>,
     pub(crate) queued_playback: Option<application::ports::QueuedPlayback>,
+    pub(crate) preparing_next: Option<(
+        crate::domain::QueueEntryId,
+        u64,
+        application::tasks::Operation,
+    )>,
     pub(crate) handoff_running: bool,
     pub(crate) handoff_retry: std::collections::HashMap<String, std::time::Instant>,
     pub(crate) offline_selected: std::collections::BTreeSet<i64>,
@@ -152,7 +161,7 @@ impl DesktopApp {
         let crate::bootstrap::Services {
             wake,
             root,
-            core: state,
+            core: mut state,
             repository: db,
             player,
             player_error,
@@ -161,6 +170,11 @@ impl DesktopApp {
             tray,
             demo,
         } = services;
+        state.enable_streamed_next(
+            player
+                .as_ref()
+                .is_some_and(|player| player.prepares_streamed_next()),
+        );
         let opened_chat = state.view().startup_chat();
         let (tx, rx) = mpsc::channel();
         Self {
@@ -196,6 +210,7 @@ impl DesktopApp {
             cache_playback: Default::default(),
             local_playback: None,
             queued_playback: None,
+            preparing_next: None,
             handoff_running: false,
             handoff_retry: Default::default(),
             offline_selected: Default::default(),
@@ -636,6 +651,9 @@ impl DesktopApp {
             received += 1;
             match e {
                 Event::Noop => {}
+                Event::NextPlaybackPrepared(request, next) => {
+                    self.next_playback_prepared(request, next)
+                }
                 Event::Cache {
                     connection,
                     job,

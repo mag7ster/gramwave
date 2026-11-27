@@ -19,6 +19,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub(super) const PREFETCH_HEADER: &str = "x-gramwave-prefetch";
+
 pub struct Server {
     cancel: CancellationToken,
     done: Option<mpsc::Receiver<Result<(), String>>>,
@@ -166,11 +168,15 @@ async fn response(
     if method == Method::HEAD {
         return Ok(builder.body(Body::empty()).unwrap());
     }
+    let speculative = headers
+        .get(PREFETCH_HEADER)
+        .is_some_and(|value| value == "1");
     let transfer = Transfer {
         endpoint,
         id,
         position: start,
         end,
+        speculative,
         _admission: admission,
         _active: active,
         lease: None,
@@ -191,6 +197,7 @@ struct Transfer {
     id: i64,
     position: u64,
     end: u64,
+    speculative: bool,
     _admission: OwnedSemaphorePermit,
     _active: OwnedSemaphorePermit,
     lease: Option<DownloadLease>,
@@ -215,6 +222,7 @@ impl Transfer {
             id,
             position,
             end,
+            speculative,
             ..
         } = *self;
         let lease = match &mut self.lease {
@@ -222,7 +230,12 @@ impl Transfer {
             slot @ None => slot.insert(
                 endpoint
                     .tg
-                    .begin_download(id, position, false, &endpoint.cancel)
+                    .begin_stream_download(
+                        id,
+                        position,
+                        if speculative { end - position + 1 } else { 0 },
+                        &endpoint.cancel,
+                    )
                     .await
                     .map_err(|e| e.to_string())?,
             ),

@@ -57,6 +57,10 @@ pub struct PlaybackCore {
     pub(crate) active: Option<Operation>,
     pub(crate) target: Option<Track>,
     pub(crate) revision: u64,
+    pub(crate) streamed_next: bool,
+    pub(crate) promoting_next: bool,
+    pub(crate) waiting_for_next_pcm: bool,
+    pub(crate) repeat_cycle: Option<Vec<gramwave_domain::QueueEntryId>>,
     pub(crate) snapshot: PlayerSnapshot,
     pub(crate) queue_removals: Vec<PendingQueueRemoval>,
     pub(crate) removal_serial: u64,
@@ -81,6 +85,12 @@ impl PlaybackCore {
     }
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+    pub fn promoting_next(&self) -> bool {
+        self.promoting_next
+    }
+    pub fn shows_loading(&self) -> bool {
+        self.state.loading() && (!self.promoting_next || self.waiting_for_next_pcm)
     }
     pub fn queue_removals(&self, now: Instant) -> impl Iterator<Item = QueueRemovalNotice> + '_ {
         self.queue_removals
@@ -107,6 +117,9 @@ impl PlaybackCore {
     }
     pub(crate) fn cancel(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.repeat_cycle = None;
+        self.promoting_next = false;
+        self.waiting_for_next_pcm = false;
         if let Some(op) = self.active.take() {
             op.cancel.cancel();
         }
@@ -155,6 +168,14 @@ impl PlaybackCore {
                 | PlaybackMutation::Repeat(_)
                 | PlaybackMutation::Clear
         );
+        if !matches!(
+            &command,
+            PlaybackMutation::Advance(_)
+                | PlaybackMutation::Volume(_)
+                | PlaybackMutation::Current(_)
+        ) {
+            self.repeat_cycle = None;
+        }
         let mut play = None;
         match command {
             PlaybackMutation::Volume(value) => {
@@ -213,7 +234,7 @@ impl PlaybackCore {
             PlaybackMutation::Advance(eof) => {
                 play = state
                     .session
-                    .advance(state.repeat, state.shuffle, eof)
+                    .advance_with_cycle(state.repeat, state.shuffle, eof, self.repeat_cycle.take())
                     .map(Into::into)
             }
             PlaybackMutation::Previous => play = state.session.previous().map(Into::into),

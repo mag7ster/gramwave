@@ -549,3 +549,126 @@ fn undo_current_loads_its_checkpoint_with_the_original_pause_state() {
         .iter()
         .any(|effect| matches!(effect, Effect::Player(PlayerCommand::Pause(true)))));
 }
+
+#[test]
+fn streamed_advance_uses_the_reserved_shuffle_cycle() {
+    let mut state = State {
+        repeat: gramwave_domain::RepeatMode::All,
+        shuffle: true,
+        ..State::default()
+    };
+    state
+        .session
+        .start(&[track(1), track(2), track(3)], 2, false);
+    let mut core = AppCore::new(state);
+    core.enable_streamed_next(true);
+    core.playback.state = crate::playback::PlaybackState::Playing;
+    let (next, revision, _) = core.next_streamed_playback().unwrap();
+    assert_ne!(next.message, 3);
+    assert_eq!(
+        core.next_streamed_playback().unwrap().0.entry_id,
+        next.entry_id
+    );
+    let effects = core.event(AppEvent::Player(PlaybackEvent::Advanced(QueuedPlayback {
+        entry_id: next.entry_id,
+        revision,
+        path: "http://127.0.0.1:1/token/1".into(),
+    })));
+    assert_eq!(
+        core.view().session.current().unwrap().entry_id,
+        next.entry_id
+    );
+    assert_eq!(core.view().session.remaining().len(), 2);
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PlaybackAdvanced(_))));
+}
+
+#[test]
+fn streamed_repeat_one_plans_the_current_occurrence() {
+    let mut state = State {
+        repeat: gramwave_domain::RepeatMode::One,
+        ..State::default()
+    };
+    state
+        .session
+        .start(&[track(1), track(1), track(2)], 0, false);
+    let mut core = AppCore::new(state);
+    core.enable_streamed_next(true);
+    core.playback.state = crate::playback::PlaybackState::Playing;
+    let (next, revision, _) = core.next_streamed_playback().unwrap();
+    let current = core.view().session.current().unwrap().entry_id;
+    assert_eq!(next.entry_id, current);
+    let effects = core.event(AppEvent::Player(PlaybackEvent::Advanced(QueuedPlayback {
+        entry_id: current,
+        revision,
+        path: "http://127.0.0.1:1/token/1".into(),
+    })));
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::PlaybackAdvanced(_))));
+    assert_eq!(core.view().session.current().unwrap().entry_id, current);
+    let remaining = core.view().session.remaining()[0].entry_id;
+    core.command(AppCommand::Next);
+    assert_eq!(core.view().session.current().unwrap().entry_id, remaining);
+}
+
+#[test]
+fn manual_next_promotes_once_and_disregards_superseded_completion() {
+    let mut state = State::default();
+    state
+        .session
+        .start(&[track(1), track(2), track(3)], 0, false);
+    let mut core = AppCore::new(state);
+    core.enable_streamed_next(true);
+    core.playback.state = crate::playback::PlaybackState::Playing;
+    let effects = core.command(AppCommand::Next);
+    let (request, next) = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Player(PlayerCommand::PromoteNext {
+                request,
+                entry_id,
+                revision,
+            }) => Some((
+                *request,
+                QueuedPlayback {
+                    entry_id: *entry_id,
+                    revision: *revision,
+                    path: "next.ogg".into(),
+                },
+            )),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Player(PlayerCommand::Stop))));
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Notice(crate::notice::Notice::LoadingTrack))));
+    assert!(!core.playback.shows_loading());
+    core.event(AppEvent::Player(PlaybackEvent::Finished));
+    core.event(AppEvent::Player(PlaybackEvent::NextPromoted(
+        request,
+        next.clone(),
+    )));
+    assert_eq!(core.view().session.current().unwrap().message, 2);
+    assert!(!core.playback.promoting_next());
+    core.command(AppCommand::Next);
+    assert!(!core.playback.shows_loading());
+    core.event(AppEvent::Player(PlaybackEvent::NextBuffering(request)));
+    assert!(!core.playback.shows_loading());
+    let pending = core.playback.active.as_ref().unwrap().key();
+    core.event(AppEvent::Player(PlaybackEvent::NextBuffering(pending)));
+    assert!(core.playback.shows_loading());
+    assert!(core
+        .event(AppEvent::Player(PlaybackEvent::NextPromoted(request, next)))
+        .is_empty());
+    assert_eq!(core.view().session.current().unwrap().message, 3);
+    core.command(AppCommand::Stop);
+    assert!(!core.playback.shows_loading());
+    assert!(core
+        .event(AppEvent::Player(PlaybackEvent::NextUnavailable(request)))
+        .is_empty());
+}

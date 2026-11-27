@@ -7,7 +7,7 @@ Gramwave is a read-only Telegram music player for Linux, built with Rust 2021 an
 - `crates/domain/`: models and queue rules; keep free of GUI, database, filesystem, and network dependencies.
 - `crates/application/`: commands, ports, reducers, persistence contracts, and task scheduler.
 - `src/application/`: desktop presentation controller, control surfaces, and effect execution.
-- `src/adapters/`: TDLib, SQLite, mpv, streaming, offline storage, and desktop integrations.
+- `src/adapters/`: TDLib, SQLite, audio output, streaming, offline storage, and desktop integrations.
 - `src/screens.rs`, `src/ui.rs`, `src/design.rs`: interface and styling.
 - `tests/`: desktop integration tests and workspace architecture checks.
 - `assets/`: SVG icons, desktop entry, and gettext catalogs. `scripts/` contains translation updates and smoke checks.
@@ -48,7 +48,7 @@ Use the narrowest test that can reproduce the failure through the relevant entry
 
 Automate UI behavior that matters to users, such as keyboard access, queue interactions, seeking, and controls remaining usable during resize. Check cosmetic changes such as spacing, opacity, and animation motion in the demo. UI changes should include demo screenshots in light and dark themes.
 
-Run native checks with `cargo test --workspace --locked --features native-tests --lib -- --test-threads=1`. These require libmpv, TDLib, and loopback sockets. Run `scripts/check-control.py` and `scripts/check-mpris.py` for desktop integration in a graphical D-Bus session. Authenticated playback needs manual verification. See [Verification](ARCHITECTURE.md#verification) for the full command matrix.
+Run native checks with `cargo test --workspace --locked --features native-tests --lib -- --test-threads=1`. These require the platform audio development libraries, TDLib, and loopback sockets. Run `scripts/check-control.py` and `scripts/check-mpris.py` for desktop integration in a graphical D-Bus session. Authenticated playback needs manual verification. See [Verification](ARCHITECTURE.md#verification) for the full command matrix.
 
 ## Commit & Pull Request Guidelines
 
