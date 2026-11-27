@@ -232,7 +232,7 @@ fn play_all_starts_the_playlist_when_the_search_has_no_results() {
 }
 
 #[test]
-fn playlist_pin_is_last_in_the_menu_after_the_sort_control() {
+fn playlist_pin_remains_in_the_playlist_menu() {
     let mut h = Harness::new();
     h.size.y = 620.;
     h.settle();
@@ -268,7 +268,7 @@ fn playlist_pin_is_last_in_the_menu_after_the_sort_control() {
     let toolbar = render(&mut h);
     assert!(!toolbar.contains_key("Unpin chat"));
     let menu = toolbar["…"];
-    assert!(toolbar["Newest first"].x < menu.x);
+    assert!(toolbar.contains_key("Newest first"));
     h.click(menu);
     let actions = render(&mut h);
     let unpin = actions["Unpin chat"];
@@ -689,7 +689,12 @@ fn keyboard_selection_grows_shrinks_and_skips_playlist_menu_buttons() {
     use egui::{Key, Modifiers};
     let mut h = Harness::new();
     let tracks = h.app.playlist_tracks(0);
-    let scope = selection::scope(0, "", h.app.sort, h.app.state.view().playlists[0].filters);
+    let scope = selection::scope(
+        0,
+        "",
+        h.app.state.view().playlists[0].filters,
+        h.app.playlist_order,
+    );
     let key = |i: usize| egui::Id::new((0i64, tracks[i].library_id, tracks[i].id()));
     h.ctx
         .memory_mut(|m| m.request_focus(h.app.test_row_ids[&tracks[0].message]));
@@ -718,7 +723,12 @@ fn playlist_drag_waits_for_a_second_row_and_outside_clicks_clear_the_range() {
     let (first, _) = h.app.test_rows[&0];
     let start = first.center();
     let to = h.app.test_rows[&1].0.center();
-    let scope = selection::scope(0, "", h.app.sort, h.app.state.view().playlists[0].filters);
+    let scope = selection::scope(
+        0,
+        "",
+        h.app.state.view().playlists[0].filters,
+        h.app.playlist_order,
+    );
     h.pointer(start, true);
     h.time += 0.5;
     let within = start + egui::vec2(12., 0.);
@@ -822,7 +832,12 @@ fn playlist_drag_shrinks_and_ctrl_restores_the_original_groups() {
     h.size = egui::vec2(1240., 800.);
     h.settle();
     let tracks = h.app.playlist_tracks(0);
-    let scope = selection::scope(0, "", h.app.sort, h.app.state.view().playlists[0].filters);
+    let scope = selection::scope(
+        0,
+        "",
+        h.app.state.view().playlists[0].filters,
+        h.app.playlist_order,
+    );
     let keys: Vec<_> = tracks
         .iter()
         .take(5)
@@ -884,7 +899,12 @@ fn playlist_edge_scroll_selects_hidden_rows_and_shrinks_on_the_way_back() {
     h.settle();
     let (viewport, initial) = h.list_scroll("test-playlist-scroll");
     let tracks = h.app.playlist_tracks(0);
-    let scope = selection::scope(0, "", h.app.sort, h.app.state.view().playlists[0].filters);
+    let scope = selection::scope(
+        0,
+        "",
+        h.app.state.view().playlists[0].filters,
+        h.app.playlist_order,
+    );
     let selected = |h: &Harness, at: usize| {
         let track = &tracks[at];
         h.app
@@ -1002,4 +1022,61 @@ fn single_track_menu_places_open_source_message_above_copy() {
     let open = menu_text(&mut h, "Open source message")[0];
     let copy = menu_text(&mut h, "Copy message link")[0];
     assert!(copy.y > open.y);
+}
+
+#[test]
+fn playlist_sort_starts_at_the_top_then_keeps_browsed_tracks_in_view() {
+    use gramwave_domain::PlaylistOrder;
+
+    let mut h = Harness::new();
+    let key = "test-playlist-scroll";
+    h.settle();
+    h.app.playlist_order = PlaylistOrder::OldestFirst;
+    h.settle();
+    assert_eq!(h.list_scroll(key).1, 0.);
+    assert!(h.app.test_rows.contains_key(&39));
+
+    let (viewport, _) = h.list_scroll(key);
+    h.frame(vec![
+        egui::Event::PointerMoved(viewport.center()),
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0., -800.),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    h.settle();
+    h.settle();
+    let (viewport, before) = h.list_scroll(key);
+    assert!(before > 200.);
+    let (id, y) = h
+        .app
+        .test_rows
+        .iter()
+        .filter(|(_, (rect, _))| viewport.contains(rect.center()))
+        .min_by_key(|(_, (rect, _))| (rect.center().y - viewport.center().y).abs().to_bits())
+        .map(|(&id, (rect, _))| (id, rect.center().y - viewport.top()))
+        .unwrap();
+    h.app.playlist_order = PlaylistOrder::NewestFirst;
+    h.settle();
+    let (viewport, after) = h.list_scroll(key);
+    assert!((before - after).abs() > 100.);
+    assert!((h.app.test_rows[&id].0.center().y - viewport.top() - y).abs() < 1.);
+
+    h.frame(vec![
+        egui::Event::PointerMoved(viewport.center()),
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0., 10_000.),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    h.settle();
+    h.settle();
+    assert_eq!(h.list_scroll(key).1, 0.);
+    h.app.playlist_order = PlaylistOrder::OldestFirst;
+    h.settle();
+    assert!(h.list_scroll(key).1 > before);
 }

@@ -375,7 +375,7 @@ fn offline_search_follows_server_cursors_through_short_pages_for_ten_thousand_tr
         let mut cursor = 0;
         let mut count = 0;
         loop {
-            let page = offline_page(&tg, 42, 0, cursor, &Default::default())
+            let page = media_page(&tg, 42, 0, cursor, &Default::default())
                 .await
                 .unwrap();
             assert_eq!(page.tracks.len(), 50);
@@ -418,7 +418,7 @@ fn filtered_non_music_page_keeps_server_watermark() {
     });
     let page = tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(offline_page(&tg, 42, 1, 0, &Default::default()))
+        .block_on(media_page(&tg, 42, 1, 0, &Default::default()))
         .unwrap();
     assert!(page.tracks.is_empty());
     assert_eq!((page.next, page.newest), (300, 500));
@@ -473,7 +473,7 @@ fn public_library_boundaries_preserve_telegram_codes_and_cancellation() {
                 expected
             );
             assert_eq!(
-                offline_page(&tg, 42, 0, 0, &cancel).await.unwrap_err(),
+                media_page(&tg, 42, 0, 0, &cancel).await.unwrap_err(),
                 expected
             );
         });
@@ -515,5 +515,73 @@ fn malformed_chat_lists_and_metadata_are_protocol_errors() {
         chat_response(&json!({"type":{"@type":"chatTypeSecret"}}), [true; 3])
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn oldest_media_verifies_short_windows_and_keeps_filtered_cursor_progress() {
+    use gramwave_application::telegram::MediaPage;
+    let mut calls = Vec::new();
+    let result = ascending_page(100, |cursor, offset| {
+        calls.push((cursor, offset));
+        let (newest, next, ids): (_, _, &[_]) = match calls.len() {
+            1 => (300, 0, &[300]), // A short window omitted 200.
+            2 => (300, 250, &[300]),
+            3 => (250, 80, &[200]), // 250 is a document that isn't playable.
+            _ => panic!("unexpected request"),
+        };
+        std::future::ready(Ok(MediaPage {
+            newest,
+            next,
+            tracks: ids
+                .iter()
+                .map(|&message| gramwave_application::media::MediaTrack {
+                    message,
+                    ..Default::default()
+                })
+                .collect(),
+        }))
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls, [(1 << 20, -99), (300, 0), (250, 0)]);
+    assert_eq!(result.next, 300);
+    assert_eq!(
+        result.tracks.iter().map(|t| t.message).collect::<Vec<_>>(),
+        [200, 300]
+    );
+}
+
+#[tokio::test]
+async fn empty_oldest_window_uses_descending_search_instead_of_ending_early() {
+    use gramwave_application::telegram::MediaPage;
+    let mut calls = Vec::new();
+    let result = ascending_page(1 << 21, |cursor, offset| {
+        calls.push((cursor, offset));
+        let (newest, next, track) = match calls.len() {
+            1 => (0, 0, None),
+            2 => (6 << 20, 5 << 20, Some(6 << 20)),
+            3 => (4 << 20, 1 << 20, Some(4 << 20)),
+            _ => panic!("unexpected request"),
+        };
+        std::future::ready(Ok(MediaPage {
+            newest,
+            next,
+            tracks: track
+                .into_iter()
+                .map(|message| gramwave_application::media::MediaTrack {
+                    message,
+                    ..Default::default()
+                })
+                .collect(),
+        }))
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls, [(1 << 21, -99), (0, 0), (5 << 20, 0)]);
+    assert_eq!(result.next, 0);
+    assert_eq!(
+        result.tracks.iter().map(|t| t.message).collect::<Vec<_>>(),
+        [4 << 20, 6 << 20]
     );
 }

@@ -88,6 +88,15 @@ pub(super) fn text(request: Option<&Request>, data: &Value) -> String {
     if let Some(current) = current.filter(|_| past) {
         let _ = writeln!(out, "> {}  {}", current["row"], track(current));
     }
+    if let Some(row) = data["deferred_from_row"].as_u64() {
+        let _ = writeln!(
+            out,
+            "{}",
+            tr("More tracks will play before row {row}").replace("{row}", &row.to_string())
+        );
+    } else if data["playlist_pending"].as_bool() == Some(true) {
+        let _ = writeln!(out, "{}", tr("More tracks from the source chat"));
+    }
     if let Some(next) = data["next_offset"].as_i64() {
         let command = if let Some(Request::Search { query, .. }) = request {
             let query = label(query).replace('\'', "'\\''");
@@ -116,10 +125,20 @@ pub(super) fn text(request: Option<&Request>, data: &Value) -> String {
 
 fn status(data: &Value) -> String {
     let mut out = String::new();
+    if let Some(error) = data["queue_error"].as_str() {
+        let _ = writeln!(
+            out,
+            "{} {}",
+            tr("Could not load the rest of the queue"),
+            label(error)
+        );
+    }
     if data["current"].is_null() {
         let _ = writeln!(out, "{}", tr("No track selected"));
     } else {
-        let state = if data["loading"].as_bool() == Some(true) {
+        let state = if data["queue_waiting"].as_bool() == Some(true) {
+            tr("Waiting for more tracks…")
+        } else if data["loading"].as_bool() == Some(true) {
             tr("Loading")
         } else if data["paused"].as_bool() == Some(true) {
             tr("Paused")

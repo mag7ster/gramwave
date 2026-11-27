@@ -216,6 +216,13 @@ impl AppCore {
                         ));
                     } else {
                         self.handle(CoreCommand::Delete(id.chat, vec![id.message]));
+                        if self
+                            .state
+                            .session
+                            .discard_playlist_track(id.chat, id.message)
+                        {
+                            self.record_session_change();
+                        }
                     }
                 }
                 TelegramUpdate::Deleted {
@@ -226,6 +233,9 @@ impl AppCore {
                     if !from_cache {
                         for &message in &messages {
                             self.offline_source_changed(gramwave_domain::TrackId { chat, message });
+                            if self.state.session.discard_playlist_track(chat, message) {
+                                self.record_session_change();
+                            }
                         }
                         self.handle(CoreCommand::Delete(chat, messages));
                     }

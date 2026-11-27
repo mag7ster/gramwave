@@ -13,6 +13,7 @@ pub struct LibraryPatch {
     pub removed: Vec<i64>,
     pub url: Option<String>,
     pub pagination: [Option<(i64, bool)>; 3],
+    pub oldest_page: Option<(usize, i64)>,
 }
 impl LibraryPatch {
     pub fn apply(self, p: &mut Playlist, protected: &HashSet<i64>) {
@@ -22,10 +23,16 @@ impl LibraryPatch {
         if let Some(url) = self.url {
             p.url = url;
         }
+        if let Some((kind, cursor)) = self.oldest_page {
+            p.oldest_cursors[kind] = p.oldest_cursors[kind].max(cursor);
+            if cursor == 0 || (p.cursors[kind] > 0 && cursor >= p.cursors[kind]) {
+                p.done[kind] = true;
+            }
+        }
         for (kind, value) in self.pagination.into_iter().enumerate() {
-            if let Some((cursor, done)) = value {
+            if let Some((cursor, done)) = value.filter(|_| !p.done[kind]) {
                 p.cursors[kind] = cursor;
-                p.done[kind] = done;
+                p.done[kind] = done || (cursor > 0 && p.oldest_cursors[kind] >= cursor);
             }
         }
     }
@@ -61,6 +68,7 @@ pub struct AppCore {
     pub(crate) offline: crate::offline::OfflineCore,
     pub(crate) auth: crate::auth::AuthCore,
     pub(crate) playback: crate::playback::PlaybackCore,
+    pub(crate) queue_work: crate::queue_work::QueueWork,
     pub(crate) library: crate::library::LibraryCore,
     pub(crate) state: State,
     pending: ChangeSet,
@@ -74,6 +82,7 @@ impl AppCore {
             state,
             auth: Default::default(),
             playback: Default::default(),
+            queue_work: Default::default(),
             library: Default::default(),
             offline: crate::offline::OfflineCore::new(Default::default()),
             pending: Default::default(),

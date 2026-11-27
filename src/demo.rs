@@ -101,6 +101,39 @@ pub fn apply(app: &mut App, scenario: &str) {
             });
             app.custom_emoji.set_demo();
         }
+        "oldest-queue" => {
+            use gramwave_domain::PlaylistOrder;
+            for playlist in &mut state.playlists {
+                playlist.tracks.reverse();
+            }
+            app.playlist_order = PlaylistOrder::OldestFirst;
+            let ordered = tracks.iter().cloned().map(Into::into).collect();
+            state
+                .session
+                .start_playlist(ordered, 5, [None; 3], false, app.playlist_order);
+            state.queue_panel_open = true;
+        }
+        "queue-continuation" => {
+            let recent = tracks
+                .iter()
+                .rev()
+                .take(8)
+                .cloned()
+                .map(Into::into)
+                .collect();
+            state.session.start_playlist(
+                recent,
+                3,
+                [Some(31), None, None],
+                false,
+                Default::default(),
+            );
+            state
+                .session
+                .insert(state.playlists[2].tracks[6].clone(), false);
+            state.queue_panel_open = true;
+            app.pane = crate::screens::WorkspacePane::Queue;
+        }
         "queue" | "queue-history" => {
             state.session.start(&tracks, 3, false);
             state.session.jump_to(2);

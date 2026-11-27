@@ -1,3 +1,4 @@
+use super::scroll_anchor::ScrollAnchor;
 use super::{
     art, chat_title_galley, clock, clock_width, full_menu_button, horizontal_slot,
     keyboard::{self, empty_label, focus_outline, ListNavigation, MenuItems},
@@ -9,6 +10,18 @@ use crate::application::commands::AppCommand;
 use crate::{design, tr, App};
 use design::{button, Icon};
 use eframe::egui;
+use gramwave_domain::PlaylistOrder;
+
+#[derive(Clone)]
+struct PlaylistScroll {
+    chat: i64,
+    order: PlaylistOrder,
+    library: u64,
+    query: String,
+    filters: [bool; 3],
+    scrolled: bool,
+    visible: ScrollAnchor<u64>,
+}
 
 impl App {
     fn playlist_menu(&mut self, ui: &mut egui::Ui, selected: usize, chat_id: i64, url: &str) {
@@ -30,13 +43,16 @@ impl App {
     }
 
     fn sort_playlist(&mut self, ui: &mut egui::Ui) {
-        let orders = [tr("Newest first"), tr("Title"), tr("Artist")];
+        let newest = tr("Newest first");
+        let oldest = tr("Oldest first");
         egui::ComboBox::from_id_salt("order")
-            .selected_text(&orders[self.sort])
+            .selected_text(match self.playlist_order {
+                PlaylistOrder::NewestFirst => &newest,
+                PlaylistOrder::OldestFirst => &oldest,
+            })
             .show_ui(ui, |ui| {
-                for (i, label) in orders.iter().enumerate() {
-                    ui.selectable_value(&mut self.sort, i, label);
-                }
+                ui.selectable_value(&mut self.playlist_order, PlaylistOrder::NewestFirst, newest);
+                ui.selectable_value(&mut self.playlist_order, PlaylistOrder::OldestFirst, oldest);
             });
     }
 
@@ -180,6 +196,7 @@ impl App {
             return;
         };
         let chat_id = p.id;
+        let previous_order = self.playlist_order;
         if !dense {
             self.image_wanted
                 .push(self.state.library().playlist_artwork(p.id).file);
@@ -401,6 +418,9 @@ impl App {
             self.execute(AppCommand::Filters(chat_id, filters));
             self.open_chat(selected);
         }
+        if previous_order != self.playlist_order {
+            self.execute(AppCommand::CancelOldestStart(chat_id));
+        }
         let tracks = self.playlist_tracks(selected);
         if play_all {
             self.play_playlist_from(selected, None);
@@ -423,7 +443,8 @@ impl App {
         let loading_id = ui.id().with("empty-playlist");
         let waiting = tracks.is_empty()
             && self.search.is_empty()
-            && self.state.library().indexing_chat() == Some(chat_id)
+            && (self.state.library().indexing_chat() == Some(chat_id)
+                || self.state.oldest_loading(chat_id))
             && self.state.view().playlists[selected].has_more();
         if !waiting {
             ui.data_mut(|data| data.remove::<(i64, f64)>(loading_id));
@@ -467,7 +488,8 @@ impl App {
                 self.open_chat(selected);
             }
         }
-        let scope = selection::scope(chat_id, &self.search, self.sort, filters);
+        let order = self.playlist_order;
+        let scope = selection::scope(chat_id, &self.search, filters, order);
         let key_at = |i: usize| {
             let track = &tracks[i];
             egui::Id::new((chat_id, track.library_id, track.id()))
@@ -478,9 +500,45 @@ impl App {
         let mut batch = None;
         let mut list_frame = track_list_frame().begin(ui);
         let list_ui = &mut list_frame.content_ui;
-        let scroll = list_scroll_area(list_ui)
-            .id_salt(("playlist-tracks", chat_id))
-            .show_rows(list_ui, design::ROW_HEIGHT, tracks.len(), |ui, range| {
+        let key = egui::Id::new("playlist-scroll-anchor");
+        let library = self.state.library_version();
+        let old: Option<PlaylistScroll> = list_ui.ctx().data(|data| data.get_temp(key));
+        let old = old.filter(|old| old.chat == chat_id);
+        let order_changed = old.as_ref().is_some_and(|old| old.order != order);
+        let stride = design::ROW_HEIGHT + list_ui.spacing().item_spacing.y;
+        let area_id = list_ui.make_persistent_id(("playlist-tracks", chat_id));
+        let state = egui::scroll_area::State::load(list_ui.ctx(), area_id).unwrap_or_default();
+        let scrolled = old.as_ref().is_some_and(|old| old.scrolled);
+        let relayout = old.as_ref().is_some_and(|old| {
+            order_changed
+                || (old.library != library && old.query == self.search && old.filters == filters)
+        });
+        let mut area = list_scroll_area(list_ui);
+        let start = if old.is_none() || relayout {
+            let max = tracks.len() as f32 * stride - list_ui.available_height();
+            let offset = old
+                .as_ref()
+                .filter(|old| old.scrolled)
+                .and_then(|old| {
+                    old.visible.offset(stride, max, |id| {
+                        tracks.iter().position(|track| track.library_id == *id)
+                    })
+                })
+                .unwrap_or_default();
+            if old.is_none() || order_changed || (state.offset.y - offset).abs() > 0.01 {
+                // Drop kinetic scrolling when relocating the viewport.
+                egui::scroll_area::State::default().store(list_ui.ctx(), area_id);
+                area = area.vertical_scroll_offset(offset);
+            }
+            offset
+        } else {
+            state.offset.y
+        };
+        let scroll = area.id_salt(("playlist-tracks", chat_id)).show_rows(
+            list_ui,
+            design::ROW_HEIGHT,
+            tracks.len(),
+            |ui, range| {
                 let stride = design::ROW_HEIGHT + ui.spacing().item_spacing.y;
                 let nav = ListNavigation::new(WorkspacePane::Playlist, tracks.len(), stride);
                 let height = (tracks.len() as f32 * stride - ui.spacing().item_spacing.y).max(0.);
@@ -777,7 +835,8 @@ impl App {
                         action = Some((6, i));
                     }
                 }
-            });
+            },
+        );
         list_frame.end(ui);
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
@@ -785,13 +844,65 @@ impl App {
             data.insert_temp(scroll.id.with("test-viewport"), scroll.inner_rect);
         });
         design::middle_scroll(ui, scroll.id, scroll.inner_rect, scroll.content_size.y);
-        let more = self.state.view().playlists[selected].has_more();
-        if more && self.state.library().indexing_chat().is_none() && !self.demo {
-            let at_bottom = scroll.state.offset.y > 0.
-                && scroll.state.offset.y + scroll.inner_rect.height()
-                    >= scroll.content_size.y - 120.;
-            if ui.button(tr("Load more music")).clicked() || at_bottom {
-                self.load_chat(selected, false);
+        let state = egui::scroll_area::State::load(ui.ctx(), scroll.id).unwrap_or(scroll.state);
+        let max = (scroll.content_size.y - scroll.inner_rect.height()).max(0.);
+        let moved = (state.offset.y - start.clamp(0., max)).abs() > 0.01;
+        let visible = ScrollAnchor::capture(
+            tracks.len(),
+            stride,
+            state.offset.y,
+            scroll.inner_rect.height(),
+            |i| tracks[i].library_id,
+        );
+        let query = self.search.clone();
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                key,
+                PlaylistScroll {
+                    chat: chat_id,
+                    order,
+                    library,
+                    query,
+                    filters,
+                    scrolled: scrolled || moved,
+                    visible,
+                },
+            )
+        });
+
+        let playlist = &self.state.view().playlists[selected];
+        if playlist.has_more() && !self.demo {
+            let bottom = state.offset.y + scroll.inner_rect.height();
+            if order == PlaylistOrder::OldestFirst {
+                let frontier = (0..3)
+                    .filter(|&kind| filters[kind] && !playlist.done[kind])
+                    .map(|kind| playlist.oldest_cursors[kind])
+                    .min()
+                    .unwrap_or(i64::MAX);
+                let known = tracks.partition_point(|track| track.message <= frontier);
+                let near = bottom >= known as f32 * stride - 120.;
+                let error = self.state.oldest_error(chat_id);
+                if self.state.oldest_loading(chat_id) {
+                    ui.weak(tr("Loading older history…"));
+                } else if let Some(error) = error {
+                    let message = error.to_string();
+                    if ui.button(tr("Retry")).on_hover_text(message).clicked() {
+                        self.execute(AppCommand::LoadOldest {
+                            chat: chat_id,
+                            retry: true,
+                        });
+                    }
+                } else if ui.button(tr("Load more music")).clicked() || order_changed || near {
+                    self.execute(AppCommand::LoadOldest {
+                        chat: chat_id,
+                        retry: false,
+                    });
+                }
+            } else if self.state.library().indexing_chat().is_none() {
+                let at_bottom = state.offset.y > 0. && bottom >= scroll.content_size.y - 120.;
+                if ui.button(tr("Load more music")).clicked() || at_bottom {
+                    self.load_chat(selected, false);
+                }
             }
         }
         if let Some((batch, row)) = batch {

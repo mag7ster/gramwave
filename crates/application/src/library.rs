@@ -151,6 +151,8 @@ pub struct LibraryCore {
     pub(crate) catalog: Option<Operation>,
     pub(crate) catalog_updates: HashMap<(i64, PersonalChatList), bool>,
     pub(crate) index: Option<IndexOperation>,
+    pub(crate) oldest: Option<(Operation, i64, usize)>,
+    pub(crate) oldest_error: Option<(i64, AppError)>,
     pub(crate) search: SearchState,
     pub(crate) sources: HashSet<TrackId>,
     revisions: HashMap<TrackId, u64>,
@@ -279,6 +281,10 @@ impl LibraryCore {
         }
         self.catalog_updates.clear();
         self.cancel_index();
+        if let Some((op, _, _)) = self.oldest.take() {
+            op.cancel.cancel();
+        }
+        self.oldest_error = None;
         if let Some(op) = self.search.operation.take() {
             op.cancel.cancel();
         }

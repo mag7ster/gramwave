@@ -17,7 +17,7 @@ decide when to start, retry, cancel or accept an operation. Bootstrap constructs
 native services. Immutable views expose library, session and component state;
 there is no mutable offline escape hatch or State Deref. Internal mutation
 commands are private to application. UI row selection resolves the visible
-filtered/sorted list before submitting the session commands also used by CLI,
+filtered list before submitting the session commands also used by CLI,
 tray and MPRIS.
 
 Domain `TrackMetadata` contains message identity and metadata only. A `QueueEntry`
@@ -82,8 +82,8 @@ The ready background queue is bounded at 64; the download backlog stays in SQLit
 Operation IDs, generations and cancellation tokens originate in the core and pass
 unchanged through the scheduler. Panics, cancellation and overload produce addressed terminal outcomes;
 terminal delivery is tracked through shutdown. Progress uses a replaceable slot.
-The UI processes bounded batches and caches filtered/sorted playlist metadata by
-library version, filters, search and sort parameters. Visible rows resolve
+The UI processes bounded batches and caches filtered playlist metadata by
+library version, filters, search and chronological order. Visible rows resolve
 current media and offline state when drawn. The desktop prioritizes visible
 covers, the current and upcoming tracks, and the chat under the pointer.
 Chat search warms avatars near the viewport first, then the remaining results
@@ -194,6 +194,23 @@ The decoder checks VP9 dimensions before allocating planes, including hidden
 frames, and preserves the renderer's input, frame, time and cancellation limits.
 
 ### Streaming and queue transitions
+
+A session started from a chat stores its media cursors, buffered track metadata
+and manually appended occurrence IDs in the session document. Playback requests
+pages independently of the displayed chat and merges the media filters by message
+ID. Oldest-first browsing and playback use verified windows from the old end of
+the same filtered TDLib search. A regular descending search checks the interval
+covered by each window and supplies a fallback when the old boundary cannot be
+confirmed. The library stores independent cursors and marks a filter complete
+when the two indexed ranges meet. Tracks added to the end follow the source history. Play Next stays ahead of
+the history boundary. The application waits at the boundary and uses the normal
+playback preparation path when a page is ready. Existing sessions without
+continuation data restore as finite queues.
+
+The transport's reverse action reverses the timeline around the current
+occurrence. When the source history is incomplete, the action first loads the
+remaining metadata. The current audio keeps its position. An advancing request
+waits until the reverse can apply to the whole timeline.
 
 The application reserves the next queue occurrence and resolves its local path
 or loopback stream during playback. Speculative Telegram reads use lower

@@ -10,6 +10,7 @@ mod playlist;
 mod queue;
 mod queue_notices;
 mod queue_scroll;
+mod scroll_anchor;
 mod selection;
 mod transport;
 pub(crate) use keyboard::Keyboard;
@@ -405,7 +406,11 @@ impl App {
                     .inner_margin(egui::Margin {
                         right: (inset - TRACK_SCROLL_GUTTER).max(4),
                         top: vertical,
-                        bottom: vertical,
+                        bottom: if pane == Some(WorkspacePane::Library) {
+                            vertical
+                        } else {
+                            0
+                        },
                         ..egui::Margin::same(inset)
                     }),
             );
@@ -543,6 +548,7 @@ impl App {
                     .fill(palette.panel)
                     .inner_margin(egui::Margin {
                         right: 20 - TRACK_SCROLL_GUTTER,
+                        bottom: 0,
                         ..egui::Margin::same(20)
                     }),
             )

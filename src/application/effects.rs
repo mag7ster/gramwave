@@ -45,49 +45,68 @@ impl App {
         for effect in effects {
             match effect {
                 Effect::Library(effect) => self.run_library_effect(effect),
-                Effect::ScanOffline {
-                    operation,
-                    chat,
-                    kind,
-                    cursor,
-                } => {
-                    let request = operation.key();
-                    if let Some(tg) = self.tg.clone() {
-                        self.operation_event(
-                            JobClass::Scan,
-                            operation.clone(),
-                            async move {
-                                let result = crate::discovery::offline_page(
-                                    &tg,
-                                    chat,
-                                    kind,
-                                    cursor,
-                                    &operation.cancel,
-                                )
-                                .await;
-                                Event::Application(AppEvent::OfflinePage {
-                                    request,
-                                    chat,
-                                    kind,
-                                    result,
-                                })
-                            },
-                            move |e| {
-                                Event::Application(AppEvent::OfflinePage {
-                                    request,
-                                    chat,
-                                    kind,
-                                    result: Err(e),
-                                })
-                            },
-                        );
-                    } else {
-                        self.core_event(AppEvent::OfflinePage {
-                            request,
+                effect @ (Effect::QueuePage { .. } | Effect::ScanOffline { .. }) => {
+                    let queue = matches!(&effect, Effect::QueuePage { .. });
+                    let (operation, chat, kind, cursor, order, browsing) = match effect {
+                        Effect::QueuePage {
+                            operation,
                             chat,
                             kind,
-                            result: Err(AppError::Unavailable("Telegram")),
-                        });
+                            cursor,
+                            order,
+                            browsing,
+                        } => (operation, chat, kind, cursor, order, browsing),
+                        Effect::ScanOffline {
+                            operation,
+                            chat,
+                            kind,
+                            cursor,
+                        } => (operation, chat, kind, cursor, Default::default(), false),
+                        _ => unreachable!(),
+                    };
+                    let request = operation.key();
+                    let event = move |result| {
+                        if queue {
+                            AppEvent::QueuePage {
+                                request,
+                                result,
+                                browsing,
+                            }
+                        } else {
+                            AppEvent::OfflinePage {
+                                request,
+                                chat,
+                                kind,
+                                result,
+                            }
+                        }
+                    };
+                    if let Some(tg) = self.tg.clone() {
+                        let cancel = operation.cancel.clone();
+                        self.operation_event(
+                            if queue {
+                                JobClass::Background
+                            } else {
+                                JobClass::Scan
+                            },
+                            operation,
+                            async move {
+                                let result = if order == gramwave_domain::PlaylistOrder::OldestFirst
+                                {
+                                    crate::discovery::oldest_media_page(
+                                        &tg, chat, kind, cursor, &cancel,
+                                    )
+                                    .await
+                                } else {
+                                    crate::discovery::media_page(&tg, chat, kind, cursor, &cancel)
+                                        .await
+                                };
+                                Event::Application(event(result))
+                            },
+                            move |error| Event::Application(event(Err(error))),
+                        );
+                    } else {
+                        self.core_event(event(Err(AppError::Unavailable("Telegram"))));
                     }
                 }
                 Effect::DownloadOffline { operation, track } => {

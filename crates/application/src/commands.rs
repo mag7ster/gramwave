@@ -5,6 +5,18 @@ pub enum AppCommand {
     Connect,
     Retry,
     StartSession(Vec<Track>, usize),
+    StartPlaylist {
+        chat: i64,
+        library_id: Option<u64>,
+        order: gramwave_domain::PlaylistOrder,
+    },
+    ReverseQueue,
+    LoadOldest {
+        chat: i64,
+        retry: bool,
+    },
+    CancelOldestStart(i64),
+    RetryQueue,
     Authenticate(crate::telegram::AuthRequest),
     SaveTrack(Track),
     SaveTracks(Vec<Track>),

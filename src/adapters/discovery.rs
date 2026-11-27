@@ -124,7 +124,10 @@ async fn refresh_async<F: std::future::Future<Output = Result<Value, AppError>>>
         let newest = p
             .tracks
             .iter()
-            .filter(|t| usize::from(t.kind) == kind)
+            .filter(|t| {
+                usize::from(t.kind) == kind
+                    && (p.done[kind] || t.message > p.oldest_cursors[kind] || p.cursors[kind] != 0)
+            })
             .map(|t| t.message)
             .max();
         let mut cursor = 0;
@@ -387,8 +390,7 @@ async fn index_async<F: std::future::Future<Output = Result<Value, AppError>>>(
 #[path = "discovery/tests.rs"]
 mod tests;
 
-/// An offline search page has an independent cursor from the displayed library.
-pub(crate) async fn offline_page(
+pub(crate) async fn media_page(
     tg: &Telegram,
     chat: i64,
     kind: usize,
@@ -402,7 +404,93 @@ pub(crate) async fn offline_page(
         2 => crate::domain::MediaKind::Voice,
         _ => return Err(AppError::Protocol("Invalid media filter".into())),
     };
-    tg.search_media(chat, kind, cursor, cancel).await
+    tg.search_media(chat, kind, cursor, 0, cancel).await
+}
+
+pub(crate) async fn oldest_media_page(
+    tg: &Telegram,
+    chat: i64,
+    kind: usize,
+    cursor: i64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<gramwave_application::telegram::MediaPage, AppError> {
+    use gramwave_application::telegram::TelegramGateway;
+    let kind = [
+        crate::domain::MediaKind::Audio,
+        crate::domain::MediaKind::Document,
+        crate::domain::MediaKind::Voice,
+    ]
+    .get(kind)
+    .copied()
+    .ok_or_else(|| AppError::Protocol("Invalid media filter".into()))?;
+    ascending_page(cursor, |from, offset| {
+        tg.search_media(chat, kind, from, offset, cancel)
+    })
+    .await
+}
+
+async fn ascending_page<
+    F: std::future::Future<Output = Result<gramwave_application::telegram::MediaPage, AppError>>,
+>(
+    after: i64,
+    mut search: impl FnMut(i64, i32) -> F,
+) -> Result<gramwave_application::telegram::MediaPage, AppError> {
+    use gramwave_application::telegram::MediaPage;
+
+    // TDLib encodes server message IDs in units of 2²⁰. Zero searches from the newest.
+    const FIRST_SERVER_MESSAGE: i64 = 1 << 20;
+    let window = match search(after.max(FIRST_SERVER_MESSAGE), -99).await {
+        Ok(page) => Some(page),
+        Err(AppError::Telegram { code: 400, .. } | AppError::Protocol(_)) => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(window) = window.filter(|page| page.newest > after) {
+        let high = window.newest;
+        let mut tracks = window.tracks;
+        let mut cursor = high;
+        // A short ascending window can omit the oldest rows in that window.
+        for _ in 0..3 {
+            let page = search(cursor, 0).await?;
+            tracks.extend(page.tracks);
+            if page.next == 0 || page.next <= after {
+                tracks.retain(|track| (after < track.message) && (track.message <= high));
+                tracks.sort_by_key(|track| track.message);
+                tracks.dedup_by_key(|track| track.message);
+                return Ok(MediaPage {
+                    newest: high,
+                    tracks,
+                    next: high,
+                });
+            }
+            if page.next >= cursor {
+                break;
+            }
+            cursor = page.next;
+        }
+    }
+
+    let mut cursor = 0;
+    let mut newest = 0;
+    let mut tracks = Vec::new();
+    loop {
+        let page = search(cursor, 0).await?;
+        newest = newest.max(page.newest);
+        tracks.extend(
+            page.tracks
+                .into_iter()
+                .filter(|track| track.message > after),
+        );
+        if page.next == 0 || page.next <= after || (page.newest != 0 && page.newest <= after) {
+            tracks.sort_by_key(|track| track.message);
+            tracks.dedup_by_key(|track| track.message);
+            return Ok(MediaPage {
+                newest,
+                tracks,
+                next: 0,
+            });
+        }
+        cursor = page.next;
+    }
 }
 
 #[cfg(test)]

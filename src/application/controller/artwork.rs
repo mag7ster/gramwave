@@ -81,7 +81,7 @@ pub(super) struct Prefetch {
     next: usize,
     unfiltered: Option<(PlaylistCacheKey, Arc<Vec<Track>>)>,
     head_tracks: HashMap<i64, Vec<Track>>,
-    head_tracks_version: (u64, usize),
+    head_tracks_version: u64,
     hover: Hover,
     search: SearchArtwork,
     heads: HashMap<(i64, usize), Operation>,
@@ -363,11 +363,7 @@ impl DesktopApp {
             .filter_map(|kind| self.artwork_prefetch.pages.get(&(chat, kind)))
             .flat_map(|(_, tracks)| tracks.iter())
             .collect();
-        match self.sort {
-            1 => preview.sort_by(|a, b| a.title.cmp(&b.title)),
-            2 => preview.sort_by(|a, b| a.artist.cmp(&b.artist)),
-            _ => preview.sort_by_key(|track| std::cmp::Reverse(track.message)),
-        }
+        preview.sort_by_key(|track| std::cmp::Reverse(track.message));
         let preview: Vec<_> = preview.into_iter().take(HEAD_ROWS).cloned().collect();
         for track in preview {
             if self.state.library().source_changed(track.id()) {
@@ -391,7 +387,7 @@ impl DesktopApp {
     }
 
     fn chat_head_tracks(&mut self, chat: i64) -> Vec<Track> {
-        let version = (self.state.library_version(), self.sort);
+        let version = self.state.library_version();
         let prefetch = &mut self.artwork_prefetch;
         if prefetch.head_tracks_version != version {
             prefetch.head_tracks_version = version;
@@ -407,22 +403,7 @@ impl DesktopApp {
             .tracks
             .iter()
             .filter(|track| playlist.filters[usize::from(track.kind)]);
-        let tracks: Vec<Track> = if self.sort == 0 {
-            enabled.take(HEAD_ROWS).cloned().map(Into::into).collect()
-        } else {
-            let mut tracks: Vec<_> = enabled.collect();
-            match self.sort {
-                1 => tracks.sort_by(|a, b| a.title.cmp(&b.title)),
-                2 => tracks.sort_by(|a, b| a.artist.cmp(&b.artist)),
-                _ => {}
-            }
-            tracks
-                .into_iter()
-                .take(HEAD_ROWS)
-                .cloned()
-                .map(Into::into)
-                .collect()
-        };
+        let tracks: Vec<_> = enabled.take(HEAD_ROWS).cloned().map(Into::into).collect();
         if prefetch.head_tracks.len() < 64 {
             prefetch.head_tracks.insert(chat, tracks.clone());
         }

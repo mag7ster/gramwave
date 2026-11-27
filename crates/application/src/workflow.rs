@@ -11,6 +11,14 @@ use crate::{
 
 pub enum Effect {
     Library(crate::library::LibraryEffect),
+    QueuePage {
+        operation: Operation,
+        chat: i64,
+        kind: usize,
+        cursor: i64,
+        order: gramwave_domain::PlaylistOrder,
+        browsing: bool,
+    },
     ScanOffline {
         operation: Operation,
         chat: i64,
@@ -55,6 +63,11 @@ pub enum Effect {
 }
 pub enum AppEvent {
     Library(crate::library::LibraryEvent),
+    QueuePage {
+        request: RequestId,
+        browsing: bool,
+        result: Result<crate::telegram::MediaPage, AppError>,
+    },
     OfflinePage {
         request: RequestId,
         chat: i64,
@@ -105,11 +118,17 @@ impl AppCore {
             .loading()
             .then(|| self.playback.target.as_ref().map(Track::id))
             .flatten();
-        self.offline.pump(now, online, opening)
+        let mut effects = self.offline.pump(now, online, opening);
+        if online {
+            self.pump_queue(&mut effects);
+            self.pump_oldest_start(&mut effects);
+        }
+        effects
     }
 
     pub fn shutdown_operations(&mut self) {
         self.playback.cancel();
+        self.queue_work.cancel_page();
         self.auth.cancel();
         self.offline.cancel_work();
         self.library.cancel_operations();
@@ -152,8 +171,13 @@ impl AppCore {
         }
         let session = &self.state.session;
         let current = session.current()?;
-        let next = if self.state.repeat == RepeatMode::One {
+        let next = if self.state.repeat == RepeatMode::One
+            && !self.queue_reversing()
+            && !self.queue_waiting()
+        {
             current
+        } else if self.queue_blocks_advance(false) {
+            return None;
         } else if let Some(next) = session.remaining().first() {
             next
         } else if self.state.repeat == RepeatMode::All {
@@ -188,8 +212,13 @@ impl AppCore {
         }
         let session = &self.state.session;
         let current = session.current()?;
-        let next = if self.state.repeat == RepeatMode::One {
+        let next = if self.state.repeat == RepeatMode::One
+            && !self.queue_reversing()
+            && !self.queue_waiting()
+        {
             current
+        } else if self.queue_blocks_advance(false) {
+            return None;
         } else {
             session.remaining().first().or_else(|| {
                 // A shuffled repeat cycle is decided when the current track ends.
@@ -218,6 +247,17 @@ impl AppCore {
     pub fn command(&mut self, command: AppCommand) -> Vec<Effect> {
         let mut effects = Vec::new();
         let advancing = matches!(&command, AppCommand::Next | AppCommand::Advance(_));
+        if advancing {
+            let eof = matches!(&command, AppCommand::Advance(true));
+            if self.queue_blocks_advance(eof) {
+                self.queue_work.waiting = Some(eof && self.queue_work.waiting != Some(false));
+                if !eof {
+                    self.queue_work.error = None;
+                }
+                return effects;
+            }
+            self.queue_work.waiting = None;
+        }
         let mut play = None;
         let mut prepared_next = None;
         let mut pause_after_load = None;
@@ -226,6 +266,7 @@ impl AppCore {
                 if !self.library.connected() {
                     self.auth.cancel();
                     self.playback.cancel();
+                    self.queue_work.cancel_page();
                     self.library.invalidate();
                     self.auth
                         .transition(crate::telegram::AuthorizationState::Starting);
@@ -322,14 +363,36 @@ impl AppCore {
                 }
             }
             AppCommand::StartSession(tracks, index) => {
+                self.queue_work.reset();
                 play = self.handle(CoreCommand::Start(tracks, index));
                 if play.is_some() {
                     self.playback.queue_removals.clear();
                 }
             }
-            AppCommand::Play(track) => play = Some(track),
-            AppCommand::PlayQueue(id) => play = self.handle(CoreCommand::Jump(id)),
+            AppCommand::StartPlaylist {
+                chat,
+                library_id,
+                order,
+            } => {
+                play = self.start_playlist_queue(chat, library_id, order);
+                self.pump_oldest_start(&mut effects);
+            }
+            AppCommand::LoadOldest { chat, retry } => {
+                self.request_oldest(chat, retry, &mut effects)
+            }
+            AppCommand::CancelOldestStart(chat) => self.cancel_oldest_start(chat),
+            AppCommand::ReverseQueue => self.request_queue_reverse(),
+            AppCommand::RetryQueue => self.retry_queue_page(),
+            AppCommand::Play(track) => {
+                self.queue_work.waiting = None;
+                play = Some(track);
+            }
+            AppCommand::PlayQueue(id) => {
+                self.queue_work.waiting = None;
+                play = self.handle(CoreCommand::Jump(id));
+            }
             AppCommand::PlayQueueRow { index, entry_id } => {
+                self.queue_work.waiting = None;
                 play = self.handle(CoreCommand::PlayQueueRow(index, entry_id))
             }
             AppCommand::Next => {
@@ -343,11 +406,16 @@ impl AppCore {
             AppCommand::Advance(eof) => play = self.handle(CoreCommand::Advance(eof)),
             AppCommand::Previous => {
                 if !self.playback.state.loading() && self.playback.snapshot.position > 3. {
+                    self.queue_work.waiting = None;
                     return vec![Effect::Player(PlayerCommand::Seek(0.)), Effect::ClearSeek];
                 }
                 play = self.handle(CoreCommand::Previous);
+                if play.is_some() {
+                    self.queue_work.waiting = None;
+                }
             }
             AppCommand::Stop => {
+                self.queue_work.reset();
                 self.playback.cancel();
                 self.playback.state = crate::playback::PlaybackState::Stopped;
                 self.handle(CoreCommand::Stop);
@@ -357,6 +425,7 @@ impl AppCore {
                 if self.state.session.current().is_some() {
                     if !paused
                         && self.playback.state.paused()
+                        && !self.queue_waiting()
                         && !self.playback.state.loading()
                         && (matches!(
                             self.playback.state,
@@ -393,6 +462,7 @@ impl AppCore {
                 self.handle(CoreCommand::Settings(value));
             }
             AppCommand::Filters(id, value) => {
+                self.cancel_oldest_start(id);
                 self.handle(CoreCommand::Filters(id, value));
             }
             AppCommand::Insert(track, next) => {
@@ -425,11 +495,19 @@ impl AppCore {
                     self.playback.repeat_cycle = None;
                     let paused = self.playback.state.paused();
                     if rows.removed_current() {
-                        play = self.state.session.jump_to(0).as_ref().map(Into::into);
+                        if !self.queue_blocks_advance(false) {
+                            play = self.state.session.jump_to(0).map(Into::into);
+                        }
                         if play.is_some() {
                             pause_after_load = Some(paused);
                         } else {
+                            if self.queue_blocks_advance(false) {
+                                self.queue_work.waiting = Some(false);
+                            }
                             self.stop_playback(&mut effects);
+                            if self.queue_waiting() && paused {
+                                self.playback.state = crate::playback::PlaybackState::Paused;
+                            }
                         }
                     }
                     self.playback.removal_serial += 1;
@@ -461,6 +539,7 @@ impl AppCore {
                         .session
                         .restore_timeline_rows(removal.rows, pending)
                     {
+                        self.queue_work.waiting = None;
                         play = self.state.session.current().map(Into::into);
                         pause_after_load = Some(removal.paused);
                     }
@@ -468,6 +547,7 @@ impl AppCore {
                 }
             }
             AppCommand::Clear => {
+                self.queue_work.reset();
                 self.playback.queue_removals.clear();
                 self.handle(CoreCommand::Clear);
             }
@@ -504,6 +584,7 @@ impl AppCore {
         } else if advancing {
             self.stop_playback(&mut effects);
         }
+        self.resume_queue_wait(&mut effects);
         self.persistence_effect(&mut effects);
         effects
     }
@@ -559,6 +640,17 @@ impl AppCore {
         let mut effects = Vec::new();
         match event {
             AppEvent::Library(event) => effects.extend(self.library_event(event)),
+            AppEvent::QueuePage {
+                request,
+                result,
+                browsing,
+            } => {
+                if browsing {
+                    self.receive_oldest(request, result, &mut effects);
+                } else {
+                    self.receive_queue_page(request, result, &mut effects);
+                }
+            }
             AppEvent::OfflinePage {
                 request,
                 chat,
@@ -654,6 +746,7 @@ impl AppCore {
                         );
                     }
                     AuthorizationState::Closed => {
+                        self.queue_work.cancel_page();
                         self.playback.cancel();
                         self.library.invalidate();
                         self.offline.suspend();
@@ -700,7 +793,13 @@ impl AppCore {
                             prepared.track,
                         )));
                         self.playback.target = self.state.session.current().map(Into::into);
-                        if let Some(next) = self.state.session.remaining().first() {
+                        if let Some(next) = self
+                            .state
+                            .session
+                            .remaining()
+                            .first()
+                            .filter(|_| !self.queue_blocks_advance(false))
+                        {
                             effects.push(Effect::Prefetch(next.into()));
                         }
                         if let Some(path) = prepared.path {
@@ -782,7 +881,12 @@ impl AppCore {
                             self.next_local_playback().as_ref() == Some(&next)
                         };
                         if !expected {
-                            return self.command(AppCommand::Advance(true));
+                            let blocked = self.queue_blocks_advance(true);
+                            let mut effects = self.command(AppCommand::Advance(true));
+                            if blocked {
+                                effects.push(Effect::Player(PlayerCommand::Stop));
+                            }
+                            return effects;
                         }
                         self.playback.target = self.handle(CoreCommand::Advance(true));
                         self.playback.revision = next.revision;

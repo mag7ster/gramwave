@@ -98,6 +98,8 @@ pub struct PlaylistHeader {
     pub filters: [bool; 3],
     pub pinned: bool,
     pub cursors: [i64; 3],
+    #[serde(default)]
+    pub oldest_cursors: [i64; 3],
     pub done: [bool; 3],
 }
 impl From<&Playlist> for PlaylistHeader {
@@ -112,6 +114,7 @@ impl From<&Playlist> for PlaylistHeader {
             filters: p.filters,
             pinned: p.pinned,
             cursors: p.cursors,
+            oldest_cursors: p.oldest_cursors,
             done: p.done,
         }
     }

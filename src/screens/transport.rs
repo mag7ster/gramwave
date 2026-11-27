@@ -47,6 +47,27 @@ impl App {
     ) {
         let gap = ui.spacing().item_spacing.x;
         let half_width = 22. + 36. + gap;
+        let point = center - egui::vec2(half_width + gap + (36. + gap) * shuffle + 36., 0.);
+        let mut reverse = horizontal_slot(ui, "reverse-queue", point, egui::Vec2::splat(36.));
+        let session = &self.state.view().session;
+        let enabled = !self.state.queue_reversing()
+            && (session.timeline().len() > 1 || session.playlist_page_request().is_some());
+        let active = session.playlist_order() == gramwave_domain::PlaylistOrder::OldestFirst;
+        let hint = if active {
+            tr("Reverse on · Turn off")
+        } else {
+            tr("Reverse off · Turn on")
+        };
+        let reverse = reverse.add_enabled_ui(enabled, |ui| {
+            design::toggle(ui, Icon::Reverse, active, "", hint)
+        });
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::new("test-reverse-queue"), reverse.response.rect);
+        });
+        if reverse.inner {
+            self.execute(AppCommand::ReverseQueue);
+        }
         if shuffle > 0. {
             let point = center - egui::vec2(half_width + 36. + gap, 0.);
             let mut button = horizontal_slot(ui, "shuffle", point, egui::Vec2::splat(36.));
@@ -75,7 +96,8 @@ impl App {
         if button(&mut playback, Icon::Previous, "Previous") {
             self.execute(AppCommand::Previous);
         }
-        let loading = self.state.playback().shows_loading();
+        let waiting = self.state.queue_waiting();
+        let loading = waiting || self.state.playback().shows_loading();
         let icon = if self.state.playback().state().paused()
             || self.state.view().session.current().is_none()
         {
@@ -86,7 +108,9 @@ impl App {
         if design::playback_control(
             &mut playback,
             (!loading).then_some(icon),
-            if loading {
+            if waiting {
+                "Waiting for more tracks…"
+            } else if loading {
                 "Loading track…"
             } else {
                 "Play / pause"
@@ -171,7 +195,7 @@ impl App {
         let gap = ui.spacing().item_spacing.x;
         let button_slot = 36. + gap;
         let basic_width = 44. + 2. * button_slot;
-        let extended_width = basic_width + 2. * button_slot;
+        let extended_width = basic_width + 3. * button_slot;
         let seek_active = matches!(player, PlayerLayout::Mini | PlayerLayout::Full);
         let expanded = player == PlayerLayout::Full && width >= 798.;
         let wide = layout_fraction(ui, "transport-wide", expanded);
@@ -188,12 +212,12 @@ impl App {
             width >= extended_width + button_slot,
         );
         let queue = layout_fraction(ui, "transport-queue", dock && player.has_workspace());
-        let play_width = basic_width + button_slot * (shuffle + repeat);
+        let play_width = basic_width + button_slot * (1. + shuffle + repeat);
         let compact_slider = (width - extended_width - button_slot * (1. + queue) - gap).min(104.);
         let slider = layout_fraction(ui, "transport-volume", expanded || compact_slider >= 72.);
         let compact_width =
             play_width + button_slot * (mute + queue) + (gap + compact_slider.max(72.)) * slider;
-        let compact_left = (width - compact_width).max(0.) / 2.;
+        let compact_left = (width - compact_width - button_slot).max(0.) / 2.;
         let metadata_width = ((width - 48.) * 0.25).clamp(60., 300.);
         let wide_left = 24. + metadata_width + gap;
         let wide_center =
@@ -202,7 +226,7 @@ impl App {
         let center_width = egui::lerp(width..=wide_center, wide);
         let play_x = area.left()
             + egui::lerp(
-                (compact_left + button_slot * shuffle + basic_width / 2.)
+                (compact_left + button_slot * (1. + shuffle) + basic_width / 2.)
                     ..=(wide_left + wide_center / 2.),
                 wide,
             )
@@ -240,7 +264,7 @@ impl App {
                 horizontal_slot(ui, "metadata", point, egui::vec2(metadata_width, 72.));
             metadata.multiply_opacity(wide);
             metadata.set_clip_rect(metadata.clip_rect().with_max_x(
-                (play_x - basic_width / 2. - button_slot * shuffle - gap).max(area.left()),
+                (play_x - basic_width / 2. - button_slot * (1. + shuffle) - gap).max(area.left()),
             ));
             metadata.horizontal(|ui| {
                 let track = media.as_ref();

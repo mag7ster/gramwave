@@ -137,6 +137,7 @@ impl From<MediaPlaylist> for Playlist {
             pinned: p.pinned,
             cursors: p.cursors,
             done: p.done,
+            oldest_cursors: [0; 3],
         }
     }
 }
@@ -167,6 +168,7 @@ impl From<MediaPatch> for LibraryPatch {
             removed: p.removed,
             url: p.url,
             pagination: p.pagination,
+            oldest_page: None,
         }
     }
 }

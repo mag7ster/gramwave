@@ -775,6 +775,7 @@ impl TelegramGateway for Telegram {
         chat: i64,
         kind: crate::domain::MediaKind,
         cursor: i64,
+        offset: i32,
         cancel: &'a CancellationToken,
     ) -> GatewayFuture<'a, MediaPage> {
         Box::pin(async move {
@@ -792,11 +793,11 @@ impl TelegramGateway for Telegram {
             })?;
             #[cfg(not(feature = "telegram"))]
             let filter = json!({"@type":(["searchMessagesFilterAudio","searchMessagesFilterDocument","searchMessagesFilterVoiceNote"][usize::from(kind)])});
-            let value=self.call_async(json!({"@type":"searchChatMessages","chat_id":chat,"topic_id":null,"query":"","sender_id":null,"from_message_id":cursor,"offset":0,"limit":100,"filter":filter}),cancel).await?;
+            let value=self.call_async(json!({"@type":"searchChatMessages","chat_id":chat,"topic_id":null,"query":"","sender_id":null,"from_message_id":cursor,"offset":offset,"limit":100,"filter":filter}),cancel).await?;
             let next = value["next_from_message_id"]
                 .as_i64()
                 .ok_or_else(|| AppError::Protocol("Invalid search cursor".into()))?;
-            if next != 0 && next == cursor {
+            if offset == 0 && next != 0 && next == cursor {
                 return Err(AppError::Protocol("Search cursor did not advance".into()));
             }
             let messages = value["messages"]

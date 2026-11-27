@@ -188,7 +188,8 @@ fn paginate(
 
 impl App {
     fn control_queue(&self, offset: i64) -> Result<Value, String> {
-        let timeline = self.state.view().session.timeline();
+        let session = &self.state.view().session;
+        let timeline = session.timeline();
         // Leave room for an upcoming row even when both titles are heavily escaped.
         let current = timeline
             .current_index()
@@ -206,7 +207,12 @@ impl App {
         let mut data = paginate(
             rows.map(|index| queue_row(index, timeline.get(index).unwrap(), 512)),
             start,
-            json!({"current": current}),
+            json!({
+                "current": current,
+                "playlist_pending": session.playlist_page_request().is_some(),
+                "deferred_from_row": (session.available_len() < session.remaining().len())
+                    .then(|| timeline.upcoming_start() + session.available_len() + 1),
+            }),
         )?;
         if offset < 0 {
             data["offset"] = json!(offset);
@@ -232,6 +238,8 @@ impl App {
             "paused": self.state.playback().state().paused(), "loading": self.state.playback().state().loading(),
             "shuffle": self.state.view().shuffle,
             "repeat": match self.state.view().repeat { RepeatMode::Off => "off", RepeatMode::All => "all", RepeatMode::One => "one" },
+            "queue_waiting": self.state.queue_waiting(),
+            "queue_error": self.state.queue_page_error().map(|error| label(&error.to_string())),
             "opened_chat": self.opened_chat, "queue_length": self.state.view().session.remaining().len(),
             "error": label(&self.error),
         })

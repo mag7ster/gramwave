@@ -556,6 +556,11 @@ fn hit_row(
     (index < len && y % stride < design::ROW_HEIGHT).then_some(index)
 }
 
-pub(super) fn scope(chat: i64, search: &str, sort: usize, filters: [bool; 3]) -> Scope {
-    Scope::Playlist(Id::new((chat, search, sort, filters)))
+pub(super) fn scope(
+    chat: i64,
+    search: &str,
+    filters: [bool; 3],
+    order: gramwave_domain::PlaylistOrder,
+) -> Scope {
+    Scope::Playlist(Id::new((chat, search, filters, order)))
 }

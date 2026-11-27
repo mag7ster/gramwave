@@ -30,21 +30,19 @@ fn playlist_search_resolves_the_selected_duplicate_occurrence() {
             id: 42,
             tracks,
             filters: [true, false, false],
+            done: [true; 3],
             ..Default::default()
         }],
         ..Default::default()
     });
     app.opened_chat = Some(42);
     app.search = "match".into();
-    for (sort, numbers) in [(1, [3, 4]), (0, [2, 4])] {
-        app.sort = sort;
-        let visible: Vec<_> = app
-            .playlist_tracks(0)
-            .iter()
-            .map(|track| track.playlist_number)
-            .collect();
-        assert_eq!(visible, numbers);
-    }
+    let visible: Vec<_> = app
+        .playlist_tracks(0)
+        .iter()
+        .map(|track| track.playlist_number)
+        .collect();
+    assert_eq!(visible, [2, 4]);
     app.select_playlist_row(1);
     let session = &app.state.view().session;
     assert_eq!(session.current().unwrap().message, 2);

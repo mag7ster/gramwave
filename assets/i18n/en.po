@@ -38,10 +38,6 @@ msgstr ""
 msgid "Apply to all playlists"
 msgstr ""
 
-#: src/screens.rs:802
-msgid "Artist"
-msgstr ""
-
 #: src/application/cache.rs:562
 msgid "Audio and documents"
 msgstr ""
@@ -184,6 +180,10 @@ msgid ""
 "Could not open Telegram. Check that a Telegram desktop app is installed."
 msgstr ""
 
+#: src/adapters/control/output.rs:132 src/screens/queue.rs:331
+msgid "Could not load the rest of the queue"
+msgstr ""
+
 #: src/screens.rs:2450
 msgid "Current track"
 msgstr ""
@@ -266,6 +266,47 @@ msgstr ""
 
 #: src/application/cache.rs:575
 msgid "GiB"
+msgstr ""
+
+#: src/screens/playlist.rs:876
+msgid "Loading older history…"
+msgstr ""
+
+#: src/screens/queue.rs:338
+msgid "Loading the rest of the queue to reverse it…"
+msgstr ""
+
+#: src/adapters/control/output.rs:98 src/screens/queue.rs:342
+msgid "More tracks from the source chat"
+msgstr ""
+
+#: src/adapters/control/output.rs:95
+#, rust-format
+msgid "More tracks will play before row {row}"
+msgstr ""
+
+#: src/screens/queue.rs:496
+msgid "More tracks will play before this row"
+msgstr ""
+
+#: src/screens/playlist.rs:46
+msgid "Newest first"
+msgstr ""
+
+#: src/screens/playlist.rs:47
+msgid "Oldest first"
+msgstr ""
+
+#: src/screens/transport.rs:59
+msgid "Reverse off · Turn on"
+msgstr ""
+
+#: src/screens/transport.rs:57
+msgid "Reverse on · Turn off"
+msgstr ""
+
+#: src/adapters/control/output.rs:140 src/screens/queue.rs:340
+msgid "Waiting for more tracks…"
 msgstr ""
 
 #: src/screens.rs:1271
@@ -355,10 +396,6 @@ msgstr ""
 
 #: src/screens.rs:818
 msgid "Music loads only when you open a chat."
-msgstr ""
-
-#: src/screens.rs:802
-msgid "Newest first"
 msgstr ""
 
 #: src/screens.rs:526 src/adapters/tray.rs:192
@@ -753,10 +790,6 @@ msgstr ""
 
 #: src/adapters/telegram.rs:717
 msgid "This message no longer contains playable audio"
-msgstr ""
-
-#: src/screens.rs:802
-msgid "Title"
 msgstr ""
 
 #: src/screens/queue_notices.rs:60

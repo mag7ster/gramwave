@@ -219,9 +219,8 @@ fn queue_selection_preserves_occurrences_and_backwards_positions() {
 }
 
 #[test]
-fn list_and_select_share_filters_search_and_sort_and_current_row_toggles_pause() {
+fn list_and_select_share_filters_and_search_and_current_row_toggles_pause() {
     let mut app = app();
-    app.sort = 2;
     let full = app.playlist_tracks(0);
     app.search = "Pacific".into();
     let list = apply(&mut app, Request::Playlist { offset: 0 });

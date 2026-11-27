@@ -1,11 +1,12 @@
-use super::TRACK_SCROLL_GUTTER;
+use super::{scroll_anchor::ScrollAnchor, TRACK_SCROLL_GUTTER};
 use crate::design;
 use eframe::egui;
-use gramwave_domain::QueueEntryId;
+use gramwave_domain::{playback::QueueTimeline, QueueEntryId, TrackId};
 use std::time::Duration;
 
 // A wheel detent can land on either side of the row's top edge.
 const SNAP_DISTANCE: f32 = design::ROW_HEIGHT / 2.;
+const REVERSE_EDGE_HEIGHT: f32 = design::ROW_HEIGHT;
 
 #[derive(Clone, Default)]
 pub(super) struct QueueScroll {
@@ -17,6 +18,10 @@ pub(super) struct QueueScroll {
     anchor: Option<(QueueEntryId, usize)>,
     animation: Option<(f32, f64)>,
     snap_at: Option<f64>,
+    generation: u64,
+    fade_start: Option<f64>,
+    visible: Option<ScrollAnchor<(usize, QueueEntryId, TrackId)>>,
+    interior_current: Option<(QueueEntryId, f32)>,
 }
 
 impl QueueScroll {
@@ -33,6 +38,93 @@ impl QueueScroll {
         }
         scroll.frame = Some(frame);
         (key, scroll, opened)
+    }
+
+    pub(super) fn reverse(
+        &mut self,
+        revision: (u64, bool),
+        queue: QueueTimeline<'_>,
+        stride: f32,
+        max: f32,
+        height: f32,
+        now: f64,
+    ) -> bool {
+        let (generation, opened) = revision;
+        if self.generation == generation || opened {
+            self.generation = generation;
+            return false;
+        }
+        self.generation = generation;
+        self.stride = stride;
+        self.animation = None;
+        self.snap_at = None;
+        self.fade_start = Some(now);
+        if !self.following {
+            let current_offset = self.interior_current.and_then(|(id, top)| {
+                let index = queue.current_index()?;
+                (queue.get(index)?.entry_id == id)
+                    .then(|| (index as f32 * stride - top).clamp(0., max.max(0.)))
+            });
+            self.offset = current_offset
+                .or_else(|| {
+                    let visible = self.visible.as_ref()?;
+                    let find = |&(index, entry_id, track_id): &(usize, QueueEntryId, TrackId)| {
+                        let mirrored = queue.len().saturating_sub(index + 1);
+                        if queue
+                            .get(mirrored)
+                            .is_some_and(|entry| entry.entry_id == entry_id)
+                        {
+                            return Some(mirrored);
+                        }
+                        (0..queue.len())
+                            .filter(|&i| queue.get(i).unwrap().entry_id == entry_id)
+                            .min_by_key(|&i| i.abs_diff(mirrored))
+                            .or_else(|| {
+                                queue
+                                    .get(mirrored)
+                                    .filter(|entry| entry.id() == track_id)
+                                    .map(|_| mirrored)
+                            })
+                    };
+                    visible.mirrored_offset(stride, max, height, design::ROW_HEIGHT, find)
+                })
+                .unwrap_or_else(|| self.offset.min(max.max(0.)));
+        }
+        true
+    }
+
+    pub(super) fn fade(&mut self, ui: &egui::Ui) -> f32 {
+        let Some(start) = self.fade_start else {
+            return 1.;
+        };
+        let progress = ((ui.input(|i| i.time) - start) / 0.15).clamp(0., 1.) as f32;
+        if progress < 1. {
+            ui.request_repaint();
+        } else {
+            self.fade_start = None;
+        }
+        egui::lerp(0.6..=1., 1. - (1. - progress).powi(2))
+    }
+
+    pub(super) fn remember(&mut self, queue: QueueTimeline<'_>, height: f32) {
+        let current = queue.current_index().map(|index| {
+            let top = index as f32 * self.stride - self.offset;
+            (queue.get(index).unwrap().entry_id, top)
+        });
+        let row_height = design::ROW_HEIGHT;
+        self.interior_current = current.filter(|&(_, top)| {
+            top >= REVERSE_EDGE_HEIGHT && top + row_height <= height - REVERSE_EDGE_HEIGHT
+        });
+        self.visible = Some(ScrollAnchor::capture(
+            queue.len(),
+            self.stride,
+            self.offset,
+            height,
+            |i| {
+                let entry = queue.get(i).unwrap();
+                (i, entry.entry_id, entry.id())
+            },
+        ));
     }
 
     pub(super) fn start(
@@ -102,6 +194,25 @@ impl QueueScroll {
         self.snap_at = None;
     }
 
+    pub(super) fn selected(
+        &mut self,
+        anchor: (QueueEntryId, usize),
+        previous_target: f32,
+        now: f64,
+    ) {
+        if !self.following && self.anchor != Some(anchor) {
+            self.anchor = Some(anchor);
+            let distance = (self.offset - anchor.1 as f32 * self.stride).abs();
+            self.arm_snap((self.offset - previous_target).abs(), distance, now);
+        }
+    }
+
+    fn arm_snap(&mut self, previous_distance: f32, distance: f32, now: f64) {
+        self.snap_at = (distance <= SNAP_DISTANCE
+            && (self.snap_at.is_some() || distance < previous_distance))
+            .then_some(now + 0.2);
+    }
+
     pub(super) fn finish(
         &mut self,
         ui: &egui::Ui,
@@ -129,9 +240,7 @@ impl QueueScroll {
         } else if manual {
             self.following = false;
             self.animation = None;
-            self.snap_at = (distance <= SNAP_DISTANCE
-                && (self.snap_at.is_some() || distance < (before - target).abs()))
-            .then_some(now + 0.2);
+            self.arm_snap((before - target).abs(), distance, now);
         } else if let Some(deadline) = self.snap_at {
             if distance > SNAP_DISTANCE {
                 self.snap_at = None;
@@ -150,5 +259,24 @@ impl QueueScroll {
         if manual {
             ui.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_needs_a_closer_target_or_an_existing_snap() {
+        let mut scroll = QueueScroll {
+            offset: 80.,
+            stride: 68.,
+            ..Default::default()
+        };
+        scroll.selected((QueueEntryId(1), 1), 72., 1.);
+        assert!(scroll.snap_at.is_none());
+        scroll.arm_snap(13., 12., 2.);
+        scroll.selected((QueueEntryId(2), 1), 68., 3.);
+        assert_eq!(scroll.snap_at, Some(3.2));
     }
 }

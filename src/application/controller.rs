@@ -55,7 +55,7 @@ struct PlaylistCacheKey {
     library: u64,
     filters: [bool; 3],
     search: String,
-    sort: usize,
+    order: gramwave_domain::PlaylistOrder,
 }
 struct PlaylistCache {
     key: PlaylistCacheKey,
@@ -109,6 +109,7 @@ pub(crate) struct DesktopApp {
     pub(crate) stream_base: String,
     pub(crate) server: Option<streaming::Server>,
     pub(crate) opened_chat: Option<i64>,
+    pub(crate) playlist_order: gramwave_domain::PlaylistOrder,
     pub(crate) chat_query: String,
     pub(crate) chat_search_active: bool,
     pub(crate) image_wanted: Vec<i64>,
@@ -131,7 +132,6 @@ pub(crate) struct DesktopApp {
     pub(crate) demo: bool,
     pub(crate) demo_artwork: Option<tempfile::TempDir>,
     pub(crate) media: Option<fastframe_now_playing::NowPlaying>,
-    pub(crate) sort: usize,
     pub(crate) tray: Option<crate::adapters::tray::Tray>,
     pub(crate) hidden: bool,
     pub(crate) wayland: bool,
@@ -237,6 +237,7 @@ impl DesktopApp {
             custom_emoji: Default::default(),
             track_wanted: Vec::new(),
             search: String::new(),
+            playlist_order: Default::default(),
             inline_notice: None,
             status: if demo {
                 tr("Demo mode · not connected to Telegram")
@@ -261,7 +262,6 @@ impl DesktopApp {
             demo,
             demo_artwork: None,
             media,
-            sort: 0,
             tray,
             hidden: false,
             wayland: false,
@@ -477,6 +477,7 @@ impl DesktopApp {
             None => {}
         }
     }
+    #[cfg(test)]
     pub(crate) fn start_session<T: Clone + Into<gramwave_application::model::Track>>(
         &mut self,
         tracks: &[T],
@@ -497,7 +498,7 @@ impl DesktopApp {
             library: self.state.library_version(),
             filters: playlist.filters,
             search: search.to_owned(),
-            sort: self.sort,
+            order: self.playlist_order,
         }
     }
     fn playlist_tracks_matching(
@@ -517,18 +518,16 @@ impl DesktopApp {
         }
 
         let query = search.to_lowercase();
-        let mut tracks: Vec<_> = p
+        let mut ordered: Vec<_> = p
             .tracks
             .iter()
             .filter(|t| p.filters[usize::from(t.kind)])
             .collect();
-        match self.sort {
-            1 => tracks.sort_by(|a, b| a.title.cmp(&b.title)),
-            2 => tracks.sort_by(|a, b| a.artist.cmp(&b.artist)),
-            _ => {}
+        if self.playlist_order == gramwave_domain::PlaylistOrder::OldestFirst {
+            ordered.reverse();
         }
         let tracks = std::sync::Arc::new(
-            tracks
+            ordered
                 .into_iter()
                 .enumerate()
                 .filter(|(_, t)| {
@@ -551,14 +550,12 @@ impl DesktopApp {
         tracks
     }
     pub(crate) fn play_playlist_from(&mut self, selected: usize, library_id: Option<u64>) {
-        let tracks = self.playlist_tracks_matching(selected, "");
-        let index = match library_id {
-            Some(id) => tracks.iter().position(|track| track.library_id == id),
-            None => (!tracks.is_empty()).then_some(0),
-        };
-        if let Some(index) = index {
-            self.start_session(&tracks, index);
-        }
+        let chat = self.state.view().playlists[selected].id;
+        self.core_command(gramwave_application::commands::AppCommand::StartPlaylist {
+            chat,
+            library_id,
+            order: self.playlist_order,
+        });
     }
     pub(crate) fn select_playlist_row(&mut self, index: usize) {
         let Some(selected) = self

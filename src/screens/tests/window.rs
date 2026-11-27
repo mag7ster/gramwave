@@ -226,6 +226,37 @@ fn short_workspace_keeps_a_full_track_row_above_the_player() {
 }
 
 #[test]
+fn track_lists_reach_the_player_divider() {
+    let mut h = queue_harness(30);
+    for width in [1240., 900.] {
+        h.size.x = width;
+        for (pane, key) in [
+            (WorkspacePane::Playlist, "test-playlist-scroll"),
+            (WorkspacePane::Queue, "test-queue-scroll"),
+        ] {
+            h.app.pane = pane;
+            h.settle();
+            let (viewport, _) = h.list_scroll(key);
+            let transport =
+                egui::panel::PanelState::load(&h.ctx, egui::Id::new("transport")).unwrap();
+            let scroll: egui::Id = h
+                .ctx
+                .data(|data| data.get_temp(egui::Id::new(key)).unwrap());
+            let bar = h.ctx.read_response(scroll.with(1)).unwrap().rect;
+            let divider = transport.outer_rect.top();
+            assert!(
+                (viewport.bottom() - divider).abs() <= 1.,
+                "{key} viewport at width {width}"
+            );
+            assert!(
+                (bar.bottom() - divider).abs() <= 1.,
+                "{key} scrollbar at width {width}"
+            );
+        }
+    }
+}
+
+#[test]
 fn scrollbars_stay_outside_the_rows_and_menus() {
     let mut h = queue_harness(24);
     let mut state = h.app.state.view().clone();

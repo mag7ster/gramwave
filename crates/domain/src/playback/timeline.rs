@@ -90,7 +90,12 @@ impl Session {
         if index < timeline.past_len() {
             self.rewind_to(index, expected)
         } else {
-            self.jump_to(index.checked_sub(timeline.upcoming_start())?)
+            let index = index.checked_sub(timeline.upcoming_start())?;
+            if self.deferred(index) {
+                self.play_deferred(index)
+            } else {
+                self.jump_to(index)
+            }
         }
     }
 
@@ -134,7 +139,9 @@ impl Session {
         }
         let upcoming = timeline.upcoming_start();
         if from >= upcoming && to >= upcoming {
+            let boundary = self.available_len();
             self.move_before(from - upcoming, to - upcoming + usize::from(to > from));
+            self.set_boundary(boundary);
             return;
         }
 
@@ -261,6 +268,8 @@ impl Session {
         let preceding = self.preceding.len().min(past);
         self.preceding = rows[..preceding].iter().map(|&(id, _)| id).collect();
         self.history = rows[preceding..past].iter().map(|&(id, _)| id).collect();
+        let deferred = self.remaining.len() - self.available_len();
         self.remaining = rows[upcoming..].iter().map(|&(id, _)| id).collect();
+        self.set_boundary(self.remaining.len().saturating_sub(deferred));
     }
 }

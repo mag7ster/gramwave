@@ -422,3 +422,38 @@ fn clicking_time_toggles_remaining_hours_without_seeking_or_moving_the_rail() {
     assert_eq!(clock(3599., false), "59:59");
     assert_eq!(clock(3600., false), "1:00:00");
 }
+
+#[test]
+fn reverse_button_turns_the_queue_around_the_playing_track() {
+    for size in [
+        egui::vec2(1240., 800.),
+        egui::Vec2::from(crate::launch::MIN_WINDOW_SIZE),
+    ] {
+        let mut h = queue_harness(5);
+        h.app
+            .execute(crate::application::commands::AppCommand::Next);
+        h.size = size;
+        h.settle();
+        let before = &h.app.state.view().session;
+        let timeline = before.timeline();
+        let expected: Vec<_> = (0..timeline.len())
+            .rev()
+            .map(|i| timeline.get(i).unwrap().entry_id)
+            .collect();
+        let current = before.current().unwrap().entry_id;
+        let button = h
+            .ctx
+            .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("test-reverse-queue")))
+            .unwrap();
+        h.click(button.center());
+        let session = &h.app.state.view().session;
+        assert_eq!(session.current().unwrap().entry_id, current);
+        let timeline = session.timeline();
+        assert_eq!(
+            (0..timeline.len())
+                .map(|i| timeline.get(i).unwrap().entry_id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}

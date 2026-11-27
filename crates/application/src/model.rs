@@ -62,6 +62,8 @@ pub struct Playlist {
     pub filters: [bool; 3],
     pub pinned: bool,
     pub cursors: [i64; 3],
+    #[serde(default)]
+    pub oldest_cursors: [i64; 3],
     pub done: [bool; 3],
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,8 +123,15 @@ impl Playlist {
     pub fn recover_empty_index(&mut self) {
         // Older versions could drop cached message metadata while keeping the
         // pagination cursors. Start over only when opening that empty library.
-        if self.tracks.is_empty() && self.cursors.iter().any(|c| *c != 0) {
+        if self.tracks.is_empty()
+            && self
+                .cursors
+                .iter()
+                .chain(&self.oldest_cursors)
+                .any(|c| *c != 0)
+        {
             self.cursors = [0; 3];
+            self.oldest_cursors = [0; 3];
             self.done = [false; 3];
         }
     }

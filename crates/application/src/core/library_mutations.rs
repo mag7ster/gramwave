@@ -50,8 +50,14 @@ impl LibraryCore {
             LibraryMutation::Page(playlist, protected) => {
                 if let Some(old) = state.playlists.iter_mut().find(|p| p.id == chat) {
                     old.merge_tracks(playlist.tracks, &protected);
-                    old.cursors = playlist.cursors;
-                    old.done = playlist.done;
+                    for kind in 0..3 {
+                        if !old.done[kind] {
+                            old.cursors[kind] = playlist.cursors[kind];
+                            old.done[kind] = playlist.done[kind]
+                                || (old.cursors[kind] > 0
+                                    && old.oldest_cursors[kind] >= old.cursors[kind]);
+                        }
+                    }
                     if !playlist.url.is_empty() {
                         old.url = playlist.url;
                     }

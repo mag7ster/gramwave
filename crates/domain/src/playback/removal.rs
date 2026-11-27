@@ -227,6 +227,7 @@ impl Session {
             };
             fragment.restore(list, &pending);
         }
+        self.restore_boundary();
         removal.current.is_some()
     }
 }

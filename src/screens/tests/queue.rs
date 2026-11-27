@@ -554,3 +554,171 @@ fn queue_undo_expires_independently_and_drops_the_next_button() {
     h.click(bottom);
     assert_eq!(queue_order(&h), order[1..]);
 }
+
+#[test]
+fn full_queue_reverse_preserves_clipped_rows_and_keeps_follow_mode() {
+    let mut h = queue_harness(30);
+    let order = queue_order(&h);
+    let stride =
+        h.app.test_queue_rows[&order[1]].0.top() - h.app.test_queue_rows[&order[0]].0.top();
+    let row_height = design::ROW_HEIGHT;
+    let key = "test-queue-scroll";
+    let (viewport, offset) = h.list_scroll(key);
+    let clip = (10..50)
+        .map(|value| value as f32)
+        .find(|clip| {
+            let bottom = (viewport.height() + clip) % stride;
+            (4. ..row_height - 4.).contains(&bottom)
+        })
+        .unwrap();
+    scroll_queue(&mut h, viewport.center(), offset - 8. * stride - clip);
+    for _ in 0..4 {
+        h.settle();
+    }
+    let (viewport, _) = h.list_scroll(key);
+    assert!(return_button(&h).is_some());
+    let current = h.app.state.view().session.current().unwrap().entry_id;
+    assert!(!h.app.test_queue_rows.contains_key(&current));
+    let clipped: Vec<_> = h
+        .app
+        .test_queue_rows
+        .iter()
+        .filter_map(|(&id, (rect, _, _))| {
+            let visible = viewport.intersect(*rect).height();
+            (visible > 0. && visible < row_height).then_some((
+                id,
+                visible,
+                rect.top() < viewport.top(),
+            ))
+        })
+        .collect();
+    assert_eq!(clipped.len(), 2);
+
+    h.app.execute(AppCommand::ReverseQueue);
+    h.frame(vec![]);
+    let (viewport, _) = h.list_scroll(key);
+    for (id, visible, was_above) in clipped {
+        let row = h.app.test_queue_rows[&id].0;
+        assert!(
+            (viewport.intersect(row).height() - visible).abs() < 1.,
+            "partially visible row changed its visible height after reversal"
+        );
+        assert_eq!(row.bottom() > viewport.bottom(), was_above);
+    }
+    assert!(return_button(&h).is_some());
+
+    h.click(return_button(&h).unwrap().center());
+    h.settle();
+    h.app.execute(AppCommand::ReverseQueue);
+    h.frame(vec![]);
+    let current = h.app.state.view().session.current().unwrap().entry_id;
+    assert!(return_button(&h).is_none());
+    assert!(h
+        .list_scroll(key)
+        .0
+        .contains(h.app.test_queue_rows[&current].0.center()));
+}
+
+#[test]
+fn playing_a_queue_row_near_the_top_reuses_the_snap_distance() {
+    for (distance, should_snap) in [(-16., true), (16., true), (40., false)] {
+        let mut h = queue_harness(30);
+        let order = queue_order(&h);
+        let stride =
+            h.app.test_queue_rows[&order[1]].0.top() - h.app.test_queue_rows[&order[0]].0.top();
+        h.app.execute(AppCommand::PlayQueue(order[11]));
+        h.settle();
+        h.settle();
+
+        let target = 6. * stride;
+        let (viewport, offset) = h.list_scroll("test-queue-scroll");
+        scroll_queue(&mut h, viewport.center(), offset - target - distance);
+        for _ in 0..4 {
+            h.settle();
+        }
+        let before_click = scroll_offset(&h);
+        assert!(return_button(&h).is_some());
+
+        let row = h.app.test_queue_rows[&order[5]].0;
+        let viewport = h.list_scroll("test-queue-scroll").0;
+        h.click(row.intersect(viewport).center());
+        assert_eq!(
+            h.app.state.view().session.current().unwrap().entry_id,
+            order[5]
+        );
+        for _ in 0..4 {
+            h.settle();
+        }
+
+        let expected = if should_snap { target } else { before_click };
+        assert!((scroll_offset(&h) - expected).abs() < 1.);
+        assert_eq!(return_button(&h).is_none(), should_snap);
+    }
+}
+
+#[test]
+fn queue_reverse_anchors_the_current_row_only_outside_the_edge_zones() {
+    let row_height = design::ROW_HEIGHT;
+    for (edge_distance, top_edge, keep_current) in [
+        (130., true, true),
+        (100., false, true),
+        (45., true, false),
+        (45., false, false),
+        (16., true, false),
+        (12., false, false),
+        (-16., true, false),
+        (-12., false, false),
+    ] {
+        let mut h = queue_harness(30);
+        let mut settings = gramwave_application::persistence::Settings::from(h.app.state.view());
+        settings.light = !top_edge;
+        h.app.execute(AppCommand::Settings(settings));
+        h.settle();
+        let order = queue_order(&h);
+        let current = order[10];
+        let stride =
+            h.app.test_queue_rows[&order[1]].0.top() - h.app.test_queue_rows[&order[0]].0.top();
+        let (viewport, offset) = h.list_scroll("test-queue-scroll");
+        let current_top = if top_edge {
+            edge_distance
+        } else {
+            viewport.height() - row_height - edge_distance
+        };
+        let target = 11. * stride - current_top;
+        scroll_queue(&mut h, viewport.center(), offset - target);
+        for _ in 0..4 {
+            h.settle();
+        }
+        h.app.execute(AppCommand::PlayQueue(current));
+        h.settle();
+
+        let viewport = h.list_scroll("test-queue-scroll").0;
+        let before = h.app.test_queue_rows[&current].0;
+        assert!((before.top() - viewport.top() - current_top).abs() < 1.);
+        assert!(return_button(&h).is_some());
+
+        let initial_offset = scroll_offset(&h);
+        h.app.execute(AppCommand::ReverseQueue);
+        h.frame(vec![]);
+
+        let viewport_after = h.list_scroll("test-queue-scroll").0;
+        let after = h.app.test_queue_rows[&current].0;
+        let expected_top = if keep_current {
+            current_top
+        } else {
+            viewport_after.height() - row_height - current_top
+        };
+        assert!(
+            (after.top() - viewport_after.top() - expected_top).abs() < 1.,
+            "first reverse placed the current row incorrectly at {edge_distance}px from the edge"
+        );
+        assert!(return_button(&h).is_some());
+
+        h.app.execute(AppCommand::ReverseQueue);
+        h.frame(vec![]);
+        let (viewport_again, offset_again) = h.list_scroll("test-queue-scroll");
+        let again = h.app.test_queue_rows[&current].0;
+        assert!((offset_again - initial_offset).abs() < 1.);
+        assert!((again.top() - viewport_again.top() - current_top).abs() < 1.);
+    }
+}

@@ -3,10 +3,33 @@ use crate::model::{QueueEntry, QueueEntryId, TrackMetadata};
 use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+mod continuation;
 mod removal;
 mod timeline;
 pub use removal::QueueRemoval;
 pub use timeline::{QueueRangeEdit, QueueTimeline};
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlaylistOrder {
+    #[default]
+    NewestFirst,
+    OldestFirst,
+}
+impl PlaylistOrder {
+    pub fn key(self, message: i64) -> i64 {
+        match self {
+            Self::NewestFirst => message.saturating_neg(),
+            Self::OldestFirst => message,
+        }
+    }
+
+    fn reversed(self) -> Self {
+        match self {
+            Self::NewestFirst => Self::OldestFirst,
+            Self::OldestFirst => Self::NewestFirst,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepeatMode {
     #[default]
@@ -80,6 +103,9 @@ pub struct Session {
     history: Vec<QueueEntryId>,
     preceding: Vec<QueueEntryId>,
     pub source: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuation: Option<continuation::Continuation>,
+    playlist_order: PlaylistOrder,
     serial: u64,
 }
 impl Session {
@@ -153,6 +179,8 @@ impl Session {
         shuffle: bool,
     ) -> Option<QueueEntry> {
         tracks.get(index)?;
+        self.continuation = None;
+        self.playlist_order = PlaylistOrder::NewestFirst;
         self.entries.clear();
         self.order = tracks
             .iter()
@@ -209,6 +237,9 @@ impl Session {
         if next {
             self.remaining.splice(..0, ids);
         } else {
+            if let Some(continuation) = &mut self.continuation {
+                continuation.deferred.extend(ids.iter().copied());
+            }
             self.remaining.extend(ids);
         }
     }
@@ -237,6 +268,8 @@ impl Session {
         self.remaining.insert(to, id);
     }
     pub fn clear(&mut self) {
+        self.continuation = None;
+        self.playlist_order = PlaylistOrder::NewestFirst;
         self.remaining.clear();
         self.preceding.clear();
         self.history.clear();
@@ -259,8 +292,10 @@ impl Session {
         self.reorder_with(shuffle, &mut rand::thread_rng());
     }
     pub fn reorder_with(&mut self, shuffle: bool, rng: &mut impl Rng) {
+        let end = self.available_len();
+        let available = &mut self.remaining[..end];
         if shuffle {
-            self.remaining.shuffle(rng)
+            available.shuffle(rng)
         } else {
             let order: std::collections::HashMap<_, _> = self
                 .order
@@ -268,8 +303,7 @@ impl Session {
                 .enumerate()
                 .map(|(i, id)| (*id, i))
                 .collect();
-            self.remaining
-                .sort_by_key(|id| order.get(id).copied().unwrap_or(usize::MAX));
+            available.sort_by_key(|id| order.get(id).copied().unwrap_or(usize::MAX));
         }
     }
     pub fn jump_to(&mut self, index: usize) -> Option<QueueEntry> {
@@ -356,6 +390,10 @@ struct StoredSession {
     history: Vec<QueueEntryId>,
     preceding: Vec<QueueEntryId>,
     source: Option<i64>,
+    #[serde(default)]
+    continuation: Option<continuation::Continuation>,
+    #[serde(default)]
+    playlist_order: PlaylistOrder,
     serial: u64,
 }
 #[derive(Clone, Deserialize)]
@@ -422,6 +460,8 @@ impl<'de> Deserialize<'de> for Session {
                     history: s.history,
                     preceding: s.preceding,
                     source: s.source,
+                    continuation: s.continuation,
+                    playlist_order: s.playlist_order,
                     serial,
                 })
             }

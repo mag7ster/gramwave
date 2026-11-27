@@ -60,6 +60,7 @@ pub struct PlaybackCore {
     pub(crate) streamed_next: bool,
     pub(crate) promoting_next: bool,
     pub(crate) waiting_for_next_pcm: bool,
+    pub(crate) queue_reverse_generation: u64,
     pub(crate) repeat_cycle: Option<Vec<gramwave_domain::QueueEntryId>>,
     pub(crate) snapshot: PlayerSnapshot,
     pub(crate) queue_removals: Vec<PendingQueueRemoval>,
@@ -225,7 +226,13 @@ impl PlaybackCore {
                     .iter()
                     .position(|t| t.entry_id == id);
                 play = index
-                    .and_then(|index| state.session.jump_to(index))
+                    .and_then(|index| {
+                        if state.session.deferred(index) {
+                            state.session.play_deferred(index)
+                        } else {
+                            state.session.jump_to(index)
+                        }
+                    })
                     .map(Into::into);
             }
             PlaybackMutation::PlayQueueRow(index, id) => {

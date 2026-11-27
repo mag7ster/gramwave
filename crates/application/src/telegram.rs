@@ -96,6 +96,7 @@ pub trait TelegramGateway: Send + Sync {
         chat: i64,
         kind: MediaKind,
         cursor: i64,
+        offset: i32,
         cancel: &'a CancellationToken,
     ) -> GatewayFuture<'a, MediaPage>;
     fn message<'a>(
