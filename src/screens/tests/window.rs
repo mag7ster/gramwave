@@ -257,6 +257,182 @@ fn track_lists_reach_the_player_divider() {
 }
 
 #[test]
+fn scrollbar_markers_follow_the_current_track_in_both_lists() {
+    let mut h = queue_harness(30);
+    let mut state = h.app.state.view().clone();
+    state.playlists[0].tracks[1].kind = gramwave_domain::MediaKind::Document;
+    h.app.state = gramwave_application::AppCore::new(state);
+    let tracks = h.app.state.view().playlists[0].tracks.clone();
+    h.app.start_session(&tracks, 0);
+    h.settle();
+
+    let (playlist, mark) = current_track_marker(&mut h, "test-playlist-scroll");
+    let mark = mark.unwrap();
+    let stride = design::ROW_HEIGHT + 8.;
+    let expected = playlist.height() * design::ROW_HEIGHT
+        / ((tracks.len() - 1) as f32 * stride + design::ROW_HEIGHT);
+    assert_eq!(mark.width(), playlist.width());
+    assert!((mark.height() - expected).abs() < 0.01);
+    assert!((mark.top() - playlist.top()).abs() < 0.01);
+    assert!((mark.right() - playlist.right()).abs() < 0.01);
+
+    h.app.execute(AppCommand::Next);
+    let (_, next) = current_track_marker(&mut h, "test-playlist-scroll");
+    assert!(next.unwrap().top() > mark.bottom());
+
+    h.app.execute(AppCommand::Filters(0, [true, false, false]));
+    h.settle();
+    let (bar, filtered) = current_track_marker(&mut h, "test-playlist-scroll");
+    assert!(bar.is_positive());
+    assert!(filtered.is_none());
+    h.app.execute(AppCommand::Filters(0, [true, true, false]));
+    h.app.search = "nonexistent track".into();
+    h.settle();
+    assert!(current_track_marker(&mut h, "test-playlist-scroll")
+        .1
+        .is_none());
+    h.app.search.clear();
+    h.app.opened_chat = Some(1);
+    h.settle();
+    assert!(current_track_marker(&mut h, "test-playlist-scroll")
+        .1
+        .is_none());
+
+    let repeated = vec![tracks[0].clone(); 400];
+    h.app.start_session(&repeated, 0);
+    h.settle();
+    let (queue, first) = current_track_marker(&mut h, "test-queue-scroll");
+    let first = first.unwrap();
+    assert_eq!(first.width(), queue.width());
+    assert!((first.height() - 4.).abs() < 0.01);
+    assert!((first.top() - queue.top()).abs() < 0.01);
+
+    h.app.start_session(&repeated, repeated.len() - 1);
+    h.settle();
+    let (queue, last) = current_track_marker(&mut h, "test-queue-scroll");
+    let last = last.unwrap();
+    assert!((last.height() - 4.).abs() < 0.01);
+    assert!((last.bottom() - queue.bottom()).abs() < 0.01);
+}
+
+#[test]
+fn scrollbar_marker_changes_to_the_contrast_color_only_under_the_thumb() {
+    for light in [false, true] {
+        let mut h = queue_harness(30);
+        let mut state = h.app.state.view().clone();
+        state.light = light;
+        let tracks = state.playlists[0].tracks.clone();
+        h.app.state = gramwave_application::AppCore::new(state);
+        let current = 20;
+        h.app.start_session(&tracks, current);
+        h.settle();
+        let (bar, marker) = current_track_marker(&mut h, "test-playlist-scroll");
+        let marker = marker.unwrap();
+        let id = h.ctx.data(|data| {
+            data.get_temp(egui::Id::new("test-playlist-scroll"))
+                .unwrap()
+        });
+        let row_center = current as f32 * (design::ROW_HEIGHT + 8.) + design::ROW_HEIGHT / 2.;
+        let resting_offset = row_center - bar.height() / 2.;
+        let visuals = if light {
+            egui::Visuals::light()
+        } else {
+            egui::Visuals::dark()
+        };
+        for (step, (offset, overlap_fraction)) in [
+            (0., 0.),
+            (row_center - bar.height(), 0.5),
+            (resting_offset, 1.),
+            (resting_offset, 1.),
+            (resting_offset, 1.),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut scroll = egui::scroll_area::State::load(&h.ctx, id).unwrap();
+            scroll.offset.y = offset;
+            scroll.store(&h.ctx, id);
+            let (events, thumb_color) = match step {
+                3 => (
+                    vec![egui::Event::PointerMoved(marker.center())],
+                    visuals.widgets.hovered.fg_stroke.color,
+                ),
+                4 => {
+                    h.pointer(marker.center(), true);
+                    (
+                        vec![egui::Event::PointerMoved(
+                            marker.center() + egui::vec2(0., 8.),
+                        )],
+                        visuals.widgets.active.fg_stroke.color,
+                    )
+                }
+                _ => (vec![], visuals.widgets.inactive.fg_stroke.color),
+            };
+            let output = h.frame(events);
+            let shapes: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|painted| match &painted.shape {
+                    egui::Shape::Rect(rect) if bar.contains_rect(rect.rect) => {
+                        Some((painted.clip_rect, rect))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let index = shapes
+                .iter()
+                .position(|(_, rect)| rect.rect == marker)
+                .unwrap();
+            let (_, base) = shapes[index];
+            assert_eq!(base.fill, design::palette(light).selected);
+            let (_, thumb) = shapes[index - 1];
+            assert_eq!(thumb.fill, thumb_color);
+            if step == 4 {
+                assert!(h.list_scroll("test-playlist-scroll").1 > resting_offset);
+            }
+            let fraction = thumb.rect.intersect(marker).height().max(0.) / marker.height();
+            assert!((fraction - overlap_fraction).abs() < 0.1, "{fraction}");
+            let overlap = shapes.get(index + 1);
+            if overlap_fraction == 0. {
+                assert!(overlap.is_none());
+            } else {
+                let (clip, overlap) = overlap.unwrap();
+                assert_eq!(*clip, marker);
+                assert_eq!(overlap.rect, thumb.rect);
+                let contrast = if light {
+                    egui::Color32::from_rgb(80, 141, 114)
+                } else {
+                    egui::Color32::from_rgb(64, 111, 96)
+                };
+                assert_eq!(overlap.fill, contrast);
+            }
+        }
+    }
+}
+
+fn current_track_marker(h: &mut Harness, key: &str) -> (egui::Rect, Option<egui::Rect>) {
+    let output = h.frame(vec![]);
+    let id: egui::Id = h
+        .ctx
+        .data(|data| data.get_temp(egui::Id::new(key)))
+        .unwrap();
+    let bar = h
+        .ctx
+        .read_response(id.with(1))
+        .map_or(egui::Rect::NOTHING, |response| response.rect);
+    let color = design::palette(h.app.state.view().light).selected;
+    let mut markers = output.shapes.into_iter().filter_map(|painted| {
+        let egui::Shape::Rect(shape) = painted.shape else {
+            return None;
+        };
+        (shape.fill == color && bar.contains_rect(shape.rect)).then_some(shape.rect)
+    });
+    let marker = markers.next();
+    assert!(markers.next().is_none());
+    (bar, marker)
+}
+
+#[test]
 fn scrollbars_stay_outside_the_rows_and_menus() {
     let mut h = queue_harness(24);
     let mut state = h.app.state.view().clone();

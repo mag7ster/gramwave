@@ -1,8 +1,8 @@
 use super::{
     art,
     keyboard::{self, empty_label, focus_outline, ListNavigation, MenuItems},
-    list_scroll_area, queue_scroll, selection, track_list_frame, track_menu_button,
-    track_more_button, WorkspacePane, TRACK_ROW_PADDING,
+    list_scroll_area, paint_current_track_marker, queue_scroll, selection, track_list_frame,
+    track_menu_button, track_more_button, WorkspacePane, TRACK_ROW_PADDING,
 };
 use crate::application::commands::AppCommand;
 use crate::{design, tr, App};
@@ -361,9 +361,10 @@ impl App {
         let boundary = queue.upcoming_start() + session.available_len();
         let spacing = list_ui.spacing().item_spacing.y;
         let stride = design::ROW_HEIGHT + spacing;
-        let rows_height = (stride * queue.len() as f32 - spacing).max(0.);
-        let anchor = queue
-            .current_index()
+        let count = queue.len();
+        let rows_height = (stride * count as f32 - spacing).max(0.);
+        let current = queue.current_index();
+        let anchor = current
             .or_else(|| (queue.upcoming_start() < queue.len()).then_some(queue.upcoming_start()))
             .map(|i| (queue.get(i).unwrap().entry_id, i));
         let target = if shuffled && !has_current {
@@ -778,6 +779,7 @@ impl App {
                 }
                 viewport.min.y
             });
+        paint_current_track_marker(list_ui, &queue_scroll, current, count, stride);
         list_frame.end(ui);
         #[cfg(test)]
         ui.ctx().data_mut(|data| {

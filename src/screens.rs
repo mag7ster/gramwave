@@ -689,6 +689,61 @@ fn list_scroll_area(ui: &mut egui::Ui) -> egui::ScrollArea {
         .animated(false)
 }
 
+fn paint_current_track_marker(
+    ui: &egui::Ui,
+    scroll: &egui::scroll_area::ScrollAreaOutput<impl Sized>,
+    current: Option<usize>,
+    count: usize,
+    stride: f32,
+) {
+    let Some(index) = current.filter(|&index| index < count) else {
+        return;
+    };
+    if scroll.content_size.y <= scroll.inner_rect.height().ceil() {
+        return;
+    }
+    let Some(response) = ui.ctx().read_response(scroll.id.with(1)) else {
+        return;
+    };
+    // egui paints the scrollbar track and thumb last, in that order.
+    let Some((bar, mut thumb)) = ui.ctx().graphics(|layers| {
+        let mut shapes = layers.get(ui.layer_id())?.all_entries();
+        let egui::Shape::Rect(bar) = &shapes.nth(shapes.len().checked_sub(2)?)?.shape else {
+            return None;
+        };
+        let egui::Shape::Rect(thumb) = &shapes.next()?.shape else {
+            return None;
+        };
+        (response.rect.contains_rect(bar.rect) && bar.rect.x_range() == thumb.rect.x_range())
+            .then(|| (bar.rect, thumb.clone()))
+    }) else {
+        return;
+    };
+    if !bar.is_positive() {
+        return;
+    }
+
+    let rows_height = (count - 1) as f32 * stride + design::ROW_HEIGHT;
+    let scale = bar.height() / rows_height;
+    let height = (design::ROW_HEIGHT * scale).max(4.).min(bar.height());
+    let center = (index as f32 * stride + design::ROW_HEIGHT / 2.) * scale;
+    let top = (center - height / 2.).clamp(0., bar.height() - height);
+    let marker = egui::Rect::from_min_size(
+        egui::pos2(bar.left(), bar.top() + top),
+        egui::vec2(bar.width(), height),
+    );
+    let palette = design::colors(ui);
+    ui.painter().rect_filled(marker, 1., palette.selected);
+    if thumb.rect.intersects(marker) {
+        thumb.fill = if ui.visuals().dark_mode {
+            egui::Color32::from_rgb(64, 111, 96)
+        } else {
+            egui::Color32::from_rgb(80, 141, 114)
+        };
+        ui.painter().with_clip_rect(marker).add(thumb);
+    }
+}
+
 fn track_list_frame() -> egui::Frame {
     egui::Frame::NONE.inner_margin(egui::Margin {
         left: -8,

@@ -2,9 +2,9 @@ use super::scroll_anchor::ScrollAnchor;
 use super::{
     art, chat_title_galley, clock, clock_width, full_menu_button, horizontal_slot,
     keyboard::{self, empty_label, focus_outline, ListNavigation, MenuItems},
-    layout_fraction, list_scroll_area, search_field, selection, show_chat_title, track_list_frame,
-    track_menu_button, track_more_button, WorkspacePane, TRACK_ARTWORK_SIZE, TRACK_ROW_PADDING,
-    TRACK_SCROLL_GUTTER,
+    layout_fraction, list_scroll_area, paint_current_track_marker, search_field, selection,
+    show_chat_title, track_list_frame, track_menu_button, track_more_button, WorkspacePane,
+    TRACK_ARTWORK_SIZE, TRACK_ROW_PADDING, TRACK_SCROLL_GUTTER,
 };
 use crate::application::commands::AppCommand;
 use crate::{design, tr, App};
@@ -91,6 +91,7 @@ struct PlaylistScroll {
     filters: [bool; 3],
     scrolled: bool,
     held_current: Option<(u64, TrackId)>,
+    current_row: (Option<TrackId>, Option<usize>),
     visible: ScrollAnchor<(u64, TrackId)>,
 }
 
@@ -984,6 +985,24 @@ impl App {
                 }
             },
         );
+        let current_row = old
+            .as_ref()
+            .filter(|old| {
+                old.library == library
+                    && old.order == order
+                    && old.query == self.search
+                    && old.filters == filters
+                    && old.current_row.0 == current
+            })
+            .map_or_else(
+                || {
+                    current
+                        .filter(|id| id.chat == chat_id)
+                        .and_then(|id| tracks.iter().position(|track| track.id() == id))
+                },
+                |old| old.current_row.1,
+            );
+        paint_current_track_marker(list_ui, &scroll, current_row, tracks.len(), stride);
         list_frame.end(ui);
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
@@ -1013,6 +1032,7 @@ impl App {
                     filters,
                     scrolled: scrolled || moved,
                     held_current: if moved { None } else { held_current },
+                    current_row: (current, current_row),
                     visible,
                 },
             )
