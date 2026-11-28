@@ -42,36 +42,49 @@ impl App {
         &mut self,
         ui: &mut egui::Ui,
         center: egui::Pos2,
+        reverse: f32,
         shuffle: f32,
         repeat: f32,
     ) {
         let gap = ui.spacing().item_spacing.x;
-        let half_width = 22. + 36. + gap;
-        let point = center - egui::vec2(half_width + gap + (36. + gap) * shuffle + 36., 0.);
-        let mut reverse = horizontal_slot(ui, "reverse-queue", point, egui::Vec2::splat(36.));
-        let session = &self.state.view().session;
-        let enabled = !self.state.queue_reversing()
-            && (session.timeline().len() > 1 || session.playlist_page_request().is_some());
-        let active = session.playlist_order() == gramwave_domain::PlaylistOrder::OldestFirst;
-        let hint = if active {
-            tr("Reverse on · Turn off")
-        } else {
-            tr("Reverse off · Turn on")
-        };
-        let reverse = reverse.add_enabled_ui(enabled, |ui| {
-            design::toggle(ui, Icon::Reverse, active, "", hint)
-        });
-        #[cfg(test)]
-        ui.ctx().data_mut(|data| {
-            data.insert_temp(egui::Id::new("test-reverse-queue"), reverse.response.rect);
-        });
-        if reverse.inner {
-            self.execute(AppCommand::ReverseQueue);
+        let slot_width = 36. + gap;
+        let half_width = 22. + slot_width;
+        if reverse > 0. {
+            let point = center - egui::vec2(half_width + (1. + shuffle) * slot_width, 0.);
+            let mut slot = horizontal_slot(ui, "reverse-queue", point, egui::Vec2::splat(36.));
+            slot.multiply_opacity(reverse);
+            let session = &self.state.view().session;
+            let enabled = !self.state.queue_reversing()
+                && (session.timeline().len() > 1 || session.playlist_page_request().is_some());
+            let active = session.playlist_order() == gramwave_domain::PlaylistOrder::OldestFirst;
+            let hint = if active {
+                tr("Reverse on · Turn off")
+            } else {
+                tr("Reverse off · Turn on")
+            };
+            let reverse = slot.add_enabled_ui(enabled, |ui| {
+                design::toggle(ui, Icon::Reverse, active, "", hint)
+            });
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(egui::Id::new("test-reverse-queue"), reverse.response.rect);
+            });
+            if reverse.inner {
+                self.execute(AppCommand::ReverseQueue);
+            }
         }
         if shuffle > 0. {
-            let point = center - egui::vec2(half_width + 36. + gap, 0.);
+            let point = center - egui::vec2(half_width + slot_width, 0.);
             let mut button = horizontal_slot(ui, "shuffle", point, egui::Vec2::splat(36.));
             button.multiply_opacity(shuffle);
+            if reverse > 0. {
+                let left = point.x + slot_width * (1. - shuffle);
+                button.set_clip_rect(
+                    button
+                        .clip_rect()
+                        .with_min_x(left.max(button.clip_rect().left())),
+                );
+            }
             let shuffle_hint = if self.state.view().shuffle {
                 tr("Shuffle on · Turn off")
             } else {
@@ -125,8 +138,7 @@ impl App {
             let point = center + egui::vec2(half_width + gap, 0.);
             let mut button = horizontal_slot(ui, "repeat", point, egui::Vec2::splat(36.));
             button.multiply_opacity(repeat);
-            let clip = button.clip_rect();
-            button.set_clip_rect(clip.with_max_x(clip.right().min(point.x + (36. + gap) * repeat)));
+            clip_slot_right(&mut button, point.x + slot_width * repeat);
             let hint = match self.state.view().repeat {
                 RepeatMode::Off => tr("Repeat off · Repeat all"),
                 RepeatMode::All => tr("Repeat all · Repeat one"),
@@ -195,39 +207,59 @@ impl App {
         let gap = ui.spacing().item_spacing.x;
         let button_slot = 36. + gap;
         let basic_width = 44. + 2. * button_slot;
-        let extended_width = basic_width + 3. * button_slot;
+        // On shrink, hide the volume slider, reverse, shuffle, repeat, then mute.
+        let [mute, repeat, shuffle, reverse] = [
+            ("transport-mute", 1.),
+            ("transport-repeat", 2.),
+            ("transport-shuffle", 3.),
+            ("transport-reverse", 4.),
+        ]
+        .map(|(id, slots)| {
+            let fits = basic_width + slots * button_slot;
+            let fraction = layout_fraction(ui, id, width >= fits + button_slot);
+            // Leave room for the fade-out unless a larger resize takes the slot away.
+            if width >= fits {
+                fraction
+            } else {
+                0.
+            }
+        });
+        let queue = layout_fraction(ui, "transport-queue", dock && player.has_workspace());
+        let queue = if width >= 798. { queue } else { 0. };
+        let queue_width = queue * button_slot;
+        let left_width = (reverse + shuffle) * button_slot;
+        let play_width = basic_width + left_width + repeat * button_slot;
+        let available_slider = width - basic_width - 4. * button_slot - queue_width - gap;
+        let slider = layout_fraction(ui, "transport-volume", available_slider >= 72.);
+        let slider = if available_slider >= 28. { slider } else { 0. };
+        let compact_slider = available_slider.clamp(28., 104.);
+        let compact_buttons = play_width + queue_width + mute * button_slot;
+        let compact_width = compact_buttons + (gap + compact_slider) * slider;
+        let slider_footprint = if slider > 0. {
+            let slider_width = egui::lerp(28. ..=compact_slider, slider);
+            gap + (compact_slider + slider_width) / 2.
+        } else {
+            0.
+        };
+        let compact_left = ((width - compact_width - button_slot * slider) / 2.)
+            .min(width - compact_buttons - slider_footprint)
+            .max(0.);
+
         let seek_active = matches!(player, PlayerLayout::Mini | PlayerLayout::Full);
         let expanded = player == PlayerLayout::Full && width >= 798.;
-        let wide = layout_fraction(ui, "transport-wide", expanded);
-        // Keep mute available after shuffle and repeat fold away.
-        let mute = layout_fraction(ui, "transport-mute", width >= extended_width);
-        let repeat = layout_fraction(
-            ui,
-            "transport-repeat",
-            width >= extended_width + button_slot / 2.,
-        );
-        let shuffle = layout_fraction(
-            ui,
-            "transport-shuffle",
-            width >= extended_width + button_slot,
-        );
-        let queue = layout_fraction(ui, "transport-queue", dock && player.has_workspace());
-        let play_width = basic_width + button_slot * (1. + shuffle + repeat);
-        let compact_slider = (width - extended_width - button_slot * (1. + queue) - gap).min(104.);
-        let slider = layout_fraction(ui, "transport-volume", expanded || compact_slider >= 72.);
-        let compact_width =
-            play_width + button_slot * (mute + queue) + (gap + compact_slider.max(72.)) * slider;
-        let compact_left = (width - compact_width - button_slot).max(0.) / 2.;
+        let mut wide = layout_fraction(ui, "transport-wide", expanded);
         let metadata_width = ((width - 48.) * 0.25).clamp(60., 300.);
         let wide_left = 24. + metadata_width + gap;
-        let wide_center =
-            (width - 48. - metadata_width - (144. + 56. * queue) - 24.).max(basic_width);
+        let wide_right = 144. + 56. * queue;
+        let wide_center = width - 48. - metadata_width - wide_right - 24.;
+        if wide_center < basic_width + 2. * left_width.max(repeat * button_slot) {
+            wide = 0.;
+        }
         let center_left = wide * wide_left;
         let center_width = egui::lerp(width..=wide_center, wide);
         let play_x = area.left()
             + egui::lerp(
-                (compact_left + button_slot * (1. + shuffle) + basic_width / 2.)
-                    ..=(wide_left + wide_center / 2.),
+                (compact_left + left_width + basic_width / 2.)..=(wide_left + wide_center / 2.),
                 wide,
             )
             .clamp(
@@ -240,7 +272,7 @@ impl App {
                 (compact_left + play_width + gap)..=(wide_left + wide_center + gap),
                 wide,
             );
-        let volume_x = right_x + button_slot * queue;
+        let volume_x = right_x + queue_width;
         let volume_y = play_y + 12. * wide;
 
         let media = if seek_active || wide > 0. {
@@ -263,9 +295,11 @@ impl App {
             let mut metadata =
                 horizontal_slot(ui, "metadata", point, egui::vec2(metadata_width, 72.));
             metadata.multiply_opacity(wide);
-            metadata.set_clip_rect(metadata.clip_rect().with_max_x(
-                (play_x - basic_width / 2. - button_slot * (1. + shuffle) - gap).max(area.left()),
-            ));
+            metadata.set_clip_rect(
+                metadata
+                    .clip_rect()
+                    .with_max_x((play_x - basic_width / 2. - left_width - gap).max(area.left())),
+            );
             metadata.horizontal(|ui| {
                 let track = media.as_ref();
                 art(
@@ -295,24 +329,28 @@ impl App {
                 });
             });
         }
-        self.transport_buttons(ui, egui::pos2(play_x, play_y), shuffle, repeat);
+        self.transport_buttons(ui, egui::pos2(play_x, play_y), reverse, shuffle, repeat);
         if queue > 0. {
-            let point = egui::pos2(volume_x - button_slot, volume_y);
+            let point = egui::pos2(right_x, volume_y);
             let mut button = horizontal_slot(ui, "queue", point, egui::Vec2::splat(36.));
             button.multiply_opacity(queue);
+            clip_slot_right(&mut button, volume_x);
             self.queue_button(&mut button);
         }
         if mute > 0. {
             let point = egui::pos2(volume_x, volume_y);
             let mut button = horizontal_slot(ui, "mute", point, egui::Vec2::splat(36.));
             button.multiply_opacity(mute);
+            if slider > 0. {
+                clip_slot_right(&mut button, volume_x + button_slot * mute);
+            }
             self.mute_button(&mut button);
         }
         if slider > 0. {
-            let full_width = egui::lerp(compact_slider.max(72.)..=(96. + 8. * queue), wide);
+            let full_width = egui::lerp(compact_slider..=(96. + 8. * queue), wide);
             let slider_width = egui::lerp(28. ..=full_width, slider);
             let point = egui::pos2(
-                volume_x + button_slot + (full_width - slider_width) / 2.,
+                volume_x + button_slot * mute + (full_width - slider_width) / 2.,
                 volume_y,
             );
             let mut volume = horizontal_slot(ui, "volume", point, egui::vec2(slider_width, 28.));
@@ -454,6 +492,11 @@ impl App {
             });
         }
     }
+}
+
+fn clip_slot_right(ui: &mut egui::Ui, right: f32) {
+    let clip = ui.clip_rect();
+    ui.set_clip_rect(clip.with_max_x(clip.right().min(right)));
 }
 
 pub(super) fn seek_repaint_interval(duration: f64, rail_pixels: f32) -> Duration {

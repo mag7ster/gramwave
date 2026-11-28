@@ -58,48 +58,49 @@ fn loading_track_animates_the_play_button_and_leaves_it_clickable() {
 #[test]
 fn play_pause_remains_clickable_during_resize() {
     let mut h = queue_harness(3);
-    let play = |output: egui::FullOutput| {
-        output
-            .shapes
-            .iter()
-            .find_map(|painted| match &painted.shape {
-                egui::Shape::Rect(shape)
-                    if shape.corner_radius == egui::CornerRadius::same(22)
-                        && (shape.rect.width() - 44.).abs() < 1. =>
-                {
-                    assert!(
-                        painted.clip_rect.expand(0.5).contains_rect(shape.rect),
-                        "{:?} clipped by {:?}",
-                        shape.rect,
-                        painted.clip_rect
-                    );
-                    Some(shape.rect)
-                }
-                _ => None,
-            })
-            .expect("visible playback button")
-    };
     h.size = egui::vec2(850., 149.);
     h.settle();
     let paused = h.app.state.playback().state().paused();
     h.size.y = 151.;
     h.frame(vec![]);
-    let moving = play(h.frame(vec![]));
+    let moving = play_rect(&h.frame(vec![]));
     h.click(moving.center());
     assert_ne!(h.app.state.playback().state().paused(), paused);
     h.app.shutdown_core().unwrap();
+}
+
+fn play_rect(output: &egui::FullOutput) -> egui::Rect {
+    output
+        .shapes
+        .iter()
+        .find_map(|painted| match &painted.shape {
+            egui::Shape::Rect(shape)
+                if shape.corner_radius == egui::CornerRadius::same(22)
+                    && (shape.rect.width() - 44.).abs() < 1. =>
+            {
+                assert!(
+                    painted.clip_rect.expand(0.5).contains_rect(shape.rect),
+                    "{:?} clipped by {:?}",
+                    shape.rect,
+                    painted.clip_rect
+                );
+                Some(shape.rect)
+            }
+            _ => None,
+        })
+        .expect("visible playback button")
 }
 
 #[test]
 fn smallest_player_keeps_basic_playback_controls() {
     let mut h = queue_harness(3);
     h.size = egui::Vec2::from(crate::launch::MIN_WINDOW_SIZE);
-    h.settle();
-    h.app.test_seek = None;
     h.frame(vec![]);
-    assert!(h.app.test_seek.is_none());
+    let center = play_rect(&h.frame(vec![])).center();
     let first = h.app.state.view().session.current().unwrap().entry_id;
-    let center = h.size.to_pos2() / 2.;
+    let paused = h.app.state.playback().state().paused();
+    h.click(center);
+    assert_ne!(h.app.state.playback().state().paused(), paused);
     h.click(center + egui::vec2(48., 0.));
     assert_ne!(
         h.app.state.view().session.current().unwrap().entry_id,
@@ -110,7 +111,137 @@ fn smallest_player_keeps_basic_playback_controls() {
         h.app.state.view().session.current().unwrap().entry_id,
         first
     );
+    h.settle();
+    h.app.test_seek = None;
+    assert_eq!(play_rect(&h.frame(vec![])).center(), h.size.to_pos2() / 2.);
+    assert!(h.app.test_seek.is_none());
     assert!(h.ctx.read_response(egui::Id::new("track-search")).is_none());
+}
+
+#[test]
+fn reverse_and_playback_buttons_move_through_resize_transitions() {
+    let mut h = queue_harness(5);
+    egui_extras::install_image_loaders(&h.ctx);
+    h.size = egui::vec2(369., 125.);
+    h.settle();
+    let frame = h.frame(vec![]);
+    let expanded = play_rect(&frame).center().x;
+    let full_alpha = transport_icon(&h.ctx, &frame, Icon::Reverse)
+        .unwrap()
+        .fill
+        .a();
+
+    h.size.x = 367.;
+    h.frame(vec![]);
+    h.frame(vec![]);
+    let frame = h.frame(vec![]);
+    let shrinking = play_rect(&frame).center().x;
+    let fading = transport_icon(&h.ctx, &frame, Icon::Reverse)
+        .unwrap()
+        .fill
+        .a();
+    assert!((1..full_alpha).contains(&fading));
+    h.settle();
+    let frame = h.frame(vec![]);
+    let compact = play_rect(&frame).center().x;
+    assert!(compact < shrinking && shrinking < expanded);
+    assert!(transport_icon(&h.ctx, &frame, Icon::Reverse).is_none());
+
+    h.size.x = 369.;
+    h.frame(vec![]);
+    h.frame(vec![]);
+    let frame = h.frame(vec![]);
+    let growing = play_rect(&frame).center().x;
+    assert!(compact < growing && growing < expanded);
+    let fading = transport_icon(&h.ctx, &frame, Icon::Reverse)
+        .unwrap()
+        .fill
+        .a();
+    assert!((1..full_alpha).contains(&fading));
+}
+
+fn transport_icon<'a>(
+    ctx: &egui::Context,
+    frame: &'a egui::FullOutput,
+    icon: Icon,
+) -> Option<&'a egui::epaint::RectShape> {
+    let size = egui::load::SizeHint::Size {
+        width: 20,
+        height: 20,
+        maintain_aspect_ratio: false,
+    };
+    let texture = ctx
+        .try_load_texture(icon.uri(), egui::TextureOptions::LINEAR, size)
+        .unwrap()
+        .texture_id()
+        .unwrap();
+    frame
+        .shapes
+        .iter()
+        .find_map(|painted| match &painted.shape {
+            egui::Shape::Rect(rect)
+                if rect
+                    .brush
+                    .as_ref()
+                    .is_some_and(|brush| brush.fill_texture_id == texture)
+                    && painted.clip_rect.contains_rect(rect.rect) =>
+            {
+                Some(rect)
+            }
+            _ => None,
+        })
+}
+
+#[test]
+fn transport_controls_fold_away_in_priority_order() {
+    let mut h = queue_harness(5);
+    egui_extras::install_image_loaders(&h.ctx);
+    let icons = [Icon::Volume, Icon::Repeat, Icon::Shuffle, Icon::Reverse];
+    let cases = [
+        (500., 4),
+        (390., 4),
+        (350., 3),
+        (305., 2),
+        (260., 1),
+        (220., 0),
+    ];
+    let volume_id = egui::Id::new("test-volume");
+    for (width, count) in cases.into_iter().chain(cases.into_iter().rev()) {
+        h.size = egui::vec2(width, 125.);
+        h.settle();
+        h.ctx
+            .data_mut(|data| data.remove::<(egui::Rect, egui::Id)>(volume_id));
+        let frame = h.frame(vec![]);
+        for (index, icon) in icons.into_iter().enumerate() {
+            let visible = transport_icon(&h.ctx, &frame, icon).is_some();
+            assert_eq!(visible, index < count, "width {width}, icon {icon:?}");
+        }
+        let slider = h
+            .ctx
+            .data(|data| data.get_temp::<(egui::Rect, egui::Id)>(volume_id));
+        assert_eq!(slider.is_some(), width == 500., "width {width}");
+    }
+}
+
+#[test]
+fn volume_slider_contracts_before_disappearing() {
+    let mut h = Harness::new();
+    let volume_id = egui::Id::new("test-volume");
+    let slider = |ctx: &egui::Context| {
+        ctx.data(|data| data.get_temp::<(egui::Rect, egui::Id)>(volume_id))
+            .unwrap()
+            .0
+    };
+    h.size = egui::vec2(405., 125.);
+    h.settle();
+    let before = slider(&h.ctx);
+    h.size.x = 403.;
+    h.frame(vec![]);
+    h.frame(vec![]);
+    let frame = h.frame(vec![]);
+    let moving = slider(&h.ctx);
+    assert!(moving.width() > 28. && moving.width() < before.width());
+    assert!(moving.left() > play_rect(&frame).right() && moving.right() <= h.size.x);
 }
 
 #[test]
@@ -425,10 +556,7 @@ fn clicking_time_toggles_remaining_hours_without_seeking_or_moving_the_rail() {
 
 #[test]
 fn reverse_button_turns_the_queue_around_the_playing_track() {
-    for size in [
-        egui::vec2(1240., 800.),
-        egui::Vec2::from(crate::launch::MIN_WINDOW_SIZE),
-    ] {
+    for size in [egui::vec2(1240., 800.), egui::vec2(390., 125.)] {
         let mut h = queue_harness(5);
         h.app
             .execute(crate::application::commands::AppCommand::Next);
