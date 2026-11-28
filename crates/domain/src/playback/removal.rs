@@ -66,6 +66,8 @@ impl Fragment {
 pub struct QueueRemoval {
     fragments: Vec<Fragment>,
     entries: Vec<QueueEntry>,
+    play_next: Vec<(usize, QueueEntryId)>,
+    manual: Vec<QueueEntryId>,
     current: Option<(QueueEntryId, u64)>,
 }
 
@@ -168,6 +170,22 @@ impl Session {
             order_ranges.into_iter(),
             &mut fragments,
         );
+        let play_next = self
+            .play_next
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, id)| {
+                selected.contains(id) && !still_visible.contains(id)
+                    || current.is_some() && self.remaining.first() == Some(id)
+            })
+            .collect();
+        let manual = self
+            .manual
+            .iter()
+            .copied()
+            .filter(|id| selected.contains(id) && !still_visible.contains(id))
+            .collect();
         self.collect();
 
         // A later removal can border a slot already hidden by an earlier one.
@@ -196,6 +214,8 @@ impl Session {
         Some(QueueRemoval {
             fragments,
             entries,
+            play_next,
+            manual,
             current,
         })
     }
@@ -206,11 +226,14 @@ impl Session {
         pending: impl IntoIterator<Item = &'a QueueRemoval>,
     ) -> bool {
         let pending: Vec<_> = pending.into_iter().collect();
+        let removed: HashSet<_> = removal.entries.iter().map(|entry| entry.entry_id).collect();
+        let mut displaced = None;
         for entry in removal.entries {
             self.entries.entry(entry.entry_id).or_insert(entry);
         }
         if let Some((id, position_ms)) = removal.current {
-            if let Some(displaced) = self.current.replace(id) {
+            displaced = self.current.replace(id);
+            if let Some(displaced) = displaced {
                 self.remaining.insert(0, displaced);
             }
             self.position_ms = position_ms;
@@ -226,6 +249,12 @@ impl Session {
                 }
             };
             fragment.restore(list, &pending);
+        }
+        self.manual.extend(removal.manual);
+        for (index, id) in removal.play_next {
+            if (removed.contains(&id) || displaced == Some(id)) && !self.play_next.contains(&id) {
+                self.play_next.insert(index.min(self.play_next.len()), id);
+            }
         }
         self.restore_boundary();
         removal.current.is_some()

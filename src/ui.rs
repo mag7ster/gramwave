@@ -546,6 +546,9 @@ impl App {
             self.warm_initial_covers(ctx);
         }
         let cache = self.maintain_cache(now);
+        if !window_present || self.hidden {
+            self.state.finish_page_browse_frame();
+        }
         let offline = self.pump_offline(now);
 
         if window_present

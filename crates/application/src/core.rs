@@ -68,6 +68,8 @@ pub struct AppCore {
     pub(crate) offline: crate::offline::OfflineCore,
     pub(crate) auth: crate::auth::AuthCore,
     pub(crate) playback: crate::playback::PlaybackCore,
+    pub(crate) shuffle_work: crate::shuffle_work::ShuffleWork,
+    pub(crate) page_browse: crate::page_browse::PageBrowse,
     pub(crate) queue_work: crate::queue_work::QueueWork,
     pub(crate) library: crate::library::LibraryCore,
     pub(crate) state: State,
@@ -83,6 +85,8 @@ impl AppCore {
             auth: Default::default(),
             playback: Default::default(),
             queue_work: Default::default(),
+            page_browse: Default::default(),
+            shuffle_work: Default::default(),
             library: Default::default(),
             offline: crate::offline::OfflineCore::new(Default::default()),
             pending: Default::default(),
@@ -130,6 +134,9 @@ impl AppCore {
             self.state.session.set_position_ms(position_ms);
             self.record_session_change();
         }
+    }
+    pub(crate) fn record_settings_change(&mut self) {
+        self.pending.settings = Some(Settings::from(&self.state));
     }
     pub(crate) fn record_session_change(&mut self) {
         self.pending.session = Some(self.state.session.clone());

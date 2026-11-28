@@ -42,11 +42,11 @@ fn queue_drag(
     list: egui::Rect,
     stride: f32,
     queue: QueueTimeline<'_>,
-    reorder: (egui::Id, u64),
+    reorder: (egui::Id, (u64, u64, u64)),
     row_id: impl Fn(usize) -> egui::Id,
     allow_start: bool,
 ) -> (Option<LiftedQueueRow>, Option<AppCommand>) {
-    let (key, generation) = reorder;
+    let (key, row_revision) = reorder;
     let ctx = ui.ctx();
     let current = queue
         .current_index()
@@ -122,11 +122,11 @@ fn queue_drag(
         stop();
         // Start the settling animation where the lifted row was released.
         ctx.animate_value_with_time(
-            id.with(("y", generation)),
+            id.with(("y", row_revision)),
             (rect.top() - list.top()) / stride,
             0.,
         );
-        ctx.animate_value_with_time(id.with(("x", generation)), rect.left() - list.left(), 0.);
+        ctx.animate_value_with_time(id.with(("x", row_revision)), rect.left() - list.left(), 0.);
         if !cancelled && inside && from != slot {
             return (
                 Some(LiftedQueueRow { from, slot, rect }),
@@ -282,10 +282,12 @@ impl App {
         let has_current = self.state.view().session.current().is_some();
         let preview_history =
             self.demo && self.options.scenario.as_deref() == Some("queue-history");
-        let (scroll_key, mut follow, realign) = queue_scroll::QueueScroll::load(
+        let shuffle_generation = self.state.playback().queue_shuffle_generation();
+        let (scroll_key, mut follow, realign, shuffled) = queue_scroll::QueueScroll::load(
             ui.ctx(),
             preview_history,
             self.state.playback().queue_start_generation(),
+            shuffle_generation,
         );
         ui.horizontal(|ui| {
             if empty {
@@ -333,21 +335,8 @@ impl App {
             ui.ctx()
                 .data_mut(|data| data.remove::<egui::Rect>(egui::Id::new("test-queue-return")));
         }
-        if let Some(error) = self.state.queue_page_error() {
-            let message = error.to_string();
-            ui.horizontal_wrapped(|ui| {
-                ui.weak(tr("Could not load the rest of the queue"))
-                    .on_hover_text(message);
-                if ui.button(tr("Retry")).clicked() {
-                    self.execute(AppCommand::RetryQueue);
-                }
-            });
-        } else if self.state.queue_reversing() {
+        if self.state.queue_reversing() {
             ui.weak(tr("Loading the rest of the queue to reverse it…"));
-        } else if self.state.queue_waiting() {
-            ui.weak(tr("Waiting for more tracks…"));
-        } else if self.state.view().session.playlist_page_request().is_some() {
-            ui.weak(tr("More tracks from the source chat"));
         }
         if empty {
             ui.label(tr("Your queue is empty"));
@@ -380,11 +369,15 @@ impl App {
             .current_index()
             .or_else(|| (queue.upcoming_start() < queue.len()).then_some(queue.upcoming_start()))
             .map(|i| (queue.get(i).unwrap().entry_id, i));
-        let target = anchor.map_or_else(
-            || (rows_height - list_ui.available_height().max(64.)).max(0.),
-            |(_, i)| i as f32 * stride,
-        );
-        let area_id = list_ui.make_persistent_id("queue-list");
+        let target = if shuffled && !has_current {
+            0.
+        } else {
+            anchor.map_or_else(
+                || (rows_height - list_ui.available_height().max(64.)).max(0.),
+                |(_, i)| i as f32 * stride,
+            )
+        };
+        let area_id = list_ui.make_persistent_id(egui::IdSalt::new("queue-list"));
         let generation = self.state.queue_reverse_generation();
         let frame_time = list_ui.input(|input| input.time);
         let viewport_height = list_ui.available_height();
@@ -397,9 +390,22 @@ impl App {
             viewport_height,
             frame_time,
         );
-        if reversed {
+        if reversed || shuffled {
             egui::scroll_area::State::default().store(list_ui.ctx(), area_id);
         }
+        if shuffled {
+            design::stop_middle_scroll(list_ui.ctx(), area_id);
+        }
+        let page_generation = self.state.queue_page_generation();
+        follow.page_added(
+            queue,
+            (page_generation, boundary),
+            stride,
+            max,
+            realign || reversed,
+        );
+        let keyboard_down = super::page_browse::keyboard_down(list_ui);
+        let wheel_down = super::page_browse::wheel_moving_down(list_ui);
         let fade = follow.fade(list_ui);
         let middle = design::middle_scroll_active(list_ui.ctx(), area_id);
         let (offset, busy) =
@@ -413,7 +419,12 @@ impl App {
             target.max(offset.min(rows_height - design::ROW_HEIGHT))
         };
         let mut selection_scrolled = false;
-        let queue_scroll = list_scroll_area(list_ui)
+        let mut area = list_scroll_area(list_ui);
+        if shuffled {
+            area = area.scroll_source(egui::scroll_area::ScrollSource::NONE);
+        }
+        let row_revision = (generation, shuffle_generation, page_generation);
+        let queue_scroll = area
             .id_salt("queue-list")
             .vertical_scroll_offset(offset)
             .show_viewport(list_ui, |ui, viewport| {
@@ -435,32 +446,53 @@ impl App {
                 let scope = selection::QUEUE;
                 self.selection.present_queue(ui.ctx(), queue.len(), key_at);
                 let rows = list.with_max_y(list.top() + rows_height);
-                let (focus, scrolling) =
-                    self.selection
-                        .pointer(ui, scope, queue.len(), key_at, rows, stride);
-                selection_scrolled = scrolling;
-                if let Some(i) = focus {
-                    ui.memory_mut(|memory| memory.request_focus(key_at(i)));
-                }
-                if let Some(i) =
-                    self.keyboard
-                        .step(ui, nav, true, key_at, Some((&mut self.selection, scope)))
-                {
-                    let rect = queue_row_rect(list, stride, i as f32);
-                    if !ui.is_rect_visible(rect) {
-                        self.keyboard.reveal(ui, rect, nav, i);
+                if shuffled {
+                    self.selection.stop_pointer(scope);
+                } else {
+                    let (focus, scrolling) =
+                        self.selection
+                            .pointer(ui, scope, queue.len(), key_at, rows, stride);
+                    selection_scrolled = scrolling;
+                    if let Some(i) = focus {
+                        ui.memory_mut(|memory| memory.request_focus(key_at(i)));
+                    }
+                    if let Some(i) = self.keyboard.step(
+                        ui,
+                        nav,
+                        true,
+                        key_at,
+                        Some((&mut self.selection, scope)),
+                    ) {
+                        let rect = queue_row_rect(list, stride, i as f32);
+                        if !ui.is_rect_visible(rect) {
+                            self.keyboard.reveal(ui, rect, nav, i);
+                        }
                     }
                 }
-                let allow_drag = !self.selection.tracking(scope) && !self.selection.block_click();
-                let (lifted, moved) = queue_drag(
-                    ui,
-                    list,
-                    stride,
-                    queue,
-                    (key, generation),
-                    key_at,
-                    allow_drag && !reversed,
-                );
+                let allow_drag =
+                    !shuffled && !self.selection.tracking(scope) && !self.selection.block_click();
+                let (lifted, moved) = if shuffled {
+                    let ctx = ui.ctx();
+                    let drag = ctx.data_mut(|data| {
+                        let drag = data.get_temp::<QueueDrag>(key);
+                        data.remove::<QueueDrag>(key);
+                        drag
+                    });
+                    if drag.is_some_and(|drag| ctx.is_being_dragged(drag.id)) {
+                        ctx.stop_dragging();
+                    }
+                    (None, None)
+                } else {
+                    queue_drag(
+                        ui,
+                        list,
+                        stride,
+                        queue,
+                        (key, row_revision),
+                        key_at,
+                        allow_drag && !reversed,
+                    )
+                };
                 reordering = lifted.is_some();
                 action = moved;
                 let remove = |range: std::ops::RangeInclusive<usize>| AppCommand::RemoveQueueRows {
@@ -504,7 +536,7 @@ impl App {
                     }
                     let id = key_at(i);
                     let y = ui.ctx().animate_value_with_time(
-                        id.with(("y", generation)),
+                        id.with(("y", row_revision)),
                         slot as f32,
                         animation_time,
                     );
@@ -513,7 +545,7 @@ impl App {
                         continue;
                     }
                     let x = ui.ctx().animate_value_with_time(
-                        id.with(("x", generation)),
+                        id.with(("x", row_revision)),
                         0.,
                         animation_time,
                     );
@@ -533,7 +565,9 @@ impl App {
                         row.clone()
                             .on_hover_text(tr("More tracks will play before this row"));
                     }
-                    self.keyboard.row(ui, nav, i, id, false, (&row, rect));
+                    if !shuffled {
+                        self.keyboard.row(ui, nav, i, id, false, (&row, rect));
+                    }
                     row.widget_info(|| {
                         egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
@@ -581,15 +615,17 @@ impl App {
                         current,
                         current || selected_row || row.has_focus(),
                     );
-                    self.keyboard.row(ui, nav, i, id, true, (&menu, rect));
-                    self.selection.start(
-                        &row,
-                        &menu,
-                        scope,
-                        (i, id),
-                        self.keyboard.source_key(nav.pane),
-                        Some(queue_cover_rect(rect)),
-                    );
+                    if !shuffled {
+                        self.keyboard.row(ui, nav, i, id, true, (&menu, rect));
+                        self.selection.start(
+                            &row,
+                            &menu,
+                            scope,
+                            (i, id),
+                            self.keyboard.source_key(nav.pane),
+                            Some(queue_cover_rect(rect)),
+                        );
+                    }
                     if selected_row {
                         selection::paint(ui, rect);
                     }
@@ -598,6 +634,9 @@ impl App {
                     #[cfg(test)]
                     self.test_queue_rows
                         .insert(entry.entry_id, (rect, menu.rect, row.id));
+                    if shuffled {
+                        continue;
+                    }
                     let contents = |ui: &mut egui::Ui, items: &mut MenuItems| {
                         if let Some(range) = self
                             .selection
@@ -745,21 +784,62 @@ impl App {
                 queue_scroll.inner_rect,
             );
         });
-        design::middle_scroll(
-            ui,
-            queue_scroll.id,
-            queue_scroll.inner_rect,
-            queue_scroll.content_size.y,
-        );
+        if !shuffled {
+            design::middle_scroll(
+                ui,
+                queue_scroll.id,
+                queue_scroll.inner_rect,
+                queue_scroll.content_size.y,
+            );
+        }
         let middle = design::middle_scroll_active(ui.ctx(), queue_scroll.id);
         follow.finish(
             ui,
             &queue_scroll,
             target,
             busy,
-            reordering || reversed,
+            reordering || reversed || shuffled,
             middle,
         );
+        let preview_paging =
+            self.demo && self.options.scenario.as_deref() == Some("queue-continuation");
+        if (!self.demo || preview_paging)
+            && !self.settings_open
+            && self.offline_confirm.is_none()
+            && self.state.view().session.playlist_page_request().is_some()
+        {
+            let viewport = queue_scroll.inner_rect;
+            let offset = follow.offset();
+            let end = boundary as f32 * stride;
+            // The distance from the top of a row includes that row itself.
+            let lookahead = (gramwave_application::page_browse::QUEUE_PREFETCH_ROWS + 1) as f32;
+            let interacting = keyboard_down
+                || middle
+                || wheel_down && ui.rect_contains_pointer(viewport)
+                || ui.input(|input| input.pointer.primary_down());
+            let signal = super::page_browse::demand(
+                ui,
+                viewport,
+                (queue_scroll.inner, offset),
+                end,
+                (lookahead * stride, (lookahead + 8.) * stride),
+                interacting,
+            );
+            if !shuffled && !preview_paging && self.state.browse_queue(signal) {
+                ui.request_repaint();
+            }
+            super::page_browse::indicator(
+                ui,
+                viewport,
+                offset,
+                end.min(rows_height),
+                if preview_paging {
+                    gramwave_application::page_browse::PageStatus::Loading
+                } else {
+                    self.state.queue_page_status()
+                },
+            );
+        }
         follow.remember(
             self.state.view().session.timeline(),
             queue_scroll.inner_rect.height(),

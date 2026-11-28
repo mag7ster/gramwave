@@ -21,7 +21,9 @@ pub(super) struct QueueScroll {
     animation: Option<(f32, f64)>,
     snap_at: Option<f64>,
     generation: u64,
+    page: Option<(u64, usize)>,
     start_generation: u64,
+    shuffle_generation: u64,
     fade_start: Option<f64>,
     visible: Option<ScrollAnchor<(usize, QueueEntryId, TrackId)>>,
     interior_current: Option<(QueueEntryId, f32)>,
@@ -32,21 +34,25 @@ impl QueueScroll {
         ctx: &egui::Context,
         preview_history: bool,
         start_generation: u64,
-    ) -> (egui::Id, Self, bool) {
+        shuffle_generation: u64,
+    ) -> (egui::Id, Self, bool, bool) {
         let key = egui::Id::new("queue-scroll-mode");
         let mut scroll: Self = ctx.data(|data| data.get_temp(key)).unwrap_or_default();
         let frame = ctx.cumulative_frame_nr();
         let opened = scroll.frame.is_none_or(|last| frame > last + 1);
         let started = scroll.start_generation != start_generation;
-        if opened || started {
+        let shuffled = scroll.shuffle_generation != shuffle_generation;
+        let realign = opened || started || shuffled;
+        if realign {
             scroll = Self {
-                following: started || !preview_history,
+                following: started || shuffled || !preview_history,
                 start_generation,
+                shuffle_generation,
                 ..Self::default()
             };
         }
         scroll.frame = Some(frame);
-        (key, scroll, opened || started)
+        (key, scroll, realign, shuffled)
     }
 
     pub(super) fn reverse(
@@ -100,6 +106,53 @@ impl QueueScroll {
                 .unwrap_or_else(|| self.offset.min(max.max(0.)));
         }
         true
+    }
+
+    pub(super) fn offset(&self) -> f32 {
+        self.offset
+    }
+
+    pub(super) fn page_added(
+        &mut self,
+        queue: QueueTimeline<'_>,
+        page: (u64, usize),
+        stride: f32,
+        max: f32,
+        realign: bool,
+    ) {
+        let Some((previous, boundary)) = self.page.replace(page) else {
+            return;
+        };
+        if previous == page.0 || realign {
+            return;
+        }
+        let current_moved =
+            self.anchor
+                .zip(queue.current_index())
+                .is_some_and(|((id, previous), index)| {
+                    index != previous && queue.get(index).is_some_and(|row| row.entry_id == id)
+                });
+        if self.following {
+            if current_moved {
+                self.offset = queue.current_index().unwrap_or_default() as f32 * stride;
+                self.stride = stride;
+            }
+            return;
+        }
+        if !current_moved && self.offset < boundary as f32 * self.stride {
+            return;
+        }
+        let first = if current_moved { 0 } else { page.1 };
+        if let Some(offset) = self.visible.as_ref().and_then(|anchor| {
+            anchor.offset(stride, max, |&(old, id, _)| {
+                (first..queue.len())
+                    .filter(|&i| queue.get(i).is_some_and(|entry| entry.entry_id == id))
+                    .min_by_key(|&i| i.abs_diff(old))
+            })
+        }) {
+            self.offset = offset;
+            self.stride = stride;
+        }
     }
 
     pub(super) fn fade(&mut self, ui: &egui::Ui) -> f32 {
@@ -271,6 +324,41 @@ impl QueueScroll {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_inserted_before_the_manual_tail_preserves_the_browsed_row() {
+        use gramwave_domain::{PlaylistOrder, Session, TrackMetadata};
+        let track = |message| TrackMetadata {
+            chat: 1,
+            message,
+            ..Default::default()
+        };
+        let mut session = Session::default();
+        session.start_playlist(
+            vec![track(100), track(95)],
+            0,
+            [Some(90), None, None],
+            true,
+            PlaylistOrder::NewestFirst,
+        );
+        session.insert_many((200..212).map(track), false);
+        let stride = 68.;
+        let initial = 4.5 * stride;
+        let mut scroll = QueueScroll {
+            stride,
+            offset: initial,
+            ..Default::default()
+        };
+        let height = 3. * stride;
+        scroll.page_added(session.timeline(), (0, 2), stride, 20. * stride, false);
+        scroll.remember(session.timeline(), height);
+        let row = session.timeline().get(5).unwrap().entry_id;
+
+        session.add_playlist_page(0, 60, [80, 75].map(track), true);
+        scroll.page_added(session.timeline(), (1, 4), stride, 20. * stride, false);
+        assert_eq!(scroll.offset(), initial + 2. * stride);
+        assert_eq!(session.timeline().get(7).unwrap().entry_id, row);
+    }
 
     #[test]
     fn selection_needs_a_closer_target_or_an_existing_snap() {

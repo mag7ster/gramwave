@@ -448,6 +448,18 @@ pub fn middle_scroll(ui: &egui::Ui, output_id: egui::Id, rect: egui::Rect, conte
         .request_repaint_after(std::time::Duration::from_millis(16));
 }
 
+pub(crate) fn stop_middle_scroll(ctx: &egui::Context, owner: egui::Id) {
+    let key = egui::Id::new("middle-autoscroll");
+    ctx.data_mut(|data| {
+        if data
+            .get_temp::<AutoScroll>(key)
+            .is_some_and(|active| active.owner == owner)
+        {
+            data.remove::<AutoScroll>(key);
+        }
+    });
+}
+
 pub(crate) fn middle_scroll_active(ctx: &egui::Context, owner: egui::Id) -> bool {
     ctx.data(|data| data.get_temp::<AutoScroll>(egui::Id::new("middle-autoscroll")))
         .is_some_and(|active| active.owner == owner)

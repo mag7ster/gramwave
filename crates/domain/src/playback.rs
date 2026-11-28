@@ -2,7 +2,7 @@
 use crate::model::{QueueEntry, QueueEntryId, TrackMetadata};
 use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 mod continuation;
 mod removal;
 mod timeline;
@@ -22,7 +22,7 @@ impl PlaylistOrder {
         }
     }
 
-    fn reversed(self) -> Self {
+    pub fn reversed(self) -> Self {
         match self {
             Self::NewestFirst => Self::OldestFirst,
             Self::OldestFirst => Self::NewestFirst,
@@ -106,6 +106,10 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     continuation: Option<continuation::Continuation>,
     playlist_order: PlaylistOrder,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    play_next: Vec<QueueEntryId>,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    manual: BTreeSet<QueueEntryId>,
     serial: u64,
 }
 impl Session {
@@ -150,10 +154,12 @@ impl Session {
             self.position_ms = 0;
         }
         if self.entries.contains_key(&entry_id) {
+            self.forget_play_next([entry_id]);
             self.current = Some(entry_id);
         } else {
             let id = self.entry(track);
             self.order.push(id);
+            self.manual.insert(id);
             self.current = Some(id);
         }
     }
@@ -182,6 +188,8 @@ impl Session {
         self.continuation = None;
         self.playlist_order = PlaylistOrder::NewestFirst;
         self.entries.clear();
+        self.play_next.clear();
+        self.manual.clear();
         self.order = tracks
             .iter()
             .cloned()
@@ -229,12 +237,17 @@ impl Session {
             .into_iter()
             .map(|track| self.entry(track.into()))
             .collect();
-        let before = next.then(|| self.remaining.first().copied()).flatten();
-        let at = before
-            .and_then(|id| self.order.iter().position(|old| *old == id))
-            .unwrap_or(self.order.len());
+        let at = if next {
+            let upcoming: std::collections::HashSet<_> = self.remaining.iter().collect();
+            self.order.iter().position(|id| upcoming.contains(id))
+        } else {
+            None
+        }
+        .unwrap_or(self.order.len());
+        self.manual.extend(ids.iter().copied());
         self.order.splice(at..at, ids.iter().copied());
         if next {
+            self.play_next.splice(..0, ids.iter().copied());
             self.remaining.splice(..0, ids);
         } else {
             if let Some(continuation) = &mut self.continuation {
@@ -258,6 +271,8 @@ impl Session {
             return;
         }
         let id = self.remaining.remove(from);
+        self.forget_play_next([id]);
+        self.fix_shuffle_sample_positions([id]);
         let to = if from < to { to - 1 } else { to };
         let before = self.remaining.get(to).copied();
         self.order.retain(|old| *old != id);
@@ -270,6 +285,8 @@ impl Session {
     pub fn clear(&mut self) {
         self.continuation = None;
         self.playlist_order = PlaylistOrder::NewestFirst;
+        self.play_next.clear();
+        self.manual.clear();
         self.remaining.clear();
         self.preceding.clear();
         self.history.clear();
@@ -287,11 +304,99 @@ impl Session {
             .copied()
             .collect();
         self.entries.retain(|id, _| live.contains(id));
+        self.play_next.retain(|id| live.contains(id));
+        self.manual.retain(|id| live.contains(id));
     }
+
+    fn forget_play_next(&mut self, ids: impl IntoIterator<Item = QueueEntryId>) {
+        if !self.play_next.is_empty() {
+            let ids: HashSet<_> = ids.into_iter().collect();
+            self.play_next.retain(|id| !ids.contains(id));
+        }
+    }
+
+    pub fn set_shuffle(&mut self, shuffle: bool) {
+        // Older sessions can have visible rows outside the saved original order.
+        let mut known: HashSet<_> = self.order.iter().copied().collect();
+        let earlier: Vec<_> = self
+            .preceding
+            .iter()
+            .chain(&self.history)
+            .copied()
+            .filter(|id| known.insert(*id))
+            .collect();
+        self.order.splice(..0, earlier);
+        if let Some(current) = self.current.filter(|id| known.insert(*id)) {
+            let at = self
+                .remaining
+                .first()
+                .and_then(|next| self.order.iter().position(|id| id == next))
+                .unwrap_or(self.order.len());
+            self.order.insert(at, current);
+        }
+        self.order.extend(
+            self.remaining
+                .iter()
+                .copied()
+                .filter(|id| known.insert(*id)),
+        );
+        self.history.clear();
+        self.preceding.clear();
+        if shuffle {
+            self.leave_ordered_window();
+            self.remaining = self
+                .order
+                .iter()
+                .copied()
+                .filter(|id| Some(*id) != self.current)
+                .collect();
+            if let Some(continuation) = &mut self.continuation {
+                for sample in continuation.samples.values_mut() {
+                    sample.held = false;
+                }
+            }
+            self.restore_boundary();
+            self.reorder(true);
+        } else {
+            self.open_ordered_window();
+            if let Some(current) = self.current {
+                let priority: HashSet<_> = self.play_next.iter().copied().collect();
+                self.order
+                    .retain(|id| !priority.contains(id) || *id == current);
+                if let Some(index) = self.order.iter().position(|id| *id == current) {
+                    self.order.splice(
+                        index + 1..index + 1,
+                        self.play_next.iter().copied().filter(|id| *id != current),
+                    );
+                }
+            }
+            self.rebuild_ordered();
+        }
+    }
+
+    fn rebuild_ordered(&mut self) {
+        let at = self
+            .current
+            .and_then(|current| self.order.iter().position(|id| *id == current));
+        let start = at.map_or(0, |index| index + 1);
+        self.preceding = self.order[..at.unwrap_or(0)]
+            .iter()
+            .copied()
+            .filter(|id| self.ordered_visible(*id))
+            .collect();
+        self.remaining = self.order[start..]
+            .iter()
+            .copied()
+            .filter(|id| self.ordered_visible(*id))
+            .collect();
+        self.restore_boundary();
+    }
+
     pub fn reorder(&mut self, shuffle: bool) {
         self.reorder_with(shuffle, &mut rand::thread_rng());
     }
     pub fn reorder_with(&mut self, shuffle: bool, rng: &mut impl Rng) {
+        self.show_shuffle_samples(shuffle);
         let end = self.available_len();
         let available = &mut self.remaining[..end];
         if shuffle {
@@ -312,6 +417,7 @@ impl Session {
         }
         let mut skipped: Vec<_> = self.remaining.drain(..=index).collect();
         let id = skipped.pop()?;
+        self.forget_play_next(skipped.iter().copied().chain([id]));
         self.position_ms = 0;
         if let Some(old) = self.current.replace(id) {
             self.history.push(old);
@@ -365,6 +471,7 @@ impl Session {
     }
     pub fn previous(&mut self) -> Option<QueueEntry> {
         let id = self.history.pop().or_else(|| self.preceding.pop())?;
+        self.forget_play_next([id]);
         self.position_ms = 0;
         self.remaining.retain(|old| *old != id);
         if let Some(current) = self.current.replace(id) {
@@ -394,6 +501,10 @@ struct StoredSession {
     continuation: Option<continuation::Continuation>,
     #[serde(default)]
     playlist_order: PlaylistOrder,
+    #[serde(default)]
+    play_next: Vec<QueueEntryId>,
+    #[serde(default)]
+    manual: BTreeSet<QueueEntryId>,
     serial: u64,
 }
 #[derive(Clone, Deserialize)]
@@ -444,11 +555,17 @@ impl<'de> Deserialize<'de> for Session {
                 {
                     return Err(serde::de::Error::custom("invalid queue references"));
                 }
+                let mut pending_ids = HashSet::new();
                 let serial = s
                     .serial
                     .max(entries.keys().map(|id| id.0).max().unwrap_or(0));
                 Ok(Self {
                     entries,
+                    play_next: s
+                        .play_next
+                        .into_iter()
+                        .filter(|id| s.order.contains(id) && pending_ids.insert(*id))
+                        .collect(),
                     order: s.order,
                     remaining: s.remaining,
                     current: s.current,
@@ -462,6 +579,7 @@ impl<'de> Deserialize<'de> for Session {
                     source: s.source,
                     continuation: s.continuation,
                     playlist_order: s.playlist_order,
+                    manual: s.manual,
                     serial,
                 })
             }

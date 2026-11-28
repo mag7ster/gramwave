@@ -753,3 +753,254 @@ fn queue_reverse_anchors_the_current_row_only_outside_the_edge_zones() {
         assert!((again.top() - viewport_again.top() - current_top).abs() < 1.);
     }
 }
+
+#[test]
+fn scrolling_the_open_queue_prefetches_before_the_current_track_reaches_the_end() {
+    use gramwave_application::{
+        commands::PlaylistStart,
+        model::{Playlist, Track},
+        telegram::{AuthorizationState, MediaPage},
+        workflow::{AppEvent, Effect},
+    };
+    let mut h = queue_harness(3);
+    let mut state = h.app.state.view().clone();
+    state.playlists = vec![Playlist {
+        id: 0,
+        tracks: (101..=160)
+            .rev()
+            .map(|message| Track {
+                message,
+                ..Default::default()
+            })
+            .collect(),
+        filters: [true, false, false],
+        cursors: [100, 0, 0],
+        done: [false, true, true],
+        ..Default::default()
+    }];
+    h.app.state = gramwave_application::AppCore::new(state);
+    h.app
+        .state
+        .event(AppEvent::Authorization(AuthorizationState::Ready));
+    h.app.state.command(AppCommand::StartPlaylist {
+        chat: 0,
+        start: PlaylistStart::Ordered,
+        order: Default::default(),
+    });
+    h.app.demo = false;
+    h.settle();
+    let now = std::time::Instant::now();
+    assert!(!h
+        .app
+        .state
+        .pump(now, true)
+        .iter()
+        .any(|effect| matches!(effect, Effect::QueuePage { .. })));
+    let (viewport, _) = h.list_scroll("test-queue-scroll");
+    scroll_queue(&mut h, viewport.center(), -1700.);
+    for _ in 0..5 {
+        h.settle();
+    }
+    assert!(!h
+        .app
+        .state
+        .pump(now, true)
+        .iter()
+        .any(|effect| matches!(effect, Effect::QueuePage { .. })));
+    scroll_queue(&mut h, viewport.center(), -900.);
+    for _ in 0..5 {
+        h.settle();
+    }
+    let request = h
+        .app
+        .state
+        .pump(now, true)
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::QueuePage {
+                operation,
+                cursor: 100,
+                browsing: false,
+                ..
+            } => Some(operation.key()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "scrolling near the loaded edge requests a page, offset={}",
+                scroll_offset(&h)
+            )
+        });
+    let before = scroll_offset(&h);
+    h.app.state.event(AppEvent::QueuePage {
+        request,
+        browsing: false,
+        result: Ok(MediaPage {
+            newest: 99,
+            next: 70,
+            tracks: (71..100)
+                .rev()
+                .map(|message| {
+                    Track {
+                        message,
+                        ..Default::default()
+                    }
+                    .into()
+                })
+                .collect(),
+        }),
+    });
+    h.settle();
+    assert_eq!(h.app.state.view().session.current().unwrap().message, 160);
+    assert!((scroll_offset(&h) - before).abs() < 1.);
+    assert!(!h
+        .app
+        .state
+        .pump(now, true)
+        .iter()
+        .any(|effect| matches!(effect, Effect::QueuePage { .. })));
+}
+
+#[test]
+fn switching_shuffle_returns_to_the_current_row_immediately_in_both_layouts() {
+    for width in [1240., 850.] {
+        let mut h = queue_harness(45);
+        h.size.x = width;
+        h.app.pane = WorkspacePane::Queue;
+        h.settle();
+        let current = queue_order(&h)[11];
+        h.app.execute(AppCommand::PlayQueue(current));
+        for _ in 0..3 {
+            h.settle();
+        }
+
+        let at_top = |h: &Harness| {
+            let viewport = h.list_scroll("test-queue-scroll").0;
+            let row = h.app.test_queue_rows[&current].0;
+            assert!((row.top() - viewport.top()).abs() < 1.);
+            assert!(return_button(h).is_none());
+        };
+        let browse = |h: &mut Harness| {
+            let viewport = h.list_scroll("test-queue-scroll").0;
+            scroll_queue(h, viewport.center(), -620.);
+            assert!(scroll_offset(h) > 0.);
+            h.settle();
+            assert!(return_button(h).is_some());
+        };
+
+        at_top(&h);
+        h.app.execute(AppCommand::Shuffle(true));
+        h.frame(vec![]);
+        at_top(&h);
+        assert!(scroll_offset(&h).abs() < 1.);
+
+        browse(&mut h);
+        let manual = scroll_offset(&h);
+        h.app.execute(AppCommand::Shuffle(true));
+        h.settle();
+        assert!(return_button(&h).is_some());
+        assert!(scroll_offset(&h) >= manual);
+        h.app.execute(AppCommand::Shuffle(false));
+        h.frame(vec![]);
+        at_top(&h);
+        assert!(scroll_offset(&h) > 0.);
+
+        browse(&mut h);
+        h.app.execute(AppCommand::Shuffle(true));
+        h.app.execute(AppCommand::Shuffle(false));
+        h.frame(vec![]);
+        at_top(&h);
+        browse(&mut h);
+    }
+}
+
+#[test]
+fn loading_predecessors_after_unshuffle_keeps_the_scroll_mode_and_anchor() {
+    use gramwave_application::{
+        model::Track,
+        telegram::MediaPage,
+        workflow::{AppEvent, Effect},
+    };
+    use gramwave_domain::PlaylistOrder;
+
+    for following in [true, false] {
+        let mut h = queue_harness(1);
+        let track = |message| Track {
+            chat: 42,
+            message,
+            ..Default::default()
+        };
+        let mut state = h.app.state.view().clone();
+        state.session.start_shuffled_playlist(
+            [100, 95].map(|message| track(message).into()).to_vec(),
+            [Some(90), None, None],
+            PlaylistOrder::NewestFirst,
+        );
+        state.session.add_shuffle_sample([track(60).into()], true);
+        state.shuffle = true;
+        h.app.state = gramwave_application::AppCore::new(state);
+        h.app.execute(AppCommand::Shuffle(false));
+        h.settle();
+        let request = |h: &mut Harness, direction| {
+            h.app
+                .state
+                .pump(std::time::Instant::now(), true)
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::QueuePage {
+                        operation,
+                        order,
+                        browsing: false,
+                        ..
+                    } if order == direction => Some(operation.key()),
+                    _ => None,
+                })
+                .expect("adjacent queue page")
+        };
+        let receive = |h: &mut Harness, request, next, ids: Vec<i64>| {
+            h.app.state.event(AppEvent::QueuePage {
+                request,
+                browsing: false,
+                result: Ok(MediaPage {
+                    newest: ids.iter().copied().max().unwrap_or_default(),
+                    next,
+                    tracks: ids.into_iter().map(|id| track(id).into()).collect(),
+                }),
+            });
+        };
+        let forward = request(&mut h, PlaylistOrder::NewestFirst);
+        receive(&mut h, forward, 0, (15..60).rev().collect());
+        h.settle();
+        let backward = request(&mut h, PlaylistOrder::OldestFirst);
+        if !following {
+            let viewport = h.list_scroll("test-queue-scroll").0;
+            scroll_queue(&mut h, viewport.center(), -650.);
+            for _ in 0..5 {
+                h.settle();
+            }
+        }
+        let viewport = h.list_scroll("test-queue-scroll").0;
+        let anchor = if following {
+            h.app.state.view().session.current().unwrap().entry_id
+        } else {
+            h.app
+                .test_queue_rows
+                .iter()
+                .filter(|(_, row)| viewport.contains(row.0.center()))
+                .min_by(|(_, a), (_, b)| {
+                    (a.0.center().y - viewport.center().y)
+                        .abs()
+                        .total_cmp(&(b.0.center().y - viewport.center().y).abs())
+                })
+                .map(|(&id, _)| id)
+                .unwrap()
+        };
+        let top = h.app.test_queue_rows[&anchor].0.top() - viewport.top();
+
+        receive(&mut h, backward, 75, (61..=75).collect());
+        h.frame(vec![]);
+        let viewport = h.list_scroll("test-queue-scroll").0;
+        assert!((h.app.test_queue_rows[&anchor].0.top() - viewport.top() - top).abs() < 1.);
+        assert_eq!(return_button(&h).is_none(), following);
+    }
+}

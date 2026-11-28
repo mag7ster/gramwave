@@ -44,6 +44,40 @@ impl App {
         let mut advanced = false;
         for effect in effects {
             match effect {
+                Effect::ShuffleSample {
+                    operation,
+                    chat,
+                    media,
+                    ranks,
+                    range,
+                } => {
+                    let request = operation.key();
+                    if let Some(tg) = self.tg.clone() {
+                        let cancel = operation.cancel.clone();
+                        self.operation_event(
+                            JobClass::Background,
+                            operation,
+                            async move {
+                                let result = crate::discovery::shuffle_sample(
+                                    &tg, chat, media, ranks, range, &cancel,
+                                )
+                                .await;
+                                Event::Application(AppEvent::ShuffleSample { request, result })
+                            },
+                            move |error| {
+                                Event::Application(AppEvent::ShuffleSample {
+                                    request,
+                                    result: Err(error),
+                                })
+                            },
+                        );
+                    } else {
+                        self.core_event(AppEvent::ShuffleSample {
+                            request,
+                            result: Err(AppError::Unavailable("Telegram")),
+                        });
+                    }
+                }
                 Effect::Library(effect) => self.run_library_effect(effect),
                 effect @ (Effect::QueuePage { .. } | Effect::ScanOffline { .. }) => {
                     let queue = matches!(&effect, Effect::QueuePage { .. });

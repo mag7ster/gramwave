@@ -62,6 +62,7 @@ impl App {
         handoff
             .into_iter()
             .chain(self.state.offline().retry_deadline(now, online))
+            .chain(self.state.page_retry_deadline(now, online))
             .min()
     }
 

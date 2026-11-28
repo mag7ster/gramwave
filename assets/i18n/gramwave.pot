@@ -291,6 +291,10 @@ msgstr ""
 msgid "More tracks from the source chat"
 msgstr ""
 
+#: src/screens/page_browse.rs
+msgid "More tracks are unavailable"
+msgstr ""
+
 #: src/adapters/control/output.rs:95
 #, rust-format
 msgid "More tracks will play before row {row}"
@@ -513,6 +517,10 @@ msgstr ""
 
 #: src/screens.rs:940
 msgid "Play all"
+msgstr ""
+
+#: src/screens/playlist.rs:43
+msgid "Play shuffle"
 msgstr ""
 
 #: src/screens.rs:1169

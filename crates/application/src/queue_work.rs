@@ -1,5 +1,5 @@
 use crate::{
-    commands::AppCommand,
+    commands::{AppCommand, PlaylistStart},
     model::Track,
     tasks::{Operation, RequestId},
     telegram::MediaPage,
@@ -8,27 +8,49 @@ use crate::{
 };
 use gramwave_domain::{PlaylistOrder, RepeatMode};
 
+#[derive(Clone, Copy)]
+struct QueuePageRequest {
+    kind: usize,
+    cursor: i64,
+    order: PlaylistOrder,
+    window: Option<bool>,
+}
+
 #[derive(Default)]
 pub(crate) struct QueueWork {
-    active: Option<(Operation, usize, i64)>,
+    active: Option<(Operation, QueuePageRequest)>,
+    pub(crate) waiting_previous: bool,
     pub(crate) waiting: Option<bool>,
     reversing: bool,
+    reverse_from_window: bool,
     oldest_start: Option<i64>,
+    oldest_start_retry: crate::page_browse::PageRetry,
     retry_reverse: bool,
     pub(crate) error: Option<AppError>,
+    pub(crate) page_retry: crate::page_browse::PageRetry,
+    page_generation: u64,
+    pub(crate) shuffle_request: Option<crate::tasks::RequestId>,
 }
 
 impl QueueWork {
     pub(crate) fn cancel_page(&mut self) {
-        if let Some((operation, _, _)) = self.active.take() {
+        if let Some((operation, _)) = self.active.take() {
             operation.cancel.cancel();
         }
         self.error = None;
+        self.page_retry = Default::default();
+    }
+
+    pub(crate) fn page_active(&self) -> bool {
+        self.active.is_some()
     }
 
     pub(crate) fn reset(&mut self) {
         self.cancel_page();
-        *self = Self::default();
+        *self = Self {
+            page_generation: self.page_generation,
+            ..Self::default()
+        };
     }
 }
 
@@ -38,7 +60,11 @@ impl AppCore {
     }
 
     pub fn queue_waiting(&self) -> bool {
-        self.queue_work.waiting.is_some()
+        self.queue_work.waiting.is_some() || self.queue_work.waiting_previous
+    }
+
+    pub fn queue_page_generation(&self) -> u64 {
+        self.queue_work.page_generation
     }
 
     pub fn queue_page_error(&self) -> Option<&AppError> {
@@ -63,7 +89,7 @@ impl AppCore {
         self.library
             .oldest
             .as_ref()
-            .is_some_and(|(_, id, _)| *id == chat)
+            .is_some_and(|(_, id, _, _)| *id == chat)
     }
 
     pub fn oldest_error(&self, chat: i64) -> Option<&AppError> {
@@ -83,14 +109,15 @@ impl AppCore {
     pub(crate) fn start_playlist_queue(
         &mut self,
         chat: i64,
-        library_id: Option<u64>,
+        start: PlaylistStart,
         order: PlaylistOrder,
     ) -> Option<Track> {
         self.queue_work.oldest_start = None;
+        self.queue_work.oldest_start_retry = Default::default();
         if self.oldest_error(chat).is_some() {
             self.library.oldest_error = None;
         }
-        if library_id.is_none()
+        if matches!(start, PlaylistStart::Ordered)
             && order == PlaylistOrder::OldestFirst
             && self
                 .state
@@ -102,13 +129,13 @@ impl AppCore {
             self.queue_work.oldest_start = Some(chat);
             return None;
         }
-        self.start_ordered_playlist(chat, library_id, order)
+        self.start_ordered_playlist(chat, start, order)
     }
 
     fn start_ordered_playlist(
         &mut self,
         chat: i64,
-        library_id: Option<u64>,
+        start: PlaylistStart,
         order: PlaylistOrder,
     ) -> Option<Track> {
         let playlist = self.state.playlists.iter().find(|p| p.id == chat)?;
@@ -120,21 +147,38 @@ impl AppCore {
         if order == PlaylistOrder::OldestFirst {
             tracks.reverse();
         }
+        let library_id = match start {
+            PlaylistStart::Track(id) => Some(id),
+            _ => None,
+        };
         let index = tracks
             .iter()
             .position(|t| library_id.is_none_or(|id| id == t.library_id))?;
-        let selected = tracks[index].message;
         let cursors = std::array::from_fn(|kind| {
             (playlist.filters[kind] && !playlist.done[kind]).then(|| match order {
                 PlaylistOrder::NewestFirst => playlist.cursors[kind],
-                PlaylistOrder::OldestFirst => playlist.oldest_cursors[kind].max(selected),
+                PlaylistOrder::OldestFirst => playlist.oldest_cursors[kind],
             })
         });
         let tracks = tracks.into_iter().cloned().map(Into::into).collect();
-        let current =
+        let shuffle = match start {
+            PlaylistStart::Ordered => false,
+            PlaylistStart::Shuffled => true,
+            PlaylistStart::Track(_) => self.state.shuffle,
+        };
+        let current = if matches!(start, PlaylistStart::Shuffled) {
             self.state
                 .session
-                .start_playlist(tracks, index, cursors, self.state.shuffle, order)?;
+                .start_shuffled_playlist(tracks, cursors, order)?
+        } else {
+            self.state
+                .session
+                .start_playlist(tracks, index, cursors, shuffle, order)?
+        };
+        if self.state.shuffle != shuffle {
+            self.state.shuffle = shuffle;
+            self.record_settings_change();
+        }
         self.queue_work.reset();
         self.playback.repeat_cycle = None;
         self.playback.queue_started();
@@ -142,7 +186,7 @@ impl AppCore {
         Some(current.into())
     }
 
-    pub(crate) fn pump_oldest_start(&mut self, effects: &mut Vec<Effect>) {
+    pub(crate) fn pump_oldest_start(&mut self, now: std::time::Instant, effects: &mut Vec<Effect>) {
         let Some(chat) = self.queue_work.oldest_start else {
             return;
         };
@@ -162,13 +206,22 @@ impl AppCore {
             .find(|track| playlist.filters[usize::from(track.kind)]);
         if oldest.is_some_and(|track| track.message <= frontier) || !playlist.has_more() {
             self.queue_work.oldest_start = None;
-            if let Some(track) = self.start_ordered_playlist(chat, None, PlaylistOrder::OldestFirst)
-            {
+            if let Some(track) = self.start_ordered_playlist(
+                chat,
+                PlaylistStart::Ordered,
+                PlaylistOrder::OldestFirst,
+            ) {
                 self.prepare_playback(track, effects);
             }
-        } else {
-            self.request_oldest(chat, false, effects);
+        } else if self.paging_allowed(now) && self.queue_work.oldest_start_retry.ready(now) {
+            self.request_oldest(chat, true, effects);
         }
+    }
+
+    pub(crate) fn oldest_start_retry_deadline(&self) -> Option<std::time::Instant> {
+        self.queue_work
+            .oldest_start
+            .and(self.queue_work.oldest_start_retry.at)
     }
 
     pub(crate) fn request_oldest(&mut self, chat: i64, retry: bool, effects: &mut Vec<Effect>) {
@@ -191,7 +244,12 @@ impl AppCore {
             return;
         };
         let operation = self.library.operation();
-        self.library.oldest = Some((operation.clone(), chat, kind));
+        self.library.oldest = Some((
+            operation.clone(),
+            chat,
+            kind,
+            self.playlist_browse_key(chat, PlaylistOrder::OldestFirst),
+        ));
         effects.push(Effect::QueuePage {
             operation,
             chat,
@@ -208,13 +266,17 @@ impl AppCore {
         result: Result<MediaPage, AppError>,
         effects: &mut Vec<Effect>,
     ) {
-        let Some((_, chat, kind)) = self
+        let Some((_, chat, kind, browse)) = self
             .library
             .oldest
-            .take_if(|(op, _, _)| op.key() == request)
+            .take_if(|(op, _, _, _)| op.key() == request)
         else {
             return;
         };
+        let browse = browse.or_else(|| self.playlist_browse_key(chat, PlaylistOrder::OldestFirst));
+        if let Some(key) = browse {
+            self.playlist_page_finished(key, &result.as_ref().map(|_| ()).map_err(Clone::clone));
+        }
         match result {
             Ok(page) => {
                 let protected = self.library.protected(chat);
@@ -236,17 +298,31 @@ impl AppCore {
                     },
                     protected,
                 ));
-                self.pump_oldest_start(effects);
+                if self.queue_work.oldest_start == Some(chat) {
+                    self.queue_work.oldest_start_retry = Default::default();
+                }
+                self.pump_oldest_start(std::time::Instant::now(), effects);
             }
-            Err(error) => self.library.oldest_error = Some((chat, error)),
+            Err(error) => {
+                self.record_page_cooldown(&error, std::time::Instant::now());
+                if self.queue_work.oldest_start == Some(chat) {
+                    self.queue_work
+                        .oldest_start_retry
+                        .failed(&error, std::time::Instant::now());
+                }
+                self.library.oldest_error = Some((chat, error));
+            }
         }
     }
 
     pub(crate) fn request_queue_reverse(&mut self) {
         self.queue_work.retry_reverse = false;
-        if self.state.session.playlist_page_request().is_some() {
+        if self.state.session.full_playlist_page_request().is_some() {
+            self.queue_work.cancel_page();
             self.queue_work.reversing = true;
+            self.queue_work.reverse_from_window = self.state.session.has_ordered_window();
             self.queue_work.error = None;
+            self.queue_work.page_retry = Default::default();
         } else {
             self.reverse_queue();
         }
@@ -254,19 +330,32 @@ impl AppCore {
 
     pub(crate) fn retry_queue_page(&mut self) {
         self.queue_work.error = None;
+        self.queue_work.page_retry = Default::default();
         if std::mem::take(&mut self.queue_work.retry_reverse) {
             self.request_queue_reverse();
         }
     }
 
     fn queue_page_failed(&mut self, error: AppError, effects: &mut Vec<Effect>) {
+        if error == AppError::Cancelled {
+            return;
+        }
+        let now = std::time::Instant::now();
+        self.record_page_cooldown(&error, now);
+        self.queue_work.page_retry.failed(&error, now);
         self.queue_work.error = Some(error);
-        self.queue_work.retry_reverse = std::mem::take(&mut self.queue_work.reversing);
+        if self.queue_page_status() == crate::page_browse::PageStatus::Unavailable {
+            self.queue_work.retry_reverse = std::mem::take(&mut self.queue_work.reversing);
+        }
         self.resume_queue_wait(effects);
     }
 
     fn reverse_queue(&mut self) {
         self.queue_work.reversing = false;
+        if std::mem::take(&mut self.queue_work.reverse_from_window) && !self.state.shuffle {
+            // Once all pages are present, restore rows hidden outside the local window.
+            self.state.session.finish_ordered_reverse();
+        }
         if self.state.session.reverse_queue() {
             self.playback.queue_reverse_generation =
                 self.playback.queue_reverse_generation.wrapping_add(1);
@@ -275,26 +364,65 @@ impl AppCore {
         }
     }
 
-    pub(crate) fn pump_queue(&mut self, effects: &mut Vec<Effect>) {
-        if self.queue_work.active.is_some() || self.queue_work.error.is_some() {
-            return;
-        }
+    pub(crate) fn queue_needs_retry(&self) -> bool {
+        self.next_queue_page().is_some()
+    }
+
+    fn next_queue_page(&self) -> Option<(i64, QueuePageRequest)> {
         let session = &self.state.session;
-        if !self.queue_work.reversing
-            && !self.queue_waiting()
-            && (session.current().is_none() || session.available_len() > 3)
-        {
+        let order = session.playlist_order();
+        let window = session.has_ordered_window() && !self.queue_work.reversing;
+        let forward_needed = self.queue_work.waiting.is_some()
+            || self.queue_browse_pending()
+            || (session.current().is_some()
+                && session.available_len() <= crate::page_browse::QUEUE_PREFETCH_ROWS);
+        let (page, before) = if !window {
+            if !forward_needed && !self.queue_work.reversing {
+                return None;
+            }
+            (session.full_playlist_page_request(), false)
+        } else {
+            let previous = session.ordered_page_request(true);
+            let forward = session.ordered_page_request(false);
+            if self.queue_work.waiting_previous && previous.is_some() {
+                (previous, true)
+            } else if (forward_needed || session.needs_ordered_neighbors(false))
+                && forward.is_some()
+            {
+                (forward, false)
+            } else if session.needs_ordered_neighbors(true) {
+                (previous, true)
+            } else {
+                (None, false)
+            }
+        };
+        let (chat, kind, cursor) = page?;
+        Some((
+            chat,
+            QueuePageRequest {
+                kind,
+                cursor,
+                window: window.then_some(before),
+                order: if before { order.reversed() } else { order },
+            },
+        ))
+    }
+
+    pub(crate) fn pump_queue(&mut self, now: std::time::Instant, effects: &mut Vec<Effect>) {
+        if self.queue_work.active.is_some() || !self.queue_work.page_retry.ready(now) {
             return;
         }
-        if let Some((chat, kind, cursor)) = session.playlist_page_request() {
+        if let Some((chat, page)) = self.next_queue_page() {
+            self.queue_work.reverse_from_window |=
+                self.queue_work.reversing && self.state.session.has_ordered_window();
             let operation = self.library.operation();
-            self.queue_work.active = Some((operation.clone(), kind, cursor));
+            self.queue_work.active = Some((operation.clone(), page));
             effects.push(Effect::QueuePage {
                 operation,
                 chat,
-                kind,
-                cursor,
-                order: session.playlist_order(),
+                kind: page.kind,
+                cursor: page.cursor,
+                order: page.order,
                 browsing: false,
             });
         }
@@ -306,22 +434,22 @@ impl AppCore {
         result: Result<MediaPage, AppError>,
         effects: &mut Vec<Effect>,
     ) {
-        let Some((_, kind, cursor)) = self
+        let Some((_, page)) = self
             .queue_work
             .active
-            .as_ref()
-            .filter(|(op, _, _)| op.key() == request)
+            .take_if(|(op, _)| op.key() == request)
         else {
             return;
         };
-        let (kind, cursor) = (*kind, *cursor);
-        self.queue_work.active = None;
+        let QueuePageRequest {
+            kind,
+            cursor,
+            order,
+            window,
+        } = page;
         let page = match result {
             Ok(page)
-                if page.next == 0
-                    || cursor == 0
-                    || self.state.session.playlist_order().key(page.next)
-                        > self.state.session.playlist_order().key(cursor) =>
+                if page.next == 0 || cursor == 0 || order.key(page.next) > order.key(cursor) =>
             {
                 page
             }
@@ -337,6 +465,12 @@ impl AppCore {
                 return;
             }
         };
+        if window != Some(true) {
+            self.complete_queue_browse();
+        }
+        self.queue_work.page_retry = Default::default();
+        self.queue_work.error = None;
+        let before = self.state.session.timeline().len();
         let tracks = page.tracks.into_iter().filter_map(|track| {
             if self.library.source_changed(track.id()) {
                 return None;
@@ -344,17 +478,41 @@ impl AppCore {
             self.library.cache_track(&track);
             Some(Track::from(track).into())
         });
-        self.state
-            .session
-            .add_playlist_page(kind, page.next, tracks, self.state.shuffle);
+        if let Some(before) = window {
+            self.state
+                .session
+                .add_ordered_page(before, kind, page.next, tracks);
+        } else {
+            self.state
+                .session
+                .add_playlist_page(kind, page.next, tracks, self.state.shuffle);
+        }
+        if self.state.session.timeline().len() > before {
+            self.queue_work.page_generation = self.queue_work.page_generation.wrapping_add(1);
+        }
         self.record_session_change();
-        if self.queue_work.reversing && self.state.session.playlist_page_request().is_none() {
+        if self.queue_work.reversing && self.state.session.full_playlist_page_request().is_none() {
             self.reverse_queue();
         }
         self.resume_queue_wait(effects);
     }
 
+    pub(crate) fn previous_neighbor_missing(&self) -> bool {
+        let session = &self.state.session;
+        session.timeline().past_len() == 0 && session.ordered_page_request(true).is_some()
+    }
+
     pub(crate) fn resume_queue_wait(&mut self, effects: &mut Vec<Effect>) {
+        if self.queue_work.waiting_previous && !self.previous_neighbor_missing() {
+            self.queue_work.waiting_previous = false;
+            let paused = self.playback.state == crate::playback::PlaybackState::Paused;
+            if let Some(track) = self.handle(crate::core::CoreCommand::Previous) {
+                self.prepare_playback(track, effects);
+                if paused {
+                    self.playback.state.set_paused(true);
+                }
+            }
+        }
         if let Some(eof) = self
             .queue_work
             .waiting

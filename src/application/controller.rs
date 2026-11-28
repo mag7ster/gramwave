@@ -437,21 +437,10 @@ impl DesktopApp {
         self.library_command(gramwave_application::library::LibraryCommand::RefreshCatalog);
     }
     pub(crate) fn open_chat(&mut self, index: usize) {
-        self.load_chat(index, true);
-    }
-    pub(crate) fn load_chat(&mut self, index: usize, refresh: bool) {
-        let Some(chat) = self.state.view().playlists.get(index).map(|p| p.id) else {
-            return;
-        };
-        if refresh {
+        if let Some(chat) = self.state.view().playlists.get(index).map(|p| p.id) {
             self.core_command(gramwave_application::commands::AppCommand::OpenPlaylist(
                 chat,
             ));
-        } else {
-            self.library_command(gramwave_application::library::LibraryCommand::Open {
-                chat,
-                refresh: false,
-            });
         }
     }
     pub(crate) fn play(&mut self, track: impl Into<Track>) {
@@ -549,11 +538,15 @@ impl DesktopApp {
         });
         tracks
     }
-    pub(crate) fn play_playlist_from(&mut self, selected: usize, library_id: Option<u64>) {
+    pub(crate) fn play_playlist_from(
+        &mut self,
+        selected: usize,
+        start: gramwave_application::commands::PlaylistStart,
+    ) {
         let chat = self.state.view().playlists[selected].id;
         self.core_command(gramwave_application::commands::AppCommand::StartPlaylist {
             chat,
-            library_id,
+            start,
             order: self.playlist_order,
         });
     }
@@ -578,7 +571,10 @@ impl DesktopApp {
         {
             self.set_paused(!self.state.playback().state().paused());
         } else {
-            self.play_playlist_from(selected, Some(track.library_id));
+            self.play_playlist_from(
+                selected,
+                gramwave_application::commands::PlaylistStart::Track(track.library_id),
+            );
         }
     }
     pub(crate) fn set_paused(&mut self, value: bool) {

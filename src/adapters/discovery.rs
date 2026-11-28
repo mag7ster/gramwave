@@ -566,3 +566,122 @@ pub(crate) async fn index_library(
     )
     .await
 }
+
+pub(crate) async fn shuffle_sample(
+    tg: &Telegram,
+    chat: i64,
+    media: [bool; 3],
+    ranks: Option<gramwave_application::telegram::ShuffleRanks>,
+    range: Option<(gramwave_domain::PlaylistOrder, i64)>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<gramwave_application::telegram::ShuffleSample, AppError> {
+    use gramwave_application::telegram::ShuffleSample;
+    let ranks = if let Some(ranks) = ranks {
+        ranks
+    } else {
+        let replies = futures_util::future::join_all(MEDIA_FILTERS.into_iter().zip(media).map(
+            |(filter, enabled)| async move {
+                if !enabled {
+                    return (0, Vec::new());
+                }
+                let result = tg
+                    .call_async(
+                        json!({
+                            "@type": "getChatSparseMessagePositions", "chat_id": chat,
+                            "filter": {"@type": filter}, "from_message_id": 0, "limit": 50,
+                            "saved_messages_topic_id": 0,
+                        }),
+                        cancel,
+                    )
+                    .await;
+                let Ok(value) = result else {
+                    return (0, Vec::new());
+                };
+                let total = value["total_count"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .unwrap_or_default();
+                let positions = value["positions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| {
+                        let rank = u32::try_from(row["position"].as_u64()?).ok()?;
+                        let id = row["message_id"].as_i64()?;
+                        (rank < total && id > 0).then_some((rank, id))
+                    })
+                    .collect();
+                (total, positions)
+            },
+        ))
+        .await;
+        let mut replies = replies.into_iter();
+        std::array::from_fn(|_| replies.next().unwrap_or_default())
+    };
+    let ids = shuffle_sample_ids(&ranks, range, || getrandom::u64().unwrap_or_default());
+    let tracks = if ids.is_empty() {
+        Vec::new()
+    } else {
+        let result = tg
+            .call_async(
+                json!({"@type":"getMessages", "chat_id":chat,"message_ids":ids}),
+                cancel,
+            )
+            .await?;
+        let mut by_id: std::collections::HashMap<_, _> = result["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|message| track(chat, message))
+            .filter(|track| media[usize::from(track.kind)])
+            .map(|track| (track.message, track))
+            .collect();
+        ids.into_iter().filter_map(|id| by_id.remove(&id)).collect()
+    };
+    Ok(ShuffleSample { ranks, tracks })
+}
+
+fn shuffle_sample_ids(
+    ranks: &gramwave_application::telegram::ShuffleRanks,
+    range: Option<(gramwave_domain::PlaylistOrder, i64)>,
+    mut random: impl FnMut() -> u64,
+) -> Vec<i64> {
+    let mut bands: [Vec<_>; 4] = Default::default();
+    let mut seen = std::collections::HashSet::new();
+    for (total, positions) in ranks {
+        let eligible: Vec<_> = positions
+            .iter()
+            .copied()
+            .filter(|&(_, id)| {
+                range.is_none_or(|(order, ceiling)| order.key(id) >= order.key(ceiling))
+            })
+            .collect();
+        let (first, end) = if range.is_some() && !eligible.is_empty() {
+            (
+                eligible.iter().map(|(rank, _)| *rank).min().unwrap(),
+                eligible.iter().map(|(rank, _)| *rank).max().unwrap() + 1,
+            )
+        } else {
+            (0, *total)
+        };
+        for (rank, id) in eligible {
+            if rank >= first && rank < end && seen.insert(id) {
+                let band = (u64::from(rank - first) * 4 / u64::from(end - first)) as usize;
+                bands[band].push((random(), id));
+            }
+        }
+    }
+    for band in &mut bands {
+        band.sort_unstable();
+    }
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        let mut round: Vec<_> = bands
+            .iter_mut()
+            .filter_map(|band| band.pop().map(|(_, id)| (random(), id)))
+            .collect();
+        round.sort_unstable();
+        ids.extend(round.into_iter().map(|(_, id)| id));
+    }
+    ids
+}

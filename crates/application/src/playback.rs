@@ -62,6 +62,7 @@ pub struct PlaybackCore {
     pub(crate) waiting_for_next_pcm: bool,
     pub(crate) queue_reverse_generation: u64,
     queue_start_generation: u64,
+    queue_shuffle_generation: u64,
     pub(crate) repeat_cycle: Option<Vec<gramwave_domain::QueueEntryId>>,
     pub(crate) snapshot: PlayerSnapshot,
     pub(crate) queue_removals: Vec<PendingQueueRemoval>,
@@ -90,6 +91,10 @@ impl PlaybackCore {
     }
     pub fn queue_start_generation(&self) -> u64 {
         self.queue_start_generation
+    }
+
+    pub fn queue_shuffle_generation(&self) -> u64 {
+        self.queue_shuffle_generation
     }
 
     pub(crate) fn queue_started(&mut self) {
@@ -198,8 +203,12 @@ impl PlaybackCore {
                 }
             }
             PlaybackMutation::Shuffle(value) => {
+                if state.shuffle == value {
+                    return (None, ChangeSet::default());
+                }
                 state.shuffle = value;
-                state.session.reorder(value);
+                state.session.set_shuffle(value);
+                self.queue_shuffle_generation = self.queue_shuffle_generation.wrapping_add(1);
             }
             PlaybackMutation::Repeat(value) => state.repeat = value,
             PlaybackMutation::Start(tracks, index) => {

@@ -1400,3 +1400,97 @@ fn playlist_sort_prioritizes_the_current_row_only_outside_the_edge_zones() {
         }
     }
 }
+
+#[test]
+fn playlist_shuffle_starts_from_the_full_filtered_list_and_play_all_turns_it_off() {
+    let mut h = Harness::new();
+    h.size.y = 620.;
+    h.settle();
+    let count = h.app.playlist_tracks(0).len();
+    h.app.search = "nothing matches this".into();
+    h.settle();
+    let button =
+        |h: &Harness, id| -> egui::Rect { h.ctx.data(|d| d.get_temp(egui::Id::new(id))).unwrap() };
+    let shuffle = button(&h, "test-play-shuffle");
+    let play = button(&h, "test-play-all");
+    assert!(shuffle.left() >= play.right());
+    h.frame(vec![egui::Event::PointerMoved(shuffle.center())]);
+    for _ in 0..5 {
+        h.settle();
+    }
+    assert!(menu_text(&mut h, "Play shuffle").is_empty());
+    h.click(shuffle.center());
+    assert!(h.app.state.view().shuffle);
+    assert_eq!(h.app.state.view().session.snapshot().len(), count);
+    h.click(play.center());
+    assert!(!h.app.state.view().shuffle);
+    assert_eq!(h.app.state.view().session.current().unwrap().message, 0);
+}
+
+#[test]
+fn compact_playlist_menu_exposes_play_shuffle() {
+    let mut h = Harness::new();
+    h.size = egui::vec2(850., 550.);
+    h.settle();
+    let search: egui::Rect = h
+        .ctx
+        .data(|data| data.get_temp(egui::Id::new(("test-search-rect", "track-search"))))
+        .unwrap();
+    h.click(search.right_center() + egui::vec2(28., 0.));
+    h.settle();
+    let action = menu_text(&mut h, "Play shuffle")[0];
+    h.click(action);
+    assert!(h.app.state.view().shuffle);
+    assert!(!egui::Popup::is_any_open(&h.ctx));
+}
+
+#[test]
+fn a_downward_scroll_requests_playlist_metadata_without_opening_the_chat_again() {
+    use gramwave_application::{
+        library::{LibraryCommand, LibraryEffect},
+        model::{Playlist, Track},
+        telegram::AuthorizationState,
+        workflow::{AppEvent, Effect},
+    };
+    let mut h = Harness::new();
+    h.size = egui::vec2(1240., 800.);
+    let mut state = h.app.state.view().clone();
+    state.playlists = vec![Playlist {
+        id: 0,
+        tracks: (101..=160)
+            .rev()
+            .map(|message| Track {
+                message,
+                ..Default::default()
+            })
+            .collect(),
+        filters: [true, false, false],
+        cursors: [100, 0, 0],
+        done: [false, true, true],
+        ..Default::default()
+    }];
+    h.app.state = gramwave_application::AppCore::new(state);
+    h.app.state.library_command(LibraryCommand::Connected(1));
+    h.app
+        .state
+        .event(AppEvent::Authorization(AuthorizationState::Ready));
+    h.app.demo = false;
+    h.settle();
+    let now = std::time::Instant::now();
+    assert!(h.app.state.pump(now, true).is_empty());
+    let (viewport, _) = h.list_scroll("test-playlist-scroll");
+    h.frame(vec![
+        egui::Event::PointerMoved(viewport.center()),
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0., -3600.),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    h.settle();
+    let effects = h.app.state.pump(now, true);
+    assert!(matches!(&effects[..], [
+        Effect::Library(LibraryEffect::Index { playlist, refresh: false, .. })
+    ] if playlist.cursors[0] == 100));
+}

@@ -1,6 +1,6 @@
 //! Application decisions and adapter effects. This module has no desktop dependencies.
 use crate::{
-    commands::AppCommand,
+    commands::{AppCommand, PlaylistStart},
     core::{AppCore, CoreCommand},
     model::Track,
     persistence::ChangeSet,
@@ -11,6 +11,13 @@ use crate::{
 
 pub enum Effect {
     Library(crate::library::LibraryEffect),
+    ShuffleSample {
+        operation: Operation,
+        chat: i64,
+        media: [bool; 3],
+        ranks: Option<crate::telegram::ShuffleRanks>,
+        range: Option<(gramwave_domain::PlaylistOrder, i64)>,
+    },
     QueuePage {
         operation: Operation,
         chat: i64,
@@ -62,6 +69,10 @@ pub enum Effect {
     ClearSeek,
 }
 pub enum AppEvent {
+    ShuffleSample {
+        request: RequestId,
+        result: Result<crate::telegram::ShuffleSample, AppError>,
+    },
     Library(crate::library::LibraryEvent),
     QueuePage {
         request: RequestId,
@@ -119,9 +130,10 @@ impl AppCore {
             .then(|| self.playback.target.as_ref().map(Track::id))
             .flatten();
         let mut effects = self.offline.pump(now, online, opening);
-        if online {
-            self.pump_queue(&mut effects);
-            self.pump_oldest_start(&mut effects);
+        if online && self.paging_allowed(now) {
+            self.pump_queue(now, &mut effects);
+            self.pump_oldest_start(now, &mut effects);
+            self.pump_playlist_browse(now, &mut effects);
         }
         effects
     }
@@ -129,6 +141,7 @@ impl AppCore {
     pub fn shutdown_operations(&mut self) {
         self.playback.cancel();
         self.queue_work.cancel_page();
+        self.shuffle_work.cancel();
         self.auth.cancel();
         self.offline.cancel_work();
         self.library.cancel_operations();
@@ -245,6 +258,20 @@ impl AppCore {
         })
     }
     pub fn command(&mut self, command: AppCommand) -> Vec<Effect> {
+        if matches!(&command, AppCommand::Shuffle(value) if *value == self.state.shuffle) {
+            return Vec::new();
+        }
+        if matches!(
+            &command,
+            AppCommand::Next
+                | AppCommand::Advance(_)
+                | AppCommand::PlayQueue(_)
+                | AppCommand::PlayQueueRow { .. }
+                | AppCommand::Play(_)
+                | AppCommand::Shuffle(_)
+        ) {
+            self.queue_work.waiting_previous = false;
+        }
         let mut effects = Vec::new();
         let advancing = matches!(&command, AppCommand::Next | AppCommand::Advance(_));
         if advancing {
@@ -261,12 +288,29 @@ impl AppCore {
         let mut play = None;
         let mut prepared_next = None;
         let mut pause_after_load = None;
+        if matches!(
+            &command,
+            AppCommand::StartPlaylist { .. }
+                | AppCommand::StartSession(..)
+                | AppCommand::Shuffle(_)
+                | AppCommand::Insert(..)
+                | AppCommand::InsertTracks(..)
+                | AppCommand::MoveQueueRow { .. }
+                | AppCommand::EditQueueRange { .. }
+                | AppCommand::Remove(_)
+                | AppCommand::RemoveQueueRows { .. }
+                | AppCommand::UndoQueueRemoval { .. }
+                | AppCommand::ReverseQueue
+        ) {
+            self.queue_work.shuffle_request = None;
+        }
         match command {
             AppCommand::Connect => {
                 if !self.library.connected() {
                     self.auth.cancel();
                     self.playback.cancel();
                     self.queue_work.cancel_page();
+                    self.shuffle_work.cancel();
                     self.library.invalidate();
                     self.auth
                         .transition(crate::telegram::AuthorizationState::Starting);
@@ -369,13 +413,13 @@ impl AppCore {
                     self.playback.queue_started();
                 }
             }
-            AppCommand::StartPlaylist {
-                chat,
-                library_id,
-                order,
-            } => {
-                play = self.start_playlist_queue(chat, library_id, order);
-                self.pump_oldest_start(&mut effects);
+            AppCommand::StartPlaylist { chat, start, order } => {
+                play = self.start_playlist_queue(chat, start, order);
+                if play.is_some() && matches!(start, PlaylistStart::Shuffled) {
+                    self.sample_active_queue(true, &mut effects);
+                    play = self.state.session.current().cloned().map(Into::into);
+                }
+                self.pump_oldest_start(std::time::Instant::now(), &mut effects);
             }
             AppCommand::LoadOldest { chat, retry } => {
                 self.request_oldest(chat, retry, &mut effects)
@@ -409,12 +453,18 @@ impl AppCore {
                     self.queue_work.waiting = None;
                     return vec![Effect::Player(PlayerCommand::Seek(0.)), Effect::ClearSeek];
                 }
+                if self.previous_neighbor_missing() {
+                    self.queue_work.waiting = None;
+                    self.queue_work.waiting_previous = true;
+                    return effects;
+                }
                 play = self.handle(CoreCommand::Previous);
                 if play.is_some() {
                     self.queue_work.waiting = None;
                 }
             }
             AppCommand::Stop => {
+                self.complete_queue_browse();
                 self.queue_work.reset();
                 self.playback.cancel();
                 self.playback.state = crate::playback::PlaybackState::Stopped;
@@ -447,7 +497,11 @@ impl AppCore {
                 effects.push(Effect::Player(PlayerCommand::Volume(self.state.volume)));
             }
             AppCommand::Shuffle(value) => {
+                self.queue_work.cancel_page();
                 self.handle(CoreCommand::Shuffle(value));
+                if value {
+                    self.sample_active_queue(false, &mut effects);
+                }
             }
             AppCommand::Repeat(value) => {
                 self.handle(CoreCommand::Repeat(value));
@@ -547,6 +601,7 @@ impl AppCore {
                 }
             }
             AppCommand::Clear => {
+                self.complete_queue_browse();
                 self.queue_work.reset();
                 self.playback.queue_removals.clear();
                 self.handle(CoreCommand::Clear);
@@ -640,6 +695,10 @@ impl AppCore {
         let mut effects = Vec::new();
         match event {
             AppEvent::Library(event) => effects.extend(self.library_event(event)),
+            AppEvent::ShuffleSample { request, result } => {
+                self.receive_shuffle_sample(request, result);
+                self.resume_queue_wait(&mut effects);
+            }
             AppEvent::QueuePage {
                 request,
                 result,

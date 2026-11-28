@@ -18,11 +18,45 @@ impl AppCore {
     pub fn cancel_library_operations(&mut self) {
         self.library.cancel_operations();
     }
+    pub(crate) fn request_playlist_index(
+        &mut self,
+        chat: i64,
+        refresh: bool,
+        effects: &mut Vec<Effect>,
+    ) {
+        if let Some(mut playlist) = self.state.playlists.iter().find(|p| p.id == chat).cloned() {
+            if self.library.connected() && (refresh || playlist.has_more()) {
+                let operation = self.library.operation();
+                let browse =
+                    self.playlist_browse_key(chat, gramwave_domain::PlaylistOrder::NewestFirst);
+                if browse.is_some() && !refresh {
+                    let kind = (0..3)
+                        .filter(|&kind| playlist.filters[kind] && !playlist.done[kind])
+                        .max_by_key(|&kind| (playlist.cursors[kind] == 0, playlist.cursors[kind]));
+                    playlist.filters = std::array::from_fn(|i| kind == Some(i));
+                }
+                self.library.index = Some(IndexOperation {
+                    operation: operation.clone(),
+                    chat,
+                    browse,
+                });
+                effects.push(Effect::Library(LibraryEffect::Index {
+                    operation,
+                    playlist,
+                    refresh,
+                }));
+            }
+        }
+    }
+
     pub fn library_command(&mut self, command: LibraryCommand) -> Vec<Effect> {
         let mut effects = Vec::new();
         match command {
             LibraryCommand::Connected(connection) => self.library.connect(connection),
-            LibraryCommand::InvalidateConnection => self.library.invalidate(),
+            LibraryCommand::InvalidateConnection => {
+                self.shuffle_work.cancel();
+                self.library.invalidate();
+            }
             LibraryCommand::RefreshCatalog => {
                 if self.library.connected() && !self.library.catalog_running() {
                     let operation = self.library.operation();
@@ -71,25 +105,12 @@ impl AppCore {
                 }
             }
             LibraryCommand::Open { chat, refresh } => {
+                self.warm_shuffle(chat, &mut effects);
                 self.library.cancel_index();
                 if refresh {
                     self.handle(CoreCommand::Recover(chat));
                 }
-                if let Some(playlist) = self.state.playlists.iter().find(|p| p.id == chat).cloned()
-                {
-                    if self.library.connected() && (refresh || playlist.has_more()) {
-                        let operation = self.library.operation();
-                        self.library.index = Some(IndexOperation {
-                            operation: operation.clone(),
-                            chat,
-                        });
-                        effects.push(Effect::Library(LibraryEffect::Index {
-                            operation,
-                            playlist,
-                            refresh,
-                        }));
-                    }
-                }
+                self.request_playlist_index(chat, refresh, &mut effects);
             }
             LibraryCommand::RequestMedia { track, now } => {
                 let id = track.id();
@@ -310,7 +331,18 @@ impl AppCore {
                 if !self.library.accepts_index(request, None) {
                     return effects;
                 }
-                let chat = self.library.index.take().unwrap().chat;
+                let index = self.library.index.take().unwrap();
+                let browse = index.browse.or_else(|| {
+                    self.playlist_browse_key(
+                        index.chat,
+                        gramwave_domain::PlaylistOrder::NewestFirst,
+                    )
+                });
+                if let Some(key) = browse {
+                    self.playlist_page_finished(key, &result);
+                    return effects;
+                }
+                let chat = index.chat;
                 match result {
                     Ok(()) => effects.push(Effect::Notice(crate::notice::Notice::MusicLoaded)),
                     Err(error) => effects.push(Effect::Library(LibraryEffect::Failed {

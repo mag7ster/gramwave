@@ -41,7 +41,10 @@ fn core() -> AppCore {
 fn start(core: &mut AppCore, library_id: Option<u64>) {
     core.command(AppCommand::StartPlaylist {
         chat: 42,
-        library_id,
+        start: library_id.map_or(
+            crate::commands::PlaylistStart::Ordered,
+            crate::commands::PlaylistStart::Track,
+        ),
         order: Default::default(),
     });
     core.event(AppEvent::Player(PlaybackEvent::Loaded));
@@ -277,7 +280,7 @@ fn oldest_start_waits_for_the_verified_prefix_then_queues_newer_pages() {
     core.library_command(LibraryCommand::Connected(1));
     let effects = core.command(AppCommand::StartPlaylist {
         chat: 42,
-        library_id: None,
+        start: crate::commands::PlaylistStart::Ordered,
         order: PlaylistOrder::OldestFirst,
     });
     assert_eq!(current(&core), 100);
@@ -329,4 +332,316 @@ fn oldest_start_waits_for_the_verified_prefix_then_queues_newer_pages() {
         core.view().session.playlist_order(),
         PlaylistOrder::NewestFirst
     );
+}
+
+#[test]
+fn warm_shuffle_reuses_its_request_and_late_samples_only_apply_to_that_queue() {
+    use crate::{commands::PlaylistStart, library::LibraryCommand, telegram::ShuffleSample};
+    let mut core = core();
+    core.library_command(LibraryCommand::Connected(1));
+    let warm = core.command(AppCommand::OpenPlaylist(42));
+    let request = warm
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::ShuffleSample {
+                operation,
+                media: [true, false, false],
+                ..
+            } => Some(operation.key()),
+            _ => None,
+        })
+        .unwrap();
+    let effects = core.command(AppCommand::StartPlaylist {
+        chat: 42,
+        start: PlaylistStart::Shuffled,
+        order: Default::default(),
+    });
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::ShuffleSample { .. })));
+    let playing = core.view().session.current().unwrap().entry_id;
+    let sample = || ShuffleSample {
+        ranks: Default::default(),
+        tracks: [50, 25, 10].map(|message| track(message).into()).to_vec(),
+    };
+    core.event(AppEvent::ShuffleSample {
+        request,
+        result: Ok(sample()),
+    });
+    assert_eq!(core.view().session.current().unwrap().entry_id, playing);
+    assert_eq!(upcoming(&core)[..3], [50, 25, 10]);
+    core.command(AppCommand::Shuffle(false));
+    assert!(upcoming(&core).iter().all(|id| *id >= 80));
+    let request = core
+        .command(AppCommand::Shuffle(true))
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::ShuffleSample { operation, .. } => Some(operation.key()),
+            _ => None,
+        })
+        .unwrap();
+    core.command(AppCommand::Shuffle(false));
+    let before = upcoming(&core);
+    core.event(AppEvent::ShuffleSample {
+        request,
+        result: Ok(sample()),
+    });
+    assert_eq!(upcoming(&core), before);
+}
+
+#[test]
+fn advancing_prefetches_without_a_queue_view_and_retries_until_the_buffer_recovers() {
+    let buffer = crate::page_browse::QUEUE_PREFETCH_ROWS;
+    for (advance, shuffle) in [
+        (AppCommand::Next, false),
+        (AppCommand::Advance(true), false),
+        (AppCommand::Next, true),
+    ] {
+        let mut core = core();
+        core.state.playlists[0].tracks = (100..102 + buffer as i64).rev().map(track).collect();
+        core.state.playlists[0].ensure_entry_ids();
+        start(&mut core, None);
+        if shuffle {
+            core.command(AppCommand::Shuffle(true));
+        }
+        core.command(AppCommand::Insert(track(500), false));
+        let now = Instant::now();
+        assert_eq!(core.view().session.available_len(), buffer + 1);
+        assert!(core.pump(now, true).is_empty());
+
+        core.command(advance);
+        assert_eq!(core.view().session.available_len(), buffer);
+        let request = page_request(&mut core, (42, 0, 75));
+        core.event(AppEvent::QueuePage {
+            browsing: false,
+            request: request.key(),
+            result: Err(AppError::Unavailable("Telegram")),
+        });
+        let retry_at = core.page_retry_deadline(now, true).unwrap();
+        assert!(core.pump(now, true).is_empty());
+        let retry = core
+            .pump(retry_at, true)
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::QueuePage {
+                    operation,
+                    cursor: 75,
+                    ..
+                } => Some(operation),
+                _ => None,
+            })
+            .unwrap();
+        page(&mut core, retry, 65, &[70, 69]);
+        assert_eq!(core.view().session.available_len(), buffer + 2);
+        assert_eq!(upcoming(&core).last(), Some(&500));
+        assert!(core.pump(retry_at, true).is_empty());
+    }
+}
+
+#[test]
+fn scrolling_loads_one_page_and_retries_only_while_requested() {
+    use crate::page_browse::Browse;
+
+    let mut core = core();
+    core.state.playlists[0].tracks = (80..110).rev().map(track).collect();
+    core.state.playlists[0].ensure_entry_ids();
+    start(&mut core, None);
+    core.command(AppCommand::Pause(true));
+    core.command(AppCommand::Shuffle(true));
+    core.command(AppCommand::Insert(track(500), false));
+    let current_id = core.view().session.current().unwrap().entry_id;
+    let queued = upcoming(&core);
+    let now = Instant::now();
+    assert!(core.pump(now, true).is_empty());
+    assert!(core.browse_queue(Browse::Down));
+    core.finish_page_browse_frame();
+    let request = page_request(&mut core, (42, 0, 75));
+    core.event(AppEvent::QueuePage {
+        browsing: false,
+        request: request.key(),
+        result: Err(AppError::Unavailable("Telegram")),
+    });
+    let deadline = core.page_retry_deadline(now, true).unwrap();
+    assert!(core.pump(now, true).is_empty());
+    core.browse_queue(Browse::Away);
+    core.finish_page_browse_frame();
+    assert!(core.pump(deadline, true).is_empty());
+    assert!(core.browse_queue(Browse::Down));
+    core.finish_page_browse_frame();
+    let retry = core
+        .pump(deadline, true)
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::QueuePage {
+                operation,
+                cursor: 75,
+                browsing: false,
+                ..
+            } => Some(operation),
+            _ => None,
+        })
+        .unwrap();
+    page(&mut core, retry, 65, &[70, 69]);
+    assert_eq!(core.view().session.current().unwrap().entry_id, current_id);
+    assert!(core.playback().state().paused());
+    let after = upcoming(&core);
+    assert_eq!(&after[..queued.len() - 1], &queued[..queued.len() - 1]);
+    assert!(after.contains(&70) && after.contains(&69));
+    assert_eq!(after.last(), Some(&500));
+    core.browse_queue(Browse::Nearby);
+    core.finish_page_browse_frame();
+    assert!(core.pump(deadline, true).is_empty());
+    core.browse_queue(Browse::Down);
+    core.finish_page_browse_frame();
+    let more = page_request(&mut core, (42, 0, 65));
+    page(&mut core, more, 60, &[]);
+    assert!(core.pump(deadline, true).is_empty());
+}
+
+#[test]
+fn playlist_browse_cancels_automatic_retry_when_the_pane_closes() {
+    use crate::{
+        library::{LibraryCommand, LibraryEffect, LibraryEvent},
+        page_browse::{Browse, PageStatus},
+    };
+    use gramwave_domain::PlaylistOrder::NewestFirst;
+
+    let mut core = core();
+    core.library_command(LibraryCommand::Connected(1));
+    core.browse_playlist(42, NewestFirst, [true, false, false], Browse::Down);
+    core.finish_page_browse_frame();
+    let now = Instant::now();
+    let request = core
+        .pump(now, true)
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Library(LibraryEffect::Index {
+                operation,
+                refresh: false,
+                ..
+            }) => Some(operation.key()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(core
+        .event(AppEvent::Library(LibraryEvent::Indexed {
+            request,
+            result: Err(AppError::Timeout("Telegram")),
+        }))
+        .is_empty());
+    assert_eq!(
+        core.playlist_page_status(42, NewestFirst),
+        PageStatus::Loading
+    );
+    let deadline = core.page_retry_deadline(now, true).unwrap();
+    core.finish_page_browse_frame();
+    assert!(core.pump(deadline, true).is_empty());
+    assert_eq!(core.playlist_page_status(42, NewestFirst), PageStatus::Idle);
+}
+
+#[test]
+fn unshuffle_requests_neighbors_at_the_current_sample_and_rejects_stale_pages() {
+    use gramwave_domain::PlaylistOrder;
+    for order in [PlaylistOrder::NewestFirst, PlaylistOrder::OldestFirst] {
+        let mut core = core();
+        let (loaded, cursor, anchor, prior, next, far_before, far_after) = match order {
+            PlaylistOrder::NewestFirst => ([100, 95], 90, 40, 45, 35, 60, 20),
+            PlaylistOrder::OldestFirst => ([10, 15], 20, 60, 55, 65, 40, 80),
+        };
+        let mut session = gramwave_domain::Session::default();
+        session.start_shuffled_playlist(
+            loaded.map(|id| track(id).into()).to_vec(),
+            [Some(cursor), None, None],
+            order,
+        );
+        session.add_shuffle_sample([track(anchor).into()], true);
+        session.set_position_ms(20_000);
+        core.state.session = session;
+        core.state.shuffle = true;
+        let effects = core.command(AppCommand::Shuffle(false));
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::PreparePlayback { .. } | Effect::Player(PlayerCommand::Stop)
+        )));
+        core.state.session =
+            serde_json::from_value(serde_json::to_value(&core.view().session).unwrap()).unwrap();
+        assert_eq!(current(&core), anchor);
+        assert_eq!(core.view().session.position_ms(), 20_000);
+        assert!(core.view().session.remaining().is_empty());
+        core.command(AppCommand::Insert(track(next), false));
+
+        let request = |core: &mut AppCore, wanted_order, wanted_cursor| {
+            core.pump(Instant::now(), true)
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::QueuePage {
+                        operation,
+                        cursor,
+                        order,
+                        browsing: false,
+                        ..
+                    } if order == wanted_order && cursor == wanted_cursor => Some(operation),
+                    _ => None,
+                })
+                .expect("request the adjacent section")
+        };
+        core.command(AppCommand::Previous);
+        assert_eq!(current(&core), anchor);
+        let backward = request(&mut core, order.reversed(), anchor);
+        page(&mut core, backward, far_before, &[prior]);
+        assert_eq!(current(&core), prior);
+        core.command(AppCommand::Next);
+        assert_eq!(current(&core), anchor);
+        core.command(AppCommand::Next);
+        assert!(core.queue_waiting());
+        let forward = request(&mut core, order, anchor);
+        page(&mut core, forward, far_after, &[next]);
+        assert_eq!(current(&core), next);
+        assert_eq!(
+            core.view()
+                .session
+                .snapshot()
+                .iter()
+                .filter(|entry| entry.message == next)
+                .count(),
+            2
+        );
+
+        let on_again = request(&mut core, order, far_after);
+        core.command(AppCommand::Shuffle(true));
+        assert!(on_again.cancel.is_cancelled());
+        let before = upcoming(&core);
+        page(&mut core, on_again, 0, &[far_after]);
+        assert_eq!(upcoming(&core), before);
+        assert!(core.command(AppCommand::Shuffle(true)).is_empty());
+        assert_eq!(upcoming(&core), before);
+        assert!(before.contains(&anchor));
+        assert_eq!(core.view().session.timeline().current_index(), Some(0));
+
+        core.browse_queue(crate::page_browse::Browse::Down);
+        let full = request(&mut core, order, cursor);
+        page(&mut core, full, 0, &[prior, anchor, next, far_after]);
+        let snapshot = core.view().session.snapshot();
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|entry| entry.message == anchor)
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|entry| entry.message == prior)
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|entry| entry.message == next)
+                .count(),
+            2
+        );
+    }
 }

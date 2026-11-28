@@ -1,13 +1,20 @@
 use crate::model::Track;
 use gramwave_domain::playback::QueueRangeEdit;
 use gramwave_domain::{QueueEntryId, RepeatMode};
+#[derive(Clone, Copy)]
+pub enum PlaylistStart {
+    Ordered,
+    Shuffled,
+    Track(u64),
+}
+
 pub enum AppCommand {
     Connect,
     Retry,
     StartSession(Vec<Track>, usize),
     StartPlaylist {
         chat: i64,
-        library_id: Option<u64>,
+        start: PlaylistStart,
         order: gramwave_domain::PlaylistOrder,
     },
     ReverseQueue,

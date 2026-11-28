@@ -585,3 +585,26 @@ async fn empty_oldest_window_uses_descending_search_instead_of_ending_early() {
         [4 << 20, 6 << 20]
     );
 }
+
+#[test]
+fn sparse_shuffle_uses_all_four_quarters_before_repeating_any() {
+    let positions = [
+        (
+            100,
+            (0..50).map(|i| (i * 2, i64::from(1000 - i * 2))).collect(),
+        ),
+        (0, vec![]),
+        (0, vec![]),
+    ];
+    let ids = super::shuffle_sample_ids(&positions, None, || 42);
+    let mut quarters: Vec<_> = ids[..4].iter().map(|id| (1000 - id) / 25).collect();
+    quarters.sort_unstable();
+    assert_eq!(quarters, [0, 1, 2, 3]);
+    assert_eq!(ids.len(), 16);
+    let ids = super::shuffle_sample_ids(
+        &positions,
+        Some((gramwave_domain::PlaylistOrder::NewestFirst, 940)),
+        || 42,
+    );
+    assert!(ids.iter().all(|id| *id <= 940));
+}

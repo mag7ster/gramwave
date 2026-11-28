@@ -119,6 +119,7 @@ impl Session {
             removed.insert(timeline.get(at).unwrap().entry_id);
         }
         remaining.extend(self.remaining.iter().filter(|id| !removed.contains(id)));
+        self.forget_play_next([expected]);
         self.preceding.truncate(index);
         self.history.truncate(index - self.preceding.len());
         self.remaining = remaining;
@@ -243,6 +244,8 @@ impl Session {
             }
         }
         if !order_changes.is_empty() {
+            self.fix_shuffle_sample_positions(order_changes.keys().copied());
+            self.forget_play_next(order_changes.keys().copied());
             // Repeat and unshuffle keep the relative order of entries the user didn't move.
             let mut before: HashMap<_, Vec<_>> = HashMap::new();
             let mut next = None;

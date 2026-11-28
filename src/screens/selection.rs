@@ -201,6 +201,13 @@ impl Selection {
             .is_some_and(|press| press.scope == scope)
     }
 
+    pub(super) fn stop_pointer(&mut self, scope: Scope) {
+        if self.tracking(scope) {
+            self.press = None;
+            self.blocked = true;
+        }
+    }
+
     pub(super) fn block_click(&self) -> bool {
         self.blocked
     }

@@ -610,6 +610,9 @@ mod tests {
         });
         let (send, calls) = std::sync::mpsc::channel();
         let tg = Telegram::mock_rpc(move |request| {
+            if request["@type"] == "getChatSparseMessagePositions" {
+                return json!({"total_count":0,"positions":[]});
+            }
             send.send(request["@type"].as_str().unwrap().to_owned())
                 .unwrap();
             match request["@type"].as_str() {

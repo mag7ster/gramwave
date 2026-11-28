@@ -208,6 +208,18 @@ the history boundary. The application waits at the boundary and uses the normal
 playback preparation path when a page is ready. Existing sessions without
 continuation data restore as finite queues.
 
+Scrolling near the loaded boundary requests one page of queue or playlist
+metadata. A temporary failure keeps that request eligible for a timed retry
+while the viewport stays near the boundary. Playback can keep requesting its
+required queue page when the queue pane is closed.
+
+Opening an incomplete playlist prepares a small shuffle sample using TDLib
+media positions and one batch of message metadata. This request leaves the
+sequential page cursors at their existing positions. The session tracks sampled
+occurrences until sequential loading reaches them. Turning shuffle off restores the original order around the current track. If
+the current sample is beyond the main cursor, an ordered window loads
+contiguous neighbors in both directions without advancing that cursor.
+
 The transport's reverse action reverses the timeline around the current
 occurrence. When the source history is incomplete, the action first loads the
 remaining metadata. The current audio keeps its position. An advancing request

@@ -685,6 +685,7 @@ fn privacy_safe(v: &Value) -> bool {
             | "getRemoteFile"
             | "deleteFile"
             | "getMessages"
+            | "getChatSparseMessagePositions"
             | "searchChatMessages"
             | "searchChats"
             | "searchPublicChats"

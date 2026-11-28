@@ -136,6 +136,7 @@ impl SearchState {
 pub(crate) struct IndexOperation {
     pub operation: Operation,
     pub chat: i64,
+    pub browse: Option<crate::page_browse::PlaylistKey>,
 }
 pub(crate) struct MediaOperation {
     pub operation: Operation,
@@ -151,7 +152,12 @@ pub struct LibraryCore {
     pub(crate) catalog: Option<Operation>,
     pub(crate) catalog_updates: HashMap<(i64, PersonalChatList), bool>,
     pub(crate) index: Option<IndexOperation>,
-    pub(crate) oldest: Option<(Operation, i64, usize)>,
+    pub(crate) oldest: Option<(
+        Operation,
+        i64,
+        usize,
+        Option<crate::page_browse::PlaylistKey>,
+    )>,
     pub(crate) oldest_error: Option<(i64, AppError)>,
     pub(crate) search: SearchState,
     pub(crate) sources: HashSet<TrackId>,
@@ -281,7 +287,7 @@ impl LibraryCore {
         }
         self.catalog_updates.clear();
         self.cancel_index();
-        if let Some((op, _, _)) = self.oldest.take() {
+        if let Some((op, _, _, _)) = self.oldest.take() {
             op.cancel.cancel();
         }
         self.oldest_error = None;

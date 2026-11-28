@@ -137,3 +137,11 @@ impl AuthorizationState {
         }
     }
 }
+
+/// Per media type, the total number of search matches and the returned (rank, message) pairs.
+pub type ShuffleRanks = [(u32, Vec<(u32, i64)>); 3];
+
+pub struct ShuffleSample {
+    pub ranks: ShuffleRanks,
+    pub tracks: Vec<MediaTrack>,
+}

@@ -185,12 +185,10 @@ mod regression {
         let mut s = Session::default();
         s.start(&tracks(), 0, false);
         s.reorder(true);
-        let anchor = s.remaining()[0].entry_id;
         s.insert(tracks()[0].clone(), true);
         let id = s.remaining()[0].entry_id;
         s.reorder(false);
-        let at = s.remaining().iter().position(|t| t.entry_id == id).unwrap();
-        assert_eq!(s.remaining()[at + 1].entry_id, anchor);
+        assert_eq!(s.remaining()[0].entry_id, id);
         let removed = s.remaining()[1].entry_id;
         s.remove(1);
         let expected = order(&s);
@@ -376,4 +374,170 @@ fn legacy_snapshots_without_occurrence_ids_share_references_and_keep_duplicates(
             .entry_id,
         session.snapshot()[1].entry_id
     );
+}
+
+#[test]
+fn shuffle_samples_rejoin_source_order_once_and_keep_manual_insertions() {
+    fn track(message: i64) -> TrackMetadata {
+        TrackMetadata {
+            chat: 42,
+            message,
+            ..Default::default()
+        }
+    }
+    let mut session = Session::default();
+    session.start_shuffled_playlist(
+        vec![track(100), track(95)],
+        [Some(90), None, None],
+        PlaylistOrder::NewestFirst,
+    );
+    session.add_shuffle_sample([track(50), track(20), track(95), track(80)], true);
+    assert_eq!(session.current().unwrap().message, 50);
+    session.insert(track(200), true);
+    session.insert_many([track(201), track(202)], false);
+    let mut session: Session =
+        serde_json::from_value(serde_json::to_value(session).unwrap()).unwrap();
+    session.reorder(false);
+    assert_eq!(session.current().unwrap().message, 50);
+    assert_eq!(
+        session
+            .remaining()
+            .iter()
+            .map(|t| t.message)
+            .collect::<Vec<_>>(),
+        [200, 100, 95, 201, 202]
+    );
+    session.add_playlist_page(0, 0, [85, 80, 70, 50, 30, 20, 10].map(track), false);
+    assert_eq!(
+        session
+            .remaining()
+            .iter()
+            .map(|t| t.message)
+            .collect::<Vec<_>>(),
+        [200, 100, 95, 85, 80, 70, 30, 20, 10, 201, 202]
+    );
+    assert_eq!(
+        session
+            .snapshot()
+            .iter()
+            .filter(|t| t.message == 50)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn completed_playlist_starts_with_four_different_parts_in_both_orders() {
+    for order in [PlaylistOrder::NewestFirst, PlaylistOrder::OldestFirst] {
+        let mut tracks: Vec<_> = (1..=40)
+            .map(|message| TrackMetadata {
+                message,
+                ..Default::default()
+            })
+            .collect();
+        tracks.sort_by_key(|track| order.key(track.message));
+        let mut session = Session::default();
+        session.start_shuffled_playlist(tracks, [None; 3], order);
+        let mut bands: Vec<_> = session
+            .current()
+            .into_iter()
+            .chain(session.remaining().iter().take(3))
+            .map(|entry| (entry.message - 1) / 10)
+            .collect();
+        bands.sort_unstable();
+        assert_eq!(bands, [0, 1, 2, 3]);
+        assert_eq!(session.remaining().len(), 39);
+    }
+}
+
+#[test]
+fn switching_shuffle_rebuilds_whole_queue_around_current_and_consumes_play_next() {
+    fn track(message: i64) -> TrackMetadata {
+        TrackMetadata {
+            message,
+            ..Default::default()
+        }
+    }
+    let mut session = Session::default();
+    session.start(&[1, 2, 3, 4, 5].map(track), 3, true);
+    let current = session.current().unwrap().entry_id;
+    session.set_position_ms(18_000);
+    session.insert(track(10), true);
+    session.insert(track(20), false);
+    session.set_shuffle(false);
+    assert_eq!(
+        session
+            .preceding()
+            .iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(
+        session
+            .remaining()
+            .iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>(),
+        [10, 5, 20]
+    );
+    assert_eq!(session.current().unwrap().entry_id, current);
+    assert_eq!(session.position_ms(), 18_000);
+    session.set_shuffle(true);
+    assert_eq!(session.timeline().current_index(), Some(0));
+    let mut future: Vec<_> = session
+        .remaining()
+        .iter()
+        .map(|entry| entry.message)
+        .collect();
+    future.sort_unstable();
+    assert_eq!(future, [1, 2, 3, 5, 10, 20]);
+
+    let mut restored: Session =
+        serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+    restored.set_shuffle(false);
+    assert_eq!(restored.remaining()[0].message, 10);
+    assert_eq!(restored.previous().unwrap().message, 3);
+    assert_eq!(
+        restored
+            .advance(RepeatMode::Off, false, false)
+            .unwrap()
+            .message,
+        4
+    );
+    assert_eq!(
+        restored
+            .advance(RepeatMode::Off, false, false)
+            .unwrap()
+            .message,
+        10
+    );
+    restored.set_shuffle(true);
+    assert!(restored.remaining().iter().any(|entry| entry.message == 1));
+    restored.set_shuffle(false);
+    assert_eq!(restored.remaining()[0].message, 5);
+}
+
+#[test]
+fn toggling_shuffle_keeps_legacy_rows_missing_from_the_original_order() {
+    let mut session: Session = serde_json::from_value(serde_json::json!({
+        "preceding": [{"message": 1}],
+        "history": [{"message": 2}],
+        "current": {"message": 3},
+        "remaining": [{"message": 4}],
+    }))
+    .unwrap();
+    session.set_shuffle(true);
+    assert_eq!(session.remaining().len(), 3);
+    session.set_shuffle(false);
+    assert_eq!(
+        session
+            .preceding()
+            .iter()
+            .map(|track| track.message)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(session.current().unwrap().message, 3);
+    assert_eq!(session.remaining()[0].message, 4);
 }

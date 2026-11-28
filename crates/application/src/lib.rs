@@ -17,7 +17,9 @@ pub mod workflow;
 
 mod library_workflow;
 mod offline_work;
+pub mod page_browse;
 mod queue_work;
+mod shuffle_work;
 
 pub use core::AppCore;
 pub use error::AppError;

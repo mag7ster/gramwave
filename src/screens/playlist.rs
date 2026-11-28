@@ -10,9 +10,10 @@ use crate::application::commands::AppCommand;
 use crate::{design, tr, App};
 use design::{button, Icon};
 use eframe::egui;
+use gramwave_application::commands::PlaylistStart;
 use gramwave_domain::{PlaylistOrder, TrackId};
 
-pub(super) const FILTER_FOCUS: &str = "playlist-filter-focus";
+pub(super) const CONTROL_FOCUS: &str = "playlist-control-focus";
 
 fn playlist_filter(ui: &mut egui::Ui, label: &str, selected: &mut bool, width: f32) {
     let size = egui::vec2(width, ui.spacing().interact_size.y);
@@ -23,7 +24,7 @@ fn playlist_filter(ui: &mut egui::Ui, label: &str, selected: &mut bool, width: f
     });
     focus_outline(ui, &response);
     if response.enabled() && response.has_focus() {
-        ui.data_mut(|data| data.insert_temp(egui::Id::new(FILTER_FOCUS), Some(response.id)));
+        ui.data_mut(|data| data.insert_temp(egui::Id::new(CONTROL_FOCUS), Some(response.id)));
     }
     if response.clicked() {
         *selected = !*selected;
@@ -36,6 +37,49 @@ fn playlist_filter(ui: &mut egui::Ui, label: &str, selected: &mut bool, width: f
             label,
         )
     });
+}
+
+fn playlist_shuffle(ui: &mut egui::Ui, round: bool) -> bool {
+    let label = tr("Play shuffle");
+    let palette = design::colors(ui);
+    let response = if round {
+        ui.scope(|ui| {
+            let widgets = &mut ui.visuals_mut().widgets;
+            widgets.inactive.weak_bg_fill = palette.panel;
+            widgets.hovered.weak_bg_fill = palette.raised;
+            widgets.active.weak_bg_fill = palette.raised;
+            ui.add(
+                egui::Button::image(Icon::Shuffle.image(palette.text, 22.).alt_text(&label))
+                    .min_size(egui::Vec2::splat(44.))
+                    .corner_radius(22),
+            )
+        })
+        .inner
+    } else {
+        ui.button(label)
+    };
+    if round {
+        ui.painter().rect_stroke(
+            response.rect,
+            22.,
+            egui::Stroke::new(
+                1.,
+                if response.has_focus() {
+                    palette.accent
+                } else {
+                    palette
+                        .muted
+                        .lerp_to_gamma(egui::Color32::BLACK, 0.2)
+                        .gamma_multiply(if response.enabled() { 0.7 } else { 0.3 })
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if response.enabled() && response.has_focus() {
+        ui.data_mut(|data| data.insert_temp(egui::Id::new(CONTROL_FOCUS), Some(response.id)));
+    }
+    response.clicked()
 }
 
 #[derive(Clone)]
@@ -250,6 +294,7 @@ impl App {
         let mut filters = before_filters;
         let filter_labels = [tr("Music"), tr("Audio files"), tr("Voice messages")];
         let mut play_all = false;
+        let mut play_shuffle = false;
         let mut pin_all = false;
         let full_heading = layout_fraction(ui, "playlist-heading-full", !compact);
         let show_heading = layout_fraction(ui, "playlist-heading-visible", !dense);
@@ -288,6 +333,12 @@ impl App {
                     #[cfg(test)]
                     ui.ctx().data_mut(|data| {
                         data.insert_temp(egui::Id::new("test-play-all"), play.response.rect)
+                    });
+                    let shuffle = ui.add_enabled_ui(can_play, |ui| playlist_shuffle(ui, true));
+                    play_shuffle = shuffle.inner;
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(egui::Id::new("test-play-shuffle"), shuffle.response.rect)
                     });
                     if !fully_saved {
                         pin_all = ui
@@ -402,6 +453,9 @@ impl App {
                     play_all = ui
                         .add_enabled(can_play, egui::Button::new(tr("Play all")))
                         .clicked();
+                    play_shuffle = ui
+                        .add_enabled_ui(can_play, |ui| playlist_shuffle(ui, false))
+                        .inner;
                     if !fully_saved {
                         pin_all = ui
                             .add_enabled(
@@ -413,7 +467,7 @@ impl App {
                     if has_saved {
                         remove_downloads = ui.button(tr("Remove downloads")).clicked();
                     }
-                    if play_all || pin_all || remove_downloads {
+                    if play_all || play_shuffle || pin_all || remove_downloads {
                         ui.close();
                     }
                     self.playlist_menu(ui, selected, chat_id, &url);
@@ -457,7 +511,10 @@ impl App {
         }
         let tracks = self.playlist_tracks(selected);
         if play_all {
-            self.play_playlist_from(selected, None);
+            self.play_playlist_from(selected, PlaylistStart::Ordered);
+        }
+        if play_shuffle {
+            self.play_playlist_from(selected, PlaylistStart::Shuffled);
         }
         if remove_downloads {
             self.offline_confirm = Some(vec![chat_id]);
@@ -532,6 +589,8 @@ impl App {
             .present_playlist(ui.ctx(), scope, &tracks, key_at);
         let mut action = None;
         let mut batch = None;
+        let keyboard_down = super::page_browse::keyboard_down(ui);
+        let wheel_down = super::page_browse::wheel_moving_down(ui);
         let mut list_frame = track_list_frame().begin(ui);
         let list_ui = &mut list_frame.content_ui;
         let key = egui::Id::new("playlist-scroll-anchor");
@@ -951,39 +1010,61 @@ impl App {
         });
 
         let playlist = &self.state.view().playlists[selected];
-        if playlist.has_more() && !self.demo {
-            let bottom = state.offset.y + scroll.inner_rect.height();
-            if order == PlaylistOrder::OldestFirst {
-                let frontier = (0..3)
-                    .filter(|&kind| filters[kind] && !playlist.done[kind])
-                    .map(|kind| playlist.oldest_cursors[kind])
-                    .min()
-                    .unwrap_or(i64::MAX);
-                let known = tracks.partition_point(|track| track.message <= frontier);
-                let near = bottom >= known as f32 * stride - 120.;
-                let error = self.state.oldest_error(chat_id);
-                if self.state.oldest_loading(chat_id) {
-                    ui.weak(tr("Loading older history…"));
-                } else if let Some(error) = error {
-                    let message = error.to_string();
-                    if ui.button(tr("Retry")).on_hover_text(message).clicked() {
-                        self.execute(AppCommand::LoadOldest {
-                            chat: chat_id,
-                            retry: true,
-                        });
-                    }
-                } else if ui.button(tr("Load more music")).clicked() || order_changed || near {
-                    self.execute(AppCommand::LoadOldest {
-                        chat: chat_id,
-                        retry: false,
-                    });
+        if playlist.has_more()
+            && !self.demo
+            && !self.settings_open
+            && self.offline_confirm.is_none()
+        {
+            let viewport = scroll.inner_rect;
+            let incomplete = (0..3).filter(|&kind| filters[kind] && !playlist.done[kind]);
+            let end = match order {
+                PlaylistOrder::OldestFirst => {
+                    let frontier = incomplete
+                        .map(|kind| playlist.oldest_cursors[kind])
+                        .min()
+                        .unwrap_or(i64::MAX);
+                    tracks.partition_point(|track| track.message <= frontier) as f32 * stride
                 }
-            } else if self.state.library().indexing_chat().is_none() {
-                let at_bottom = state.offset.y > 0. && bottom >= scroll.content_size.y - 120.;
-                if ui.button(tr("Load more music")).clicked() || at_bottom {
-                    self.load_chat(selected, false);
+                PlaylistOrder::NewestFirst => {
+                    let frontier = incomplete
+                        .map(|kind| playlist.cursors[kind])
+                        .max()
+                        .unwrap_or_default();
+                    if frontier == 0 {
+                        scroll.content_size.y
+                    } else {
+                        tracks.partition_point(|track| track.message >= frontier) as f32 * stride
+                    }
                 }
             }
+            .min(scroll.content_size.y);
+            let interacting = keyboard_down
+                || wheel_down && ui.rect_contains_pointer(viewport)
+                || design::middle_scroll_active(ui.ctx(), scroll.id)
+                || ui.input(|input| input.pointer.primary_down());
+            let signal = if order == PlaylistOrder::OldestFirst && (order_changed || old.is_none())
+            {
+                gramwave_application::page_browse::Browse::Down
+            } else {
+                super::page_browse::demand(
+                    ui,
+                    viewport,
+                    (start.clamp(0., max), state.offset.y),
+                    end,
+                    (3. * viewport.height(), 4. * viewport.height()),
+                    interacting,
+                )
+            };
+            if self.state.browse_playlist(chat_id, order, filters, signal) {
+                ui.request_repaint();
+            }
+            super::page_browse::indicator(
+                ui,
+                viewport,
+                state.offset.y,
+                end,
+                self.state.playlist_page_status(chat_id, order),
+            );
         }
         if let Some((batch, row)) = batch {
             ui.memory_mut(|memory| memory.request_focus(row));
@@ -1007,7 +1088,7 @@ impl App {
         }
         if let Some((kind, i)) = action {
             match kind {
-                0 => self.play_playlist_from(selected, Some(tracks[i].library_id)),
+                0 => self.play_playlist_from(selected, PlaylistStart::Track(tracks[i].library_id)),
                 6 => self.execute(AppCommand::SelectPlaylistRow(i)),
                 5 => ui.ctx().copy_text(tracks[i].title.clone()),
                 1 => self.execute(AppCommand::Insert(tracks[i].metadata(), true)),
