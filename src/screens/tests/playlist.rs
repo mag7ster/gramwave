@@ -1428,6 +1428,50 @@ fn playlist_shuffle_starts_from_the_full_filtered_list_and_play_all_turns_it_off
 }
 
 #[test]
+fn pending_playlist_shuffle_shows_loading_in_both_themes() {
+    use gramwave_application::{
+        commands::PlaylistStart,
+        library::LibraryCommand,
+        workflow::{AppEvent, Effect},
+    };
+
+    for light in [false, true] {
+        let mut h = Harness::new();
+        h.size = egui::vec2(1250., 720.);
+        let mut state = h.app.state.view().clone();
+        state.light = light;
+        let chat = state.playlists[0].id;
+        state.playlists[0].filters = [true, false, false];
+        state.playlists[0].done = [false, true, true];
+        h.app.state = gramwave_application::AppCore::new(state);
+        h.app.state.library_command(LibraryCommand::Connected(1));
+        h.settle();
+        assert!(menu_text(&mut h, "Loading music…").is_empty());
+
+        let request = h
+            .app
+            .state
+            .command(AppCommand::StartPlaylist {
+                chat,
+                start: PlaylistStart::Shuffled,
+                order: Default::default(),
+            })
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::ShuffleSample { operation, .. } => Some(operation.key()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(menu_text(&mut h, "Loading music…").len(), 1);
+        h.app.state.event(AppEvent::ShuffleSample {
+            request,
+            result: Err(gramwave_application::AppError::Unavailable("Telegram")),
+        });
+        assert!(menu_text(&mut h, "Loading music…").is_empty());
+    }
+}
+
+#[test]
 fn compact_playlist_menu_exposes_play_shuffle() {
     let mut h = Harness::new();
     h.size = egui::vec2(850., 550.);

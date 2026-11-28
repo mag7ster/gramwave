@@ -214,8 +214,10 @@ while the viewport stays near the boundary. Playback can keep requesting its
 required queue page when the queue pane is closed.
 
 Opening an incomplete playlist prepares a small shuffle sample using TDLib
-media positions and one batch of message metadata. This request leaves the
-sequential page cursors at their existing positions. The session tracks sampled
+media positions and one batch of message metadata. Play shuffle uses this sample
+for the first track and keeps one sample ready in the background while the
+playlist is open. A cold start can wait up to five seconds before falling back to
+locally indexed tracks. Sampling leaves the sequential page cursors in place. The session tracks sampled
 occurrences until sequential loading reaches them. Turning shuffle off restores the original order around the current track. If
 the current sample is beyond the main cursor, an ordered window loads
 contiguous neighbors in both directions without advancing that cursor.

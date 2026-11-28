@@ -52,10 +52,6 @@ pub enum LibraryEvent {
         request: RequestId,
         result: Result<(), AppError>,
     },
-    Page {
-        request: RequestId,
-        playlist: MediaPlaylist,
-    },
     Patch {
         request: RequestId,
         patch: MediaPatch,

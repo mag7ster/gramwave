@@ -57,7 +57,6 @@ pub(crate) enum CoreCommand {
     Stop,
     Current(Track),
     MergeChat(Playlist),
-    Page(Playlist, HashSet<i64>),
     Patch(LibraryPatch, HashSet<i64>),
     Filters(i64, [bool; 3]),
     Recover(i64),
@@ -179,9 +178,6 @@ impl AppCore {
             }
             CoreCommand::ToggleChatPin(id) => return self.reduce_library(Library::TogglePin(id)),
             CoreCommand::MergeChat(p) => return self.reduce_library(Library::MergeChat(p)),
-            CoreCommand::Page(p, protected) => {
-                return self.reduce_library(Library::Page(p, protected))
-            }
             CoreCommand::Patch(p, protected) => {
                 return self.reduce_library(Library::Patch(p, protected))
             }

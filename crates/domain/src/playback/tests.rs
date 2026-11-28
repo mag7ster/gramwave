@@ -391,7 +391,8 @@ fn shuffle_samples_rejoin_source_order_once_and_keep_manual_insertions() {
         [Some(90), None, None],
         PlaylistOrder::NewestFirst,
     );
-    session.add_shuffle_sample([track(50), track(20), track(95), track(80)], true);
+    assert!(session.add_shuffle_sample([track(50), track(20), track(95), track(80)], true));
+    assert!(!session.add_shuffle_sample([track(20), track(95), track(80)], false));
     assert_eq!(session.current().unwrap().message, 50);
     session.insert(track(200), true);
     session.insert_many([track(201), track(202)], false);

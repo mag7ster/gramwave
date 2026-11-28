@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) enum LibraryMutation {
     MergeChat(Playlist),
-    Page(Playlist, HashSet<i64>),
     Patch(LibraryPatch, HashSet<i64>),
     Filters(i64, [bool; 3]),
     Recover(i64),
@@ -24,7 +23,7 @@ impl LibraryCore {
         command: LibraryMutation,
     ) -> ChangeSet {
         let chat = match &command {
-            LibraryMutation::MergeChat(p) | LibraryMutation::Page(p, _) => p.id,
+            LibraryMutation::MergeChat(p) => p.id,
             LibraryMutation::Patch(p, _) => p.chat,
             LibraryMutation::Filters(id, _)
             | LibraryMutation::Recover(id)
@@ -43,24 +42,6 @@ impl LibraryCore {
                 if let Some(old) = state.playlists.iter_mut().find(|p| p.id == chat) {
                     old.title = playlist.title;
                     old.emoji_status = playlist.emoji_status;
-                } else {
-                    state.playlists.push(playlist);
-                }
-            }
-            LibraryMutation::Page(playlist, protected) => {
-                if let Some(old) = state.playlists.iter_mut().find(|p| p.id == chat) {
-                    old.merge_tracks(playlist.tracks, &protected);
-                    for kind in 0..3 {
-                        if !old.done[kind] {
-                            old.cursors[kind] = playlist.cursors[kind];
-                            old.done[kind] = playlist.done[kind]
-                                || (old.cursors[kind] > 0
-                                    && old.oldest_cursors[kind] >= old.cursors[kind]);
-                        }
-                    }
-                    if !playlist.url.is_empty() {
-                        old.url = playlist.url;
-                    }
                 } else {
                     state.playlists.push(playlist);
                 }

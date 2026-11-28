@@ -217,16 +217,13 @@ impl App {
                                 });
                             }
                         }
+                        let publish_patch = |patch| publish(LibraryEvent::Patch { request, patch });
                         let result = if refresh {
-                            crate::discovery::refresh_library(&tg, playlist, &cancel, |patch| {
-                                publish(LibraryEvent::Patch { request, patch });
-                            })
-                            .await
+                            crate::discovery::refresh_library(&tg, playlist, &cancel, publish_patch)
+                                .await
                         } else {
-                            crate::discovery::index_library(&tg, playlist, &cancel, |playlist| {
-                                publish(LibraryEvent::Page { request, playlist });
-                            })
-                            .await
+                            crate::discovery::index_library(&tg, playlist, &cancel, publish_patch)
+                                .await
                         };
                         Event::Application(AppEvent::Library(LibraryEvent::Indexed {
                             request,

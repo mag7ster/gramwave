@@ -21,7 +21,7 @@ pub(super) struct QueueScroll {
     animation: Option<(f32, f64)>,
     snap_at: Option<f64>,
     generation: u64,
-    page: Option<(u64, usize)>,
+    update: Option<(u64, usize, u64)>,
     start_generation: u64,
     shuffle_generation: u64,
     fade_start: Option<f64>,
@@ -112,18 +112,20 @@ impl QueueScroll {
         self.offset
     }
 
-    pub(super) fn page_added(
+    pub(super) fn queue_updated(
         &mut self,
         queue: QueueTimeline<'_>,
-        page: (u64, usize),
+        update: (u64, usize, u64),
         stride: f32,
         max: f32,
         realign: bool,
     ) {
-        let Some((previous, boundary)) = self.page.replace(page) else {
+        let Some((previous_page, boundary, previous_sample)) = self.update.replace(update) else {
             return;
         };
-        if previous == page.0 || realign {
+        let (page, new_boundary, sample) = update;
+        let sampled = previous_sample != sample;
+        if realign || previous_page == page && !sampled {
             return;
         }
         let current_moved =
@@ -139,19 +141,27 @@ impl QueueScroll {
             }
             return;
         }
-        if !current_moved && self.offset < boundary as f32 * self.stride {
+        if !sampled && !current_moved && self.offset < boundary as f32 * self.stride {
             return;
         }
-        let first = if current_moved { 0 } else { page.1 };
+        let first = if current_moved || sampled {
+            0
+        } else {
+            new_boundary
+        };
         if let Some(offset) = self.visible.as_ref().and_then(|anchor| {
             anchor.offset(stride, max, |&(old, id, _)| {
                 (first..queue.len())
+                    // An upcoming row moved toward the front by the sample should not pull the viewport with it.
+                    .filter(|&i| !sampled || i >= old)
                     .filter(|&i| queue.get(i).is_some_and(|entry| entry.entry_id == id))
                     .min_by_key(|&i| i.abs_diff(old))
             })
         }) {
             self.offset = offset;
             self.stride = stride;
+        } else if sampled {
+            self.offset = self.offset.clamp(0., max.max(0.));
         }
     }
 
@@ -350,12 +360,12 @@ mod tests {
             ..Default::default()
         };
         let height = 3. * stride;
-        scroll.page_added(session.timeline(), (0, 2), stride, 20. * stride, false);
+        scroll.queue_updated(session.timeline(), (0, 2, 0), stride, 20. * stride, false);
         scroll.remember(session.timeline(), height);
         let row = session.timeline().get(5).unwrap().entry_id;
 
         session.add_playlist_page(0, 60, [80, 75].map(track), true);
-        scroll.page_added(session.timeline(), (1, 4), stride, 20. * stride, false);
+        scroll.queue_updated(session.timeline(), (1, 4, 0), stride, 20. * stride, false);
         assert_eq!(scroll.offset(), initial + 2. * stride);
         assert_eq!(session.timeline().get(7).unwrap().entry_id, row);
     }

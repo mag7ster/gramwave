@@ -63,6 +63,7 @@ impl App {
             .into_iter()
             .chain(self.state.offline().retry_deadline(now, online))
             .chain(self.state.page_retry_deadline(now, online))
+            .chain(self.state.shuffle_start_deadline())
             .min()
     }
 

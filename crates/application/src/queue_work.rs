@@ -95,8 +95,8 @@ impl AppCore {
             .map(|(_, error)| error)
     }
 
-    pub(crate) fn cancel_oldest_start(&mut self, chat: i64) {
-        if self.queue_work.oldest_start == Some(chat) {
+    pub(crate) fn cancel_oldest_start(&mut self, chat: Option<i64>) {
+        if chat.is_none() || self.queue_work.oldest_start == chat {
             self.queue_work.oldest_start = None;
         }
     }
@@ -106,6 +106,7 @@ impl AppCore {
         chat: i64,
         start: PlaylistStart,
         order: PlaylistOrder,
+        first_sample: Option<Track>,
     ) -> Option<Track> {
         self.queue_work.oldest_start = None;
         self.queue_work.oldest_start_retry = Default::default();
@@ -124,7 +125,7 @@ impl AppCore {
             self.queue_work.oldest_start = Some(chat);
             return None;
         }
-        self.start_ordered_playlist(chat, start, order)
+        self.start_ordered_playlist(chat, start, order, first_sample)
     }
 
     fn start_ordered_playlist(
@@ -132,13 +133,25 @@ impl AppCore {
         chat: i64,
         start: PlaylistStart,
         order: PlaylistOrder,
+        first_sample: Option<Track>,
     ) -> Option<Track> {
         let playlist = self.state.playlists.iter().find(|p| p.id == chat)?;
         let mut tracks: Vec<_> = playlist
             .tracks
             .iter()
             .filter(|t| playlist.filters[usize::from(t.kind)])
+            .cloned()
             .collect();
+        let sampled_message = first_sample.as_ref().map(|track| track.message);
+        if let Some(track) = first_sample {
+            let index = tracks.partition_point(|known| known.message > track.message);
+            if tracks
+                .get(index)
+                .is_none_or(|known| known.message != track.message)
+            {
+                tracks.insert(index, track);
+            }
+        }
         if order == PlaylistOrder::OldestFirst {
             tracks.reverse();
         }
@@ -146,22 +159,23 @@ impl AppCore {
             PlaylistStart::Track(id) => Some(id),
             _ => None,
         };
-        let index = tracks
-            .iter()
-            .position(|t| library_id.is_none_or(|id| id == t.library_id))?;
+        let index = tracks.iter().position(|t| {
+            library_id.is_none_or(|id| id == t.library_id)
+                && sampled_message.is_none_or(|id| id == t.message)
+        })?;
         let cursors = std::array::from_fn(|kind| {
             (playlist.filters[kind] && !playlist.done[kind]).then(|| match order {
                 PlaylistOrder::NewestFirst => playlist.cursors[kind],
                 PlaylistOrder::OldestFirst => playlist.oldest_cursors[kind],
             })
         });
-        let tracks = tracks.into_iter().cloned().map(Into::into).collect();
+        let tracks = tracks.into_iter().map(Into::into).collect();
         let shuffle = match start {
             PlaylistStart::Ordered => false,
             PlaylistStart::Shuffled => true,
             PlaylistStart::Track(_) => self.state.shuffle,
         };
-        let current = if matches!(start, PlaylistStart::Shuffled) {
+        let current = if matches!(start, PlaylistStart::Shuffled) && sampled_message.is_none() {
             self.state
                 .session
                 .start_shuffled_playlist(tracks, cursors, order)?
@@ -205,6 +219,7 @@ impl AppCore {
                 chat,
                 PlaylistStart::Ordered,
                 PlaylistOrder::OldestFirst,
+                None,
             ) {
                 self.prepare_playback(track, effects);
             }
@@ -312,7 +327,6 @@ impl AppCore {
 
     pub(crate) fn request_queue_reverse(&mut self) {
         if self.state.session.reverse_queue() {
-            self.queue_work.waiting = None;
             self.queue_work.waiting_previous = false;
             self.queue_work.prefetch_previous = false;
             self.complete_queue_browse();

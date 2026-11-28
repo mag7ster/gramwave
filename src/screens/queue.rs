@@ -42,7 +42,7 @@ fn queue_drag(
     list: egui::Rect,
     stride: f32,
     queue: QueueTimeline<'_>,
-    reorder: (egui::Id, (u64, u64, u64)),
+    reorder: (egui::Id, (u64, u64, u64, u64)),
     row_id: impl Fn(usize) -> egui::Id,
     allow_start: bool,
 ) -> (Option<LiftedQueueRow>, Option<AppCommand>) {
@@ -394,9 +394,10 @@ impl App {
             design::stop_middle_scroll(list_ui.ctx(), area_id);
         }
         let page_generation = self.state.queue_page_generation();
-        follow.page_added(
+        let sample_generation = self.state.playback().shuffle_sample_generation();
+        follow.queue_updated(
             queue,
-            (page_generation, boundary),
+            (page_generation, boundary, sample_generation),
             stride,
             max,
             realign || reversed,
@@ -420,7 +421,12 @@ impl App {
         if shuffled {
             area = area.scroll_source(egui::scroll_area::ScrollSource::NONE);
         }
-        let row_revision = (generation, shuffle_generation, page_generation);
+        let row_revision = (
+            generation,
+            shuffle_generation,
+            page_generation,
+            sample_generation,
+        );
         let queue_scroll = area
             .id_salt("queue-list")
             .vertical_scroll_offset(offset)

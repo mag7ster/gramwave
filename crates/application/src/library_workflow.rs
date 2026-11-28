@@ -105,11 +105,11 @@ impl AppCore {
                 }
             }
             LibraryCommand::Open { chat, refresh } => {
-                self.warm_shuffle(chat, &mut effects);
                 self.library.cancel_index();
                 if refresh {
                     self.handle(CoreCommand::Recover(chat));
                 }
+                self.open_shuffle(chat, &mut effects);
                 self.request_playlist_index(chat, refresh, &mut effects);
             }
             LibraryCommand::RequestMedia { track, now } => {
@@ -351,20 +351,6 @@ impl AppCore {
                     })),
                 }
             }
-            LibraryEvent::Page { request, playlist } => {
-                if !self.library.accepts_index(request, Some(playlist.id)) {
-                    return effects;
-                }
-                let protected = self.library.protected(playlist.id);
-                for track in playlist
-                    .tracks
-                    .iter()
-                    .filter(|t| !protected.contains(&t.message))
-                {
-                    self.library.cache_track(track);
-                }
-                self.handle(CoreCommand::Page(playlist.into(), protected));
-            }
             LibraryEvent::Patch { request, patch } => {
                 if !self.library.accepts_index(request, Some(patch.chat)) {
                     return effects;
@@ -508,6 +494,7 @@ mod tests {
     use super::*;
     use crate::{
         library::{LibraryEffect, LibraryEvent},
+        media::MediaPatch,
         model::{Playlist, State},
         tasks::RequestId,
         AppError,
@@ -603,14 +590,13 @@ mod tests {
             .clone();
         let new = index(&mut core);
         assert!(cancelled.is_cancelled());
-        core.library_event(LibraryEvent::Page {
+        core.library_event(LibraryEvent::Patch {
             request: old,
-            playlist: Playlist {
-                id: 42,
-                tracks: vec![track(999)],
+            patch: MediaPatch {
+                chat: 42,
+                tracks: vec![track(999).into()],
                 ..Default::default()
-            }
-            .into(),
+            },
         });
         core.library_event(LibraryEvent::Indexed {
             request: old,
@@ -717,11 +703,10 @@ mod tests {
         core.library_event(LibraryEvent::Search {
             request,
             query: "radio".into(),
-            result: Ok(vec![Playlist {
+            result: Ok(vec![MediaPlaylist {
                 id: 99,
                 ..Default::default()
-            }
-            .into()]),
+            }]),
         });
         assert!(!core.state.playlists.iter().any(|p| p.id == 99));
     }
@@ -847,17 +832,44 @@ mod tests {
             messages: vec![7],
             from_cache: false,
         }));
-        core.library_event(LibraryEvent::Page {
+        core.library_event(LibraryEvent::Patch {
             request,
-            playlist: Playlist {
-                id: 42,
-                tracks: vec![track(7)],
+            patch: MediaPatch {
+                chat: 42,
+                tracks: vec![track(7).into()],
                 ..Default::default()
-            }
-            .into(),
+            },
         });
         assert!(core.state.playlists[0].tracks.is_empty());
         assert_eq!(core.offline.path(id), Some("ready"));
+    }
+    #[test]
+    fn history_patch_keeps_existing_ids_and_merges_only_its_cursor() {
+        let mut core = core();
+        let playlist = &mut core.state.playlists[0];
+        playlist.cursors = [20, 12, 0];
+        playlist.oldest_cursors[0] = 8;
+        let known_ids: Vec<_> = playlist.tracks.iter().map(|t| t.library_id).collect();
+        let request = index(&mut core);
+
+        core.library_event(LibraryEvent::Patch {
+            request,
+            patch: MediaPatch {
+                chat: 42,
+                tracks: vec![track(9).into()],
+                pagination: [Some((8, false)), None, None],
+                ..Default::default()
+            },
+        });
+
+        let playlist = &core.view().playlists[0];
+        assert_eq!(playlist.cursors, [8, 12, 0]);
+        assert_eq!(playlist.done, [true, false, false]);
+        assert_eq!(playlist.tracks[0].message, 9);
+        assert!(playlist.tracks[1..]
+            .iter()
+            .map(|t| t.library_id)
+            .eq(known_ids));
     }
     #[test]
     fn stale_media_results_cannot_replace_live_edit_or_new_connection() {
@@ -1184,9 +1196,14 @@ mod tests {
             ..Default::default()
         }));
         let request = index(&mut core);
-        core.library_event(LibraryEvent::Page {
+        core.library_event(LibraryEvent::Patch {
             request,
-            playlist: core.view().playlists[0].clone().into(),
+            patch: MediaPatch {
+                chat: 42,
+                tracks: vec![track(8).into()],
+                pagination: [Some((0, true)), None, None],
+                ..Default::default()
+            },
         });
         let art = core.library().playlist_artwork(42);
         assert_eq!(art.file, 77);

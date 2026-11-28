@@ -323,7 +323,7 @@ impl App {
                 Effect::Disconnect => {
                     let pending = self.preparing_next.is_some();
                     self.cancel_next_preparation();
-                    if self.queued_playback.take().is_some() || pending {
+                    if pending {
                         if let Some(player) = &self.player {
                             let _ = player.command(PlayerCommand::QueueNext(None));
                         }
@@ -337,50 +337,10 @@ impl App {
                     self.server.take();
                 }
 
-                Effect::Prefetch(track) => {
-                    if self
-                        .player
-                        .as_ref()
-                        .is_some_and(|player| player.prepares_streamed_next())
-                    {
-                        continue;
-                    }
-                    if self
-                        .state
-                        .offline()
-                        .local_path(
-                            track.id(),
-                            gramwave_application::offline::unix_seconds(
-                                std::time::SystemTime::now(),
-                            ),
-                            self.state.view().cache_policy.days,
-                        )
-                        .is_some()
-                    {
-                        continue;
-                    }
-                    let track = self.media_track(track);
-                    if track.file > 0 {
-                        if let Some(tg) = self.tg.clone() {
-                            self.async_event(
-                                JobClass::Background,
-                                0,
-                                async move {
-                                    tg.prefetch(track.file).await;
-                                    Event::Noop
-                                },
-                                |_| Event::Noop,
-                            );
-                        }
-                    }
-                }
                 Effect::Player(command) => {
                     match &command {
                         PlayerCommand::Load { path, .. } => self.set_playback_path(path),
-                        PlayerCommand::Stop => {
-                            self.queued_playback = None;
-                            self.cancel_next_preparation();
-                        }
+                        PlayerCommand::Stop => self.cancel_next_preparation(),
                         _ => {}
                     }
                     if let Some(player) = &self.player {
@@ -520,12 +480,6 @@ impl App {
             .is_some_and(|player| player.prepares_streamed_next())
         {
             self.prepare_streamed_next(advanced);
-        } else if let Some(player) = &self.player {
-            let next = self.state.next_local_playback();
-            if advanced || next != self.queued_playback {
-                let _ = player.command(PlayerCommand::QueueNext(next.clone()));
-                self.queued_playback = next;
-            }
         }
     }
 
@@ -553,9 +507,8 @@ impl App {
         }
         let pending = self.preparing_next.is_some();
         self.cancel_next_preparation();
-        let previous = self.queued_playback.take();
         let Some((mut track, revision, offline)) = next else {
-            if (pending || previous.is_some()) && !advanced {
+            if pending && !advanced {
                 let _ = self
                     .player
                     .as_ref()
@@ -628,8 +581,7 @@ impl App {
             .is_some_and(|(_, _, operation)| operation.key() == request)
         {
             if let Some(player) = &self.player {
-                let _ = player.command(PlayerCommand::QueueNext(next.clone()));
-                self.queued_playback = next;
+                let _ = player.command(PlayerCommand::QueueNext(next));
             }
         }
     }

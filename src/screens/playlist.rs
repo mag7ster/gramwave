@@ -280,6 +280,7 @@ impl App {
             .iter()
             .any(|track| p.filters[usize::from(track.kind)]);
 
+        let can_shuffle = can_play || p.has_more() && self.state.library().connected();
         let emoji_status = p.emoji_status;
         let before_filters = p.filters;
         let has_saved = self
@@ -334,7 +335,7 @@ impl App {
                     ui.ctx().data_mut(|data| {
                         data.insert_temp(egui::Id::new("test-play-all"), play.response.rect)
                     });
-                    let shuffle = ui.add_enabled_ui(can_play, |ui| playlist_shuffle(ui, true));
+                    let shuffle = ui.add_enabled_ui(can_shuffle, |ui| playlist_shuffle(ui, true));
                     play_shuffle = shuffle.inner;
                     #[cfg(test)]
                     ui.ctx().data_mut(|data| {
@@ -454,7 +455,7 @@ impl App {
                         .add_enabled(can_play, egui::Button::new(tr("Play all")))
                         .clicked();
                     play_shuffle = ui
-                        .add_enabled_ui(can_play, |ui| playlist_shuffle(ui, false))
+                        .add_enabled_ui(can_shuffle, |ui| playlist_shuffle(ui, false))
                         .inner;
                     if !fully_saved {
                         pin_all = ui
@@ -507,7 +508,7 @@ impl App {
             self.open_chat(selected);
         }
         if previous_order != self.playlist_order {
-            self.execute(AppCommand::CancelOldestStart(chat_id));
+            self.execute(AppCommand::CancelPlaylistStart(chat_id));
         }
         let tracks = self.playlist_tracks(selected);
         if play_all {
@@ -531,8 +532,16 @@ impl App {
         {
             ui.weak(notice);
         }
+        let shuffle_loading = self.state.shuffle_start_loading(chat_id);
+        if shuffle_loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak(tr("Loading music…"));
+            });
+        }
         let loading_id = ui.id().with("empty-playlist");
-        let waiting = tracks.is_empty()
+        let waiting = !shuffle_loading
+            && tracks.is_empty()
             && self.search.is_empty()
             && (self.state.library().indexing_chat() == Some(chat_id)
                 || self.state.oldest_loading(chat_id))
@@ -540,7 +549,7 @@ impl App {
         if !waiting {
             ui.data_mut(|data| data.remove::<(i64, f64)>(loading_id));
         }
-        if tracks.is_empty() {
+        if tracks.is_empty() && !shuffle_loading {
             if !compact {
                 ui.add_space(24.);
             }

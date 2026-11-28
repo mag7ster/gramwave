@@ -1,6 +1,52 @@
 use gramwave_application::media::MediaTrack as Track;
 use gramwave_application::model::{Caption, CaptionEmoji, CaptionLink, EmojiStatus};
+use gramwave_application::AppError;
 use serde::Deserialize;
+use serde_json::{json, Value};
+
+pub(crate) const MEDIA_FILTERS: [&str; 3] = [
+    "searchMessagesFilterAudio",
+    "searchMessagesFilterDocument",
+    "searchMessagesFilterVoiceNote",
+];
+
+pub(super) fn search_messages_request(chat: i64, filter: &str, cursor: i64, offset: i32) -> Value {
+    json!({
+        "@type": "searchChatMessages",
+        "chat_id": chat,
+        "topic_id": null,
+        "query": "",
+        "sender_id": null,
+        "from_message_id": cursor,
+        "offset": offset,
+        "limit": 100,
+        "filter": {"@type": filter},
+    })
+}
+
+pub(super) fn search_page(
+    batch: &Value,
+    cursor: i64,
+    offset: i32,
+) -> Result<(&[Value], i64, i64), AppError> {
+    let messages = batch["messages"]
+        .as_array()
+        .ok_or_else(|| AppError::Protocol("Invalid search response".into()))?;
+    let next = batch["next_from_message_id"]
+        .as_i64()
+        .ok_or_else(|| AppError::Protocol("Invalid search cursor".into()))?;
+    if offset == 0 && next != 0 && next == cursor {
+        return Err(AppError::Protocol("Search cursor did not advance".into()));
+    }
+    // Documents filtered out of playback still count toward the server watermark.
+    let newest = messages.iter().try_fold(0, |newest, message| {
+        message["id"]
+            .as_i64()
+            .map(|id| newest.max(id))
+            .ok_or_else(|| AppError::Protocol("Invalid search message identity".into()))
+    })?;
+    Ok((messages, next, newest))
+}
 
 pub(super) fn telegram_int64(value: &serde_json::Value) -> Option<i64> {
     value

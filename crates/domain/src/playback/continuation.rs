@@ -221,15 +221,15 @@ impl Session {
         &mut self,
         tracks: impl IntoIterator<Item = TrackMetadata>,
         starting: bool,
-    ) {
+    ) -> bool {
         let Some(continuation) = &self.continuation else {
-            return;
+            return false;
         };
         let order = self.playlist_order;
         let frontier = continuation.frontier(order);
         let ceiling = order.key(continuation.ceiling);
         let Some(track_chat) = self.source else {
-            return;
+            return false;
         };
         let known: BTreeMap<_, _> = self
             .order
@@ -292,8 +292,14 @@ impl Session {
             ids.push(id);
         }
         if ids.is_empty() {
-            return;
+            return false;
         }
+        let same_prefix = if starting {
+            self.current == Some(ids[0]) && self.remaining.starts_with(&ids[1..])
+        } else {
+            self.remaining.starts_with(&ids)
+        };
+        let previous_len = self.remaining.len();
         let selected: HashSet<_> = ids.iter().copied().collect();
         self.remaining.retain(|id| !selected.contains(id));
         if starting {
@@ -307,6 +313,7 @@ impl Session {
             }
         }
         self.remaining.splice(..0, ids);
+        !same_prefix || self.remaining.len() != previous_len
     }
 
     pub(super) fn show_shuffle_samples(&mut self, shuffle: bool) {

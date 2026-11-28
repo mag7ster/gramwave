@@ -927,6 +927,118 @@ fn switching_shuffle_returns_to_the_current_row_immediately_in_both_layouts() {
 }
 
 #[test]
+fn late_shuffle_sample_keeps_scrolled_rows_in_place_from_the_first_frame() {
+    use gramwave_application::{
+        commands::PlaylistStart,
+        library::LibraryCommand,
+        model::{Playlist, Track},
+        telegram::ShuffleSample,
+        workflow::{AppEvent, Effect},
+    };
+
+    for new_tracks in [false, true] {
+        let track = |message| Track {
+            chat: 42,
+            message,
+            title: format!("Track {message}"),
+            ..Default::default()
+        };
+        let mut h = queue_harness(1);
+        let mut state = h.app.state.view().clone();
+        state.playlists = vec![Playlist {
+            id: 42,
+            tracks: (101..=200).rev().map(track).collect(),
+            filters: [true, false, false],
+            cursors: [100, 0, 0],
+            done: [false, true, true],
+            ..Default::default()
+        }];
+        h.app.state = gramwave_application::AppCore::new(state);
+        h.app.state.library_command(LibraryCommand::Connected(1));
+        h.app.state.command(AppCommand::StartPlaylist {
+            chat: 42,
+            start: PlaylistStart::Ordered,
+            order: Default::default(),
+        });
+        let request = h
+            .app
+            .state
+            .command(AppCommand::Shuffle(true))
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::ShuffleSample { operation, .. } => Some(operation.key()),
+                _ => None,
+            })
+            .unwrap();
+        h.settle();
+        let viewport = h.list_scroll("test-queue-scroll").0;
+        scroll_queue(&mut h, viewport.center(), -1200.);
+        h.frame(vec![egui::Event::PointerGone]);
+        h.settle();
+        assert!(return_button(&h).is_some());
+        let (&anchor, &(row, ..)) = h
+            .app
+            .test_queue_rows
+            .iter()
+            .min_by(|(_, a), (_, b)| {
+                (a.0.center().y - viewport.center().y)
+                    .abs()
+                    .total_cmp(&(b.0.center().y - viewport.center().y).abs())
+            })
+            .unwrap();
+        let session = &h.app.state.view().session;
+        let current = session.current().unwrap().entry_id;
+        let len = session.timeline().len();
+        let anchor_index = (0..len)
+            .find(|&i| session.timeline().get(i).unwrap().entry_id == anchor)
+            .unwrap();
+        let messages: Vec<_> = if new_tracks {
+            vec![98, 97, 96]
+        } else {
+            session
+                .remaining()
+                .iter()
+                .rev()
+                .take(3)
+                .map(|t| t.message)
+                .collect()
+        };
+
+        h.app.state.event(AppEvent::ShuffleSample {
+            request,
+            result: Ok(ShuffleSample {
+                ranks: Default::default(),
+                tracks: messages.into_iter().map(|id| track(id).into()).collect(),
+            }),
+        });
+        let session = &h.app.state.view().session;
+        assert_eq!(session.timeline().len(), len + 3 * usize::from(new_tracks));
+        assert_eq!(
+            session.timeline().get(anchor_index + 3).unwrap().entry_id,
+            anchor
+        );
+        let neighbor = session.timeline().get(anchor_index + 4).unwrap().entry_id;
+        for _ in 0..3 {
+            h.frame(vec![]);
+            let anchor_rect = h.app.test_queue_rows[&anchor].0;
+            let neighbor_rect = h.app.test_queue_rows[&neighbor].0;
+            assert!(
+                (anchor_rect.top() - row.top()).abs() < 1.,
+                "anchor moved from {} to {} with new_tracks={new_tracks}",
+                row.top(),
+                anchor_rect.top()
+            );
+            assert!(neighbor_rect.top() >= anchor_rect.bottom());
+            assert!(return_button(&h).is_some());
+            assert_eq!(
+                h.app.state.view().session.current().unwrap().entry_id,
+                current
+            );
+        }
+    }
+}
+
+#[test]
 fn loading_predecessors_after_unshuffle_keeps_the_scroll_mode_and_anchor() {
     use gramwave_application::{
         model::Track,

@@ -1,26 +1,11 @@
-use crate::{adapters::telegram_mapping::track, model::Playlist, telegram::Telegram};
+use super::telegram_mapping::{search_messages_request, search_page, track, MEDIA_FILTERS};
+use crate::{domain::MediaKind, model::Playlist, telegram::Telegram};
 use gramwave_application::{
     library::ChatCatalog, media::MediaPlaylist, telegram::is_channel_direct_messages, AppError,
 };
 use serde_json::{json, Value};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-fn response(v: Value) -> Result<Value, AppError> {
-    if v["@type"] == "error" {
-        Err(AppError::Telegram {
-            code: v["code"].as_i64().unwrap_or(500) as i32,
-            message: v["message"].as_str().unwrap_or("Telegram error").into(),
-        })
-    } else {
-        Ok(v)
-    }
-}
-
-pub(crate) const MEDIA_FILTERS: [&str; 3] = [
-    "searchMessagesFilterAudio",
-    "searchMessagesFilterDocument",
-    "searchMessagesFilterVoiceNote",
-];
 
 pub(crate) async fn warm_playlist_head(
     tg: &Telegram,
@@ -29,11 +14,13 @@ pub(crate) async fn warm_playlist_head(
     reserved: &super::telegram::PlaylistHead,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Vec<gramwave_application::media::MediaTrack>, AppError> {
-    let batch = tg.request_reserved_head(
-        json!({"@type":"searchChatMessages","chat_id":chat,"topic_id":null,"query":"","sender_id":null,"from_message_id":0,"offset":0,"limit":100,"filter":{"@type":MEDIA_FILTERS[kind]}}),
-        reserved,
-        cancel,
-    ).await?;
+    let batch = tg
+        .request_reserved_head(
+            search_messages_request(chat, MEDIA_FILTERS[kind], 0, 0),
+            reserved,
+            cancel,
+        )
+        .await?;
     let tracks = head_tracks(chat, &batch)?.collect();
     Ok(tracks)
 }
@@ -42,7 +29,7 @@ fn head_tracks(
     chat: i64,
     batch: &Value,
 ) -> Result<impl Iterator<Item = gramwave_application::media::MediaTrack> + '_, AppError> {
-    let (messages, _) = search_page(batch, 0)?;
+    let (messages, _, _) = search_page(batch, 0, 0)?;
     Ok(messages
         .iter()
         .filter_map(move |message| track(chat, message)))
@@ -65,18 +52,6 @@ pub(crate) fn ready_playlist_tracks(
     tracks
 }
 
-fn search_page(batch: &Value, cursor: i64) -> Result<(&[Value], i64), AppError> {
-    let messages = batch["messages"]
-        .as_array()
-        .ok_or_else(|| AppError::Protocol("Invalid search response".into()))?;
-    let next = batch["next_from_message_id"]
-        .as_i64()
-        .ok_or_else(|| AppError::Protocol("Invalid search cursor".into()))?;
-    if next != 0 && next == cursor {
-        return Err(AppError::Protocol("Search cursor did not advance".into()));
-    }
-    Ok((messages, next))
-}
 fn chat_ids(batch: &Value) -> Result<Vec<i64>, AppError> {
     batch["chat_ids"]
         .as_array()
@@ -110,14 +85,7 @@ async fn refresh_async<F: std::future::Future<Output = Result<Value, AppError>>>
     mut call: impl FnMut(Value) -> F,
     mut emit: impl FnMut(Changes),
 ) -> Result<(), AppError> {
-    for (kind, filter) in [
-        "searchMessagesFilterAudio",
-        "searchMessagesFilterDocument",
-        "searchMessagesFilterVoiceNote",
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (kind, filter) in MEDIA_FILTERS.into_iter().enumerate() {
         if !p.filters[kind] {
             continue;
         }
@@ -135,13 +103,11 @@ async fn refresh_async<F: std::future::Future<Output = Result<Value, AppError>>>
             if !current() {
                 return Err(AppError::Cancelled);
             }
-            let batch = response(call(
-                json!({"@type":"searchChatMessages", "chat_id":p.id,"topic_id":null,"query":"","sender_id":null,"from_message_id":cursor,"offset":0,"limit":100,"filter":{"@type":filter}}),
-            ).await?)?;
+            let batch = call(search_messages_request(p.id, filter, cursor, 0)).await?;
             if !current() {
                 return Err(AppError::Cancelled);
             }
-            let (messages, next) = search_page(&batch, cursor)?;
+            let (messages, next, _) = search_page(&batch, cursor, 0)?;
             let mut changes = Changes {
                 chat: p.id,
                 tracks: messages.iter().filter_map(|m| track(p.id, m)).collect(),
@@ -171,9 +137,8 @@ async fn refresh_async<F: std::future::Future<Output = Result<Value, AppError>>>
         if !current() {
             return Err(AppError::Cancelled);
         }
-        let batch = response(
-            call(json!({"@type":"getMessages", "chat_id":p.id,"message_ids":chunk})).await?,
-        )?;
+        let batch =
+            call(json!({"@type":"getMessages", "chat_id":p.id,"message_ids":chunk})).await?;
         if !current() {
             return Err(AppError::Cancelled);
         }
@@ -345,44 +310,34 @@ async fn index_async<F: std::future::Future<Output = Result<Value, AppError>>>(
     p: Playlist,
     current: impl Fn() -> bool,
     mut call: impl FnMut(Value) -> F,
-    mut emit: impl FnMut(MediaPlaylist),
+    mut emit: impl FnMut(Changes),
 ) -> Result<(), AppError> {
-    let mut p = MediaPlaylist::from(p);
-    for (kind, filter) in [
-        "searchMessagesFilterAudio",
-        "searchMessagesFilterDocument",
-        "searchMessagesFilterVoiceNote",
-    ]
-    .iter()
-    .enumerate()
-    {
+    let mut known: std::collections::HashSet<_> =
+        p.tracks.into_iter().map(|track| track.message).collect();
+    for (kind, filter) in MEDIA_FILTERS.into_iter().enumerate() {
         if p.done[kind] || !p.filters[kind] {
             continue;
         }
         let cursor = p.cursors[kind];
-        {
-            if !current() {
-                return Err(AppError::Cancelled);
-            }
-            let batch = response(call(
-                json!({"@type":"searchChatMessages","chat_id":p.id,"topic_id":null,"query":"","sender_id":null,"from_message_id":cursor,"offset":0,"limit":100,"filter":{"@type":filter}}),
-            ).await?)?;
-            if !current() {
-                return Err(AppError::Cancelled);
-            }
-            let (messages, next) = search_page(&batch, cursor)?;
-            for m in messages {
-                if let Some(t) = track(p.id, m) {
-                    if !p.tracks.iter().any(|x| x.message == t.message) {
-                        p.tracks.push(t)
-                    }
-                }
-            }
-            p.tracks.sort_by_key(|t| std::cmp::Reverse(t.message));
-            p.cursors[kind] = next;
-            p.done[kind] = next == 0;
-            emit(p.clone());
+        if !current() {
+            return Err(AppError::Cancelled);
         }
+        let batch = call(search_messages_request(p.id, filter, cursor, 0)).await?;
+        if !current() {
+            return Err(AppError::Cancelled);
+        }
+        let (messages, next, _) = search_page(&batch, cursor, 0)?;
+        let mut patch = Changes {
+            chat: p.id,
+            tracks: messages
+                .iter()
+                .filter_map(|message| track(p.id, message))
+                .filter(|track| known.insert(track.message))
+                .collect(),
+            ..Default::default()
+        };
+        patch.pagination[kind] = Some((next, next == 0));
+        emit(patch);
     }
     Ok(())
 }
@@ -398,12 +353,8 @@ pub(crate) async fn media_page(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<gramwave_application::telegram::MediaPage, AppError> {
     use gramwave_application::telegram::TelegramGateway;
-    let kind = match kind {
-        0 => crate::domain::MediaKind::Audio,
-        1 => crate::domain::MediaKind::Document,
-        2 => crate::domain::MediaKind::Voice,
-        _ => return Err(AppError::Protocol("Invalid media filter".into())),
-    };
+    let kind =
+        MediaKind::try_from(kind).map_err(|_| AppError::Protocol("Invalid media filter".into()))?;
     tg.search_media(chat, kind, cursor, 0, cancel).await
 }
 
@@ -415,14 +366,8 @@ pub(crate) async fn oldest_media_page(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<gramwave_application::telegram::MediaPage, AppError> {
     use gramwave_application::telegram::TelegramGateway;
-    let kind = [
-        crate::domain::MediaKind::Audio,
-        crate::domain::MediaKind::Document,
-        crate::domain::MediaKind::Voice,
-    ]
-    .get(kind)
-    .copied()
-    .ok_or_else(|| AppError::Protocol("Invalid media filter".into()))?;
+    let kind =
+        MediaKind::try_from(kind).map_err(|_| AppError::Protocol("Invalid media filter".into()))?;
     ascending_page(cursor, |from, offset| {
         tg.search_media(chat, kind, from, offset, cancel)
     })
@@ -508,7 +453,7 @@ fn refresh(
         .block_on(refresh_async(
             p,
             || epoch.load(Ordering::Relaxed) == generation,
-            |v| std::future::ready(call(v)),
+            |v| std::future::ready(call(v).and_then(Telegram::response)),
             emit,
         ))
 }
@@ -518,7 +463,7 @@ fn index(
     epoch: &AtomicU64,
     generation: u64,
     mut call: impl FnMut(Value) -> Result<Value, AppError>,
-    emit: impl FnMut(MediaPlaylist),
+    emit: impl FnMut(Changes),
 ) -> Result<(), AppError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -527,7 +472,7 @@ fn index(
         .block_on(index_async(
             p,
             || epoch.load(Ordering::Relaxed) == generation,
-            |v| std::future::ready(call(v)),
+            |v| std::future::ready(call(v).and_then(Telegram::response)),
             emit,
         ))
 }
@@ -556,7 +501,7 @@ pub(crate) async fn index_library(
     tg: &Telegram,
     p: Playlist,
     cancel: &tokio_util::sync::CancellationToken,
-    emit: impl FnMut(MediaPlaylist),
+    emit: impl FnMut(Changes),
 ) -> Result<(), AppError> {
     index_async(
         p,

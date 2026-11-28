@@ -22,7 +22,7 @@ pub enum AppCommand {
         chat: i64,
         retry: bool,
     },
-    CancelOldestStart(i64),
+    CancelPlaylistStart(i64),
     RetryQueue,
     Authenticate(crate::telegram::AuthRequest),
     SaveTrack(Track),

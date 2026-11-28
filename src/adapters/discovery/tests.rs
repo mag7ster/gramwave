@@ -76,7 +76,7 @@ mod lazy_tests {
         let page = page.unwrap();
         assert_eq!(page.tracks.len(), 1);
         assert_eq!(page.tracks[0].title, "Song");
-        assert_eq!(page.cursors[0], 100);
+        assert_eq!(page.pagination, [Some((100, false)), None, None]);
     }
     #[test]
     fn catalog_never_reads_history_or_counts() {
@@ -162,10 +162,53 @@ mod lazy_tests {
         )
         .unwrap();
         assert_eq!(calls, 1);
-        let p = Playlist::from(page.unwrap());
-        assert_eq!(p.cursors[0], 100);
-        assert!(p.has_more());
-        assert!(!p.done[0]);
+        let page = page.unwrap();
+        assert!(page.tracks.is_empty());
+        assert_eq!(page.pagination, [Some((100, false)), None, None]);
+    }
+
+    #[test]
+    fn history_pages_only_emit_new_tracks_and_their_own_cursor() {
+        let message =
+            |id| json!({"id":id,"content":{"@type":"messageAudio","audio":{"audio":{"id":id}}}});
+        let mut pages = Vec::new();
+        index(
+            Playlist {
+                id: 42,
+                filters: [true, true, false],
+                cursors: [51, 50, 0],
+                tracks: (51..=10_050)
+                    .map(|message| crate::model::Track {
+                        chat: 42,
+                        message,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            &AtomicU64::new(1),
+            1,
+            |request| match request["from_message_id"].as_i64().unwrap() {
+                51 => Ok(json!({
+                    "next_from_message_id": 49,
+                    "messages": [message(51), message(50), message(50)]
+                })),
+                50 => Ok(json!({"next_from_message_id": 0, "messages": [message(50)]})),
+                cursor => panic!("unexpected history cursor: {cursor}"),
+            },
+            |patch| pages.push(patch),
+        )
+        .unwrap();
+
+        let [first, second] = pages.as_slice() else {
+            panic!("expected one patch per enabled filter");
+        };
+        assert_eq!(first.chat, 42);
+        assert_eq!(first.tracks.len(), 1);
+        assert_eq!(first.tracks[0].message, 50);
+        assert_eq!(first.pagination, [Some((49, false)), None, None]);
+        assert!(second.tracks.is_empty());
+        assert_eq!(second.pagination, [None, Some((0, true)), None]);
     }
 }
 
@@ -389,25 +432,44 @@ fn offline_search_follows_server_cursors_through_short_pages_for_ten_thousand_tr
     });
 }
 #[test]
-fn malformed_or_repeated_server_cursor_is_an_error() {
+fn malformed_search_page_cannot_advance_the_index() {
     for batch in [
         json!({"messages":[]}),
         json!({"messages":[],"next_from_message_id":10}),
+        json!({"messages":[{"content":{"@type":"messageAudio"}}],"next_from_message_id":5}),
     ] {
-        assert!(index(
-            Playlist {
-                id: 1,
-                filters: [true, false, false],
-                cursors: [10, 0, 0],
-                ..Default::default()
-            },
-            &AtomicU64::new(1),
-            1,
-            |_| Ok(batch.clone()),
-            |_| panic!("invalid page applied")
-        )
-        .is_err());
+        assert!(matches!(
+            index(
+                Playlist {
+                    id: 1,
+                    filters: [true, false, false],
+                    cursors: [10, 0, 0],
+                    ..Default::default()
+                },
+                &AtomicU64::new(1),
+                1,
+                |_| Ok(batch.clone()),
+                |_| panic!("invalid page applied"),
+            ),
+            Err(AppError::Protocol(_))
+        ));
     }
+}
+
+#[tokio::test]
+async fn shifted_search_can_keep_its_anchor_as_the_server_cursor() {
+    use gramwave_application::telegram::TelegramGateway;
+
+    let tg = Telegram::mock_rpc(|request| {
+        assert_eq!(request["offset"], -99);
+        assert_eq!(request["from_message_id"], 500);
+        json!({"messages":[{"id":600}],"next_from_message_id":500})
+    });
+    let page = tg
+        .search_media(42, MediaKind::Audio, 500, -99, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!((page.next, page.newest), (500, 600));
 }
 
 #[test]
@@ -479,7 +541,7 @@ fn public_library_boundaries_preserve_telegram_codes_and_cancellation() {
         });
     }
     assert_eq!(
-        response(json!({"@type":"error","code":420,"message":"test"})),
+        Telegram::response(json!({"@type":"error","code":420,"message":"test"})),
         Err(AppError::Telegram {
             code: 420,
             message: "test".into()

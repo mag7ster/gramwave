@@ -1,4 +1,5 @@
 use super::{covers::CoverKey, DesktopApp, Event, PlaylistCacheKey, Track};
+use crate::adapters::telegram_mapping::MEDIA_FILTERS;
 use eframe::egui;
 use gramwave_application::{
     library::LibraryCommand,
@@ -457,7 +458,7 @@ impl DesktopApp {
         self.artwork_prefetch
             .heads
             .insert((chat, kind), operation.clone());
-        let reserved = tg.reserve_playlist_head(chat, crate::discovery::MEDIA_FILTERS[kind]);
+        let reserved = tg.reserve_playlist_head(chat, MEDIA_FILTERS[kind]);
         self.operation_event(
             JobClass::Background,
             operation,

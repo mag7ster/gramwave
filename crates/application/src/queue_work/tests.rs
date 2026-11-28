@@ -104,6 +104,7 @@ fn upcoming(core: &AppCore) -> Vec<i64> {
 #[test]
 fn playback_from_a_row_waits_at_an_empty_page_and_manual_tracks_follow_the_chat() {
     let mut core = core();
+    core.enable_streamed_next(true);
     let last = core.view().playlists[0].tracks[2].library_id;
     start(&mut core, Some(last));
     assert_eq!(current(&core), 80);
@@ -117,7 +118,7 @@ fn playback_from_a_row_waits_at_an_empty_page_and_manual_tracks_follow_the_chat(
     core.event(AppEvent::Player(PlaybackEvent::Finished));
     assert_eq!(current(&core), 501);
     core.event(AppEvent::Player(PlaybackEvent::Loaded));
-    assert!(core.next_local_playback().is_none());
+    assert!(core.next_streamed_playback().is_none());
     let request = page_request(&mut core, (42, 0, 75));
     core.event(AppEvent::Player(PlaybackEvent::Finished));
     assert!(core.queue_waiting());
@@ -311,6 +312,62 @@ fn finishing_after_reverse_uses_the_reversed_history_without_waiting_for_the_oth
 }
 
 #[test]
+fn reverse_resumes_playback_waiting_for_a_forward_page() {
+    for manual_next in [false, true] {
+        let mut core = core();
+        let last = core.view().playlists[0].tracks[2].library_id;
+        start(&mut core, Some(last));
+        if manual_next {
+            core.command(AppCommand::Repeat(RepeatMode::One));
+            core.command(AppCommand::Next);
+        }
+        let request = page_request(&mut core, (42, 0, 75));
+        core.event(AppEvent::Player(PlaybackEvent::Finished));
+        assert!(core.queue_waiting());
+        assert_eq!(current(&core), 80);
+
+        let effects = core.command(AppCommand::ReverseQueue);
+        let prepared: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::PreparePlayback { track, .. } => Some(track.message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prepared, [90]);
+        assert_eq!(current(&core), 90);
+        assert!(!core.queue_waiting());
+
+        assert!(!request.cancel.is_cancelled());
+        let effects = page(&mut core, request, 0, &[70]);
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PreparePlayback { .. })));
+        assert_eq!(current(&core), 90);
+        assert_eq!(core.view().session.timeline().get(0).unwrap().message, 70);
+    }
+}
+
+#[test]
+fn reverse_stops_at_an_exhausted_forward_edge_after_finishing() {
+    let mut core = core();
+    core.state.playlists[0].tracks.truncate(1);
+    start(&mut core, None);
+    core.event(AppEvent::Player(PlaybackEvent::Finished));
+    assert!(core.queue_waiting());
+
+    let effects = core.command(AppCommand::ReverseQueue);
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Player(PlayerCommand::Stop))));
+    assert_eq!(
+        core.playback().state(),
+        crate::playback::PlaybackState::Stopped
+    );
+    assert!(!core.queue_waiting());
+}
+
+#[test]
 fn finishing_while_next_waits_does_not_turn_it_into_repeat_one() {
     let mut core = core();
     let last = core.view().playlists[0].tracks[2].library_id;
@@ -388,59 +445,170 @@ fn oldest_start_waits_for_the_verified_prefix_then_queues_newer_pages() {
     );
 }
 
-#[test]
-fn warm_shuffle_reuses_its_request_and_late_samples_only_apply_to_that_queue() {
-    use crate::{commands::PlaylistStart, library::LibraryCommand, telegram::ShuffleSample};
-    let mut core = core();
-    core.library_command(LibraryCommand::Connected(1));
-    let warm = core.command(AppCommand::OpenPlaylist(42));
-    let request = warm
-        .into_iter()
-        .find_map(|effect| match effect {
-            Effect::ShuffleSample {
-                operation,
-                media: [true, false, false],
-                ..
-            } => Some(operation.key()),
-            _ => None,
-        })
-        .unwrap();
-    let effects = core.command(AppCommand::StartPlaylist {
-        chat: 42,
-        start: PlaylistStart::Shuffled,
-        order: Default::default(),
-    });
-    assert!(!effects
-        .iter()
-        .any(|effect| matches!(effect, Effect::ShuffleSample { .. })));
-    let playing = core.view().session.current().unwrap().entry_id;
-    let sample = || ShuffleSample {
-        ranks: Default::default(),
-        tracks: [50, 25, 10].map(|message| track(message).into()).to_vec(),
-    };
-    core.event(AppEvent::ShuffleSample {
-        request,
-        result: Ok(sample()),
-    });
-    assert_eq!(core.view().session.current().unwrap().entry_id, playing);
-    assert_eq!(upcoming(&core)[..3], [50, 25, 10]);
-    core.command(AppCommand::Shuffle(false));
-    assert!(upcoming(&core).iter().all(|id| *id >= 80));
-    let request = core
-        .command(AppCommand::Shuffle(true))
+fn shuffle_request(effects: Vec<Effect>) -> crate::tasks::RequestId {
+    effects
         .into_iter()
         .find_map(|effect| match effect {
             Effect::ShuffleSample { operation, .. } => Some(operation.key()),
             _ => None,
         })
-        .unwrap();
-    core.command(AppCommand::Shuffle(false));
-    let before = upcoming(&core);
-    core.event(AppEvent::ShuffleSample {
-        request,
-        result: Ok(sample()),
-    });
-    assert_eq!(upcoming(&core), before);
+        .unwrap()
+}
+
+fn shuffle_start() -> AppCommand {
+    AppCommand::StartPlaylist {
+        chat: 42,
+        start: crate::commands::PlaylistStart::Shuffled,
+        order: Default::default(),
+    }
+}
+
+fn deep_shuffle_sample() -> crate::telegram::ShuffleSample {
+    crate::telegram::ShuffleSample {
+        ranks: [
+            (300, vec![(280, 20), (250, 50)]),
+            Default::default(),
+            Default::default(),
+        ],
+        tracks: [20, 50, 90].map(|message| track(message).into()).to_vec(),
+    }
+}
+
+fn prepares(effects: &[Effect], message: i64) -> bool {
+    effects.iter().any(|effect| matches!(effect, Effect::PreparePlayback { track, .. } if track.message == message))
+}
+
+#[test]
+fn warmed_and_pending_shuffle_both_play_the_deep_sample_first_and_replenish() {
+    use crate::library::LibraryCommand;
+    use gramwave_domain::PlaylistOrder;
+    for order in [PlaylistOrder::NewestFirst, PlaylistOrder::OldestFirst] {
+        for warm in [false, true] {
+            let mut core = core();
+            let playlist = &mut core.state.playlists[0];
+            playlist.tracks = (80..180).rev().map(track).collect();
+            playlist.ensure_entry_ids();
+            start(&mut core, None);
+            core.library_command(LibraryCommand::Connected(1));
+            let request = shuffle_request(core.command(AppCommand::OpenPlaylist(42)));
+            let start = || AppCommand::StartPlaylist {
+                chat: 42,
+                start: crate::commands::PlaylistStart::Shuffled,
+                order,
+            };
+            let reply = || AppEvent::ShuffleSample {
+                request,
+                result: Ok(deep_shuffle_sample()),
+            };
+            let effects = if warm {
+                assert!(core.event(reply()).is_empty());
+                core.command(start())
+            } else {
+                for _ in 0..3 {
+                    assert!(core.command(start()).is_empty());
+                    assert!(core.shuffle_start_loading(42));
+                    assert_eq!(current(&core), 179);
+                }
+                core.event(reply())
+            };
+            assert!(!core.shuffle_start_loading(42));
+            assert!(prepares(&effects, 20));
+            assert_eq!(current(&core), 20);
+            assert_eq!(upcoming(&core)[..2], [50, 90]);
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                Effect::ShuffleSample {
+                    ranks: Some(_),
+                    range: None,
+                    ..
+                }
+            )));
+            let cursor = if order == PlaylistOrder::NewestFirst {
+                75
+            } else {
+                0
+            };
+            while core.view().session.available_len() > crate::page_browse::QUEUE_PREFETCH_ROWS {
+                core.command(AppCommand::Next);
+            }
+            let next_page = page_request(&mut core, (42, 0, cursor));
+            page(&mut core, next_page, 0, &[50, 20, 10]);
+            let session = &core.view().session;
+            for message in [20, 50] {
+                assert_eq!(
+                    session
+                        .snapshot()
+                        .iter()
+                        .filter(|row| row.message == message)
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn shuffle_start_falls_back_on_error_empty_response_or_deadline() {
+    use crate::library::LibraryCommand;
+    for outcome in [
+        Some(Err(AppError::Unavailable("Telegram"))),
+        Some(Ok(crate::telegram::ShuffleSample {
+            ranks: Default::default(),
+            tracks: Vec::new(),
+        })),
+        None,
+    ] {
+        let mut core = core();
+        core.library_command(LibraryCommand::Connected(1));
+        let request = shuffle_request(core.command(shuffle_start()));
+        assert!(core.view().session.current().is_none());
+        let effects = if let Some(result) = outcome {
+            core.event(AppEvent::ShuffleSample { request, result })
+        } else {
+            let deadline = core.shuffle_start_deadline().unwrap();
+            let effects = core.pump(deadline, true);
+            assert!(core
+                .event(AppEvent::ShuffleSample {
+                    request,
+                    result: Ok(deep_shuffle_sample()),
+                })
+                .is_empty());
+            effects
+        };
+        assert!([100, 90, 80].contains(&current(&core)));
+        assert!(prepares(&effects, current(&core)));
+        assert!(core.shuffle_start_deadline().is_none());
+    }
+}
+
+#[test]
+fn late_shuffle_reply_cannot_replace_playback_after_cancellation() {
+    use crate::library::LibraryCommand;
+    for command in [
+        AppCommand::Stop,
+        AppCommand::OpenPlaylist(77),
+        AppCommand::Filters(42, [false; 3]),
+        AppCommand::CancelPlaylistStart(42),
+        AppCommand::Play(track(100)),
+    ] {
+        let mut core = core();
+        core.library_command(LibraryCommand::Connected(1));
+        let request = shuffle_request(core.command(AppCommand::OpenPlaylist(42)));
+        assert!(core.command(shuffle_start()).is_empty());
+        core.command(command);
+        assert!(!core.shuffle_start_loading(42));
+        let effects = core.event(AppEvent::ShuffleSample {
+            request,
+            result: Ok(deep_shuffle_sample()),
+        });
+        assert!(!prepares(&effects, 20));
+        assert!(core
+            .view()
+            .session
+            .current()
+            .is_none_or(|track| track.message != 20));
+    }
 }
 
 #[test]

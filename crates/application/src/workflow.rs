@@ -4,7 +4,7 @@ use crate::{
     core::{AppCore, CoreCommand},
     model::Track,
     persistence::ChangeSet,
-    ports::{PlaybackEvent, PlayerCommand, PlayerSnapshot, QueuedPlayback},
+    ports::{PlaybackEvent, PlayerCommand, PlayerSnapshot},
     tasks::{Operation, RequestId},
     AppError,
 };
@@ -62,7 +62,6 @@ pub enum Effect {
     },
     Player(PlayerCommand),
     PlaybackAdvanced(String),
-    Prefetch(Track),
     Persist(Box<ChangeSet>),
     Notice(crate::notice::Notice),
     Error(AppError),
@@ -130,6 +129,7 @@ impl AppCore {
             .then(|| self.playback.target.as_ref().map(Track::id))
             .flatten();
         let mut effects = self.offline.pump(now, online, opening);
+        self.expire_shuffle_start(now, &mut effects);
         if online && self.paging_allowed(now) {
             self.pump_queue(now, &mut effects);
             self.pump_oldest_start(now, &mut effects);
@@ -211,46 +211,6 @@ impl AppCore {
         Some((self.media_track(next.into()), revision, offline))
     }
 
-    pub fn next_local_playback(&self) -> Option<QueuedPlayback> {
-        use crate::playback::PlaybackState;
-        use gramwave_domain::RepeatMode;
-        if !matches!(
-            self.playback.state,
-            PlaybackState::Playing | PlaybackState::Paused
-        ) {
-            return None;
-        }
-        let session = &self.state.session;
-        let current = session.current()?;
-        let next = if self.state.repeat == RepeatMode::One && !self.queue_waiting() {
-            current
-        } else if self.queue_blocks_advance(false) {
-            return None;
-        } else {
-            session.remaining().first().or_else(|| {
-                // A shuffled repeat cycle is decided when the current track ends.
-                if self.state.repeat == RepeatMode::All && !self.state.shuffle {
-                    session.snapshot().first()
-                } else {
-                    None
-                }
-            })?
-        };
-        let path = self
-            .offline
-            .local_path(
-                next.id(),
-                crate::offline::unix_seconds(std::time::SystemTime::now()),
-                self.state.cache_policy.days,
-            )
-            .map(str::to_owned)
-            .or_else(|| self.library.runtime_media(next.id())?.cached.clone())?;
-        Some(QueuedPlayback {
-            entry_id: next.entry_id,
-            revision: self.revision(next.id()),
-            path,
-        })
-    }
     pub fn command(&mut self, command: AppCommand) -> Vec<Effect> {
         if matches!(&command, AppCommand::Shuffle(value) if *value == self.state.shuffle) {
             return Vec::new();
@@ -266,6 +226,25 @@ impl AppCore {
         ) {
             self.queue_work.waiting_previous = false;
             self.queue_work.prefetch_previous = false;
+        }
+        if matches!(
+            &command,
+            AppCommand::StartPlaylist {
+                start: PlaylistStart::Ordered | PlaylistStart::Track(_),
+                ..
+            } | AppCommand::StartSession(..)
+                | AppCommand::Play(_)
+                | AppCommand::PlayQueue(_)
+                | AppCommand::PlayQueueRow { .. }
+                | AppCommand::Previous
+                | AppCommand::Next
+                | AppCommand::Pause(_)
+                | AppCommand::Stop
+                | AppCommand::Clear
+                | AppCommand::Shuffle(_)
+                | AppCommand::ReverseQueue
+        ) {
+            self.cancel_shuffle_start(None);
         }
         let mut effects = Vec::new();
         let advancing = matches!(&command, AppCommand::Next | AppCommand::Advance(_));
@@ -409,17 +388,21 @@ impl AppCore {
                 }
             }
             AppCommand::StartPlaylist { chat, start, order } => {
-                play = self.start_playlist_queue(chat, start, order);
-                if play.is_some() && matches!(start, PlaylistStart::Shuffled) {
-                    self.sample_active_queue(true, &mut effects);
-                    play = self.state.session.current().cloned().map(Into::into);
-                }
+                play = if matches!(start, PlaylistStart::Shuffled) {
+                    self.cancel_oldest_start(None);
+                    self.start_shuffled_playlist(chat, order, &mut effects)
+                } else {
+                    self.start_playlist_queue(chat, start, order, None)
+                };
                 self.pump_oldest_start(std::time::Instant::now(), &mut effects);
             }
             AppCommand::LoadOldest { chat, retry } => {
                 self.request_oldest(chat, retry, &mut effects)
             }
-            AppCommand::CancelOldestStart(chat) => self.cancel_oldest_start(chat),
+            AppCommand::CancelPlaylistStart(chat) => {
+                self.cancel_oldest_start(Some(chat));
+                self.cancel_shuffle_start(Some(chat));
+            }
             AppCommand::ReverseQueue => self.request_queue_reverse(),
             AppCommand::RetryQueue => self.retry_queue_page(),
             AppCommand::Play(track) => {
@@ -496,7 +479,7 @@ impl AppCore {
                 self.queue_work.cancel_page();
                 self.handle(CoreCommand::Shuffle(value));
                 if value {
-                    self.sample_active_queue(false, &mut effects);
+                    self.sample_active_queue(&mut effects);
                 }
             }
             AppCommand::Repeat(value) => {
@@ -512,8 +495,10 @@ impl AppCore {
                 self.handle(CoreCommand::Settings(value));
             }
             AppCommand::Filters(id, value) => {
-                self.cancel_oldest_start(id);
+                self.cancel_oldest_start(Some(id));
+                self.cancel_shuffle_start(Some(id));
                 self.handle(CoreCommand::Filters(id, value));
+                self.replenish_shuffle(id, &mut effects);
             }
             AppCommand::Insert(track, next) => {
                 self.handle(CoreCommand::Insert(track, next));
@@ -692,7 +677,7 @@ impl AppCore {
         match event {
             AppEvent::Library(event) => effects.extend(self.library_event(event)),
             AppEvent::ShuffleSample { request, result } => {
-                self.receive_shuffle_sample(request, result);
+                self.receive_shuffle_sample(request, result, &mut effects);
                 self.resume_queue_wait(&mut effects);
             }
             AppEvent::QueuePage {
@@ -801,6 +786,7 @@ impl AppCore {
                         );
                     }
                     AuthorizationState::Closed => {
+                        self.shuffle_work.cancel();
                         self.queue_work.cancel_page();
                         self.playback.cancel();
                         self.library.invalidate();
@@ -848,15 +834,6 @@ impl AppCore {
                             prepared.track,
                         )));
                         self.playback.target = self.state.session.current().map(Into::into);
-                        if let Some(next) = self
-                            .state
-                            .session
-                            .remaining()
-                            .first()
-                            .filter(|_| !self.queue_blocks_advance(false))
-                        {
-                            effects.push(Effect::Prefetch(next.into()));
-                        }
                         if let Some(path) = prepared.path {
                             let mut start_ms = self.state.session.position_ms();
                             if self.state.session.current().is_some_and(|track| {
@@ -927,15 +904,12 @@ impl AppCore {
                         if self.playback.state.loading() || self.state.session.current().is_none() {
                             return effects;
                         }
-                        let expected = if self.playback.streamed_next {
-                            self.next_streamed_playback()
-                                .is_some_and(|(track, revision, _)| {
-                                    track.entry_id == next.entry_id && revision == next.revision
-                                })
-                        } else {
-                            self.next_local_playback().as_ref() == Some(&next)
-                        };
-                        if !expected {
+                        if !self
+                            .next_streamed_playback()
+                            .is_some_and(|(track, revision, _)| {
+                                track.entry_id == next.entry_id && revision == next.revision
+                            })
+                        {
                             let blocked = self.queue_blocks_advance(true);
                             let mut effects = self.command(AppCommand::Advance(true));
                             if blocked {
@@ -958,9 +932,6 @@ impl AppCore {
                             &next.path,
                             crate::offline::unix_seconds(std::time::SystemTime::now()),
                         );
-                    }
-                    if let Some(next) = self.state.session.remaining().first() {
-                        effects.push(Effect::Prefetch(next.into()));
                     }
                     effects.extend([
                         Effect::PlaybackAdvanced(next.path),
@@ -991,7 +962,7 @@ impl AppCore {
         self.persistence_effect(&mut effects);
         effects
     }
-    fn persistence_effect(&mut self, effects: &mut Vec<Effect>) {
+    pub(crate) fn persistence_effect(&mut self, effects: &mut Vec<Effect>) {
         let changes = self.take_changes();
         if !changes.is_empty() {
             effects.push(Effect::Persist(Box::new(changes)));

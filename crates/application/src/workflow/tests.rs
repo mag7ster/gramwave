@@ -1,5 +1,5 @@
 use super::*;
-use crate::{model::State, offline::OfflineData};
+use crate::{model::State, offline::OfflineData, ports::QueuedPlayback};
 use std::time::Instant;
 fn track(message: i64) -> Track {
     Track {
@@ -22,15 +22,20 @@ fn native_advance_preserves_queue_occurrences_and_rechecks_queue_edits() {
     let first = state.session.current().unwrap().entry_id;
     let second = state.session.remaining()[0].entry_id;
     let mut core = AppCore::new(state);
+    core.enable_streamed_next(true);
     core.playback.state = crate::playback::PlaybackState::Playing;
     for (track, path) in [(repeated, "repeated.ogg"), (third, "third.ogg")] {
         let mut media = crate::media::MediaTrack::from(track);
         media.cached = Some(path.into());
         core.library.cache_track(&media);
     }
-    let next = core.next_local_playback().unwrap();
+    let (next, revision, _) = core.next_streamed_playback().unwrap();
     assert_eq!(next.entry_id, second);
-    let effects = core.event(AppEvent::Player(PlaybackEvent::Advanced(next)));
+    let effects = core.event(AppEvent::Player(PlaybackEvent::Advanced(QueuedPlayback {
+        entry_id: next.entry_id,
+        revision,
+        path: next.cached.unwrap(),
+    })));
     assert_eq!(core.view().session.current().unwrap().entry_id, second);
     assert_eq!(core.view().session.history()[0].entry_id, first);
     assert!(effects
@@ -40,9 +45,13 @@ fn native_advance_preserves_queue_occurrences_and_rechecks_queue_edits() {
         .iter()
         .any(|effect| matches!(effect, Effect::Player(_) | Effect::PreparePlayback { .. })));
 
-    let stale = core.next_local_playback().unwrap();
+    let (stale, revision, _) = core.next_streamed_playback().unwrap();
     core.command(AppCommand::Insert(track(4), true));
-    let effects = core.event(AppEvent::Player(PlaybackEvent::Advanced(stale)));
+    let effects = core.event(AppEvent::Player(PlaybackEvent::Advanced(QueuedPlayback {
+        entry_id: stale.entry_id,
+        revision,
+        path: stale.cached.unwrap(),
+    })));
     assert_eq!(core.view().session.current().unwrap().message, 4);
     assert!(effects.iter().any(
         |effect| matches!(effect, Effect::PreparePlayback { track, .. } if track.message == 4)
@@ -668,6 +677,40 @@ fn manual_next_promotes_once_and_disregards_superseded_completion() {
     assert_eq!(core.view().session.current().unwrap().message, 3);
     core.command(AppCommand::Stop);
     assert!(!core.playback.shows_loading());
+    assert!(core
+        .event(AppEvent::Player(PlaybackEvent::NextUnavailable(request)))
+        .is_empty());
+}
+
+#[test]
+fn unavailable_promotion_prepares_the_selected_occurrence_once() {
+    let mut state = State::default();
+    state
+        .session
+        .start(&[track(1), track(2), track(3)], 0, false);
+    let mut core = AppCore::new(state);
+    core.enable_streamed_next(true);
+    core.playback.state = crate::playback::PlaybackState::Playing;
+    let request = core
+        .command(AppCommand::Next)
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Player(PlayerCommand::PromoteNext { request, .. }) => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    let selected = core.view().session.current().unwrap().entry_id;
+    let effects = core.event(AppEvent::Player(PlaybackEvent::NextUnavailable(request)));
+    let prepared: Vec<_> = effects
+        .into_iter()
+        .filter_map(|effect| match effect {
+            Effect::PreparePlayback { track, .. } => Some(track.entry_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prepared, [selected]);
+    assert_eq!(core.view().session.current().unwrap().entry_id, selected);
+    assert_eq!(core.view().session.remaining()[0].message, 3);
     assert!(core
         .event(AppEvent::Player(PlaybackEvent::NextUnavailable(request)))
         .is_empty());

@@ -106,23 +106,6 @@ impl MediaPlaylist {
         }
     }
 }
-impl From<Playlist> for MediaPlaylist {
-    fn from(p: Playlist) -> Self {
-        Self {
-            entry_serial: p.entry_serial,
-            id: p.id,
-            title: p.title,
-            emoji_status: p.emoji_status,
-            url: p.url,
-            tracks: p.tracks.into_iter().map(Into::into).collect(),
-            filters: p.filters,
-            pinned: p.pinned,
-            cursors: p.cursors,
-            done: p.done,
-            ..Default::default()
-        }
-    }
-}
 impl From<MediaPlaylist> for Playlist {
     fn from(p: MediaPlaylist) -> Self {
         Self {

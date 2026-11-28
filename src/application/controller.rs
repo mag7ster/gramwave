@@ -96,7 +96,6 @@ pub(crate) struct DesktopApp {
     pub(crate) player: Option<Box<dyn application::ports::PlayerBackend>>,
     pub(crate) cache_playback: super::cache::CachePlayback,
     pub(crate) local_playback: Option<(crate::domain::TrackId, String)>,
-    pub(crate) queued_playback: Option<application::ports::QueuedPlayback>,
     pub(crate) preparing_next: Option<(
         crate::domain::QueueEntryId,
         u64,
@@ -220,7 +219,6 @@ impl DesktopApp {
             player_error,
             cache_playback: Default::default(),
             local_playback: None,
-            queued_playback: None,
             preparing_next: None,
             handoff_running: false,
             handoff_retry: Default::default(),

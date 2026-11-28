@@ -14,7 +14,9 @@ use std::{
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-use super::telegram_mapping::FileReply;
+use super::telegram_mapping::{
+    search_messages_request, search_page, track, FileReply, MEDIA_FILTERS,
+};
 
 #[path = "telegram_cache.rs"]
 mod cache;
@@ -242,7 +244,7 @@ impl Telegram {
             .map_err(|_| AppError::Unavailable("Telegram"))?;
         Ok((guard, rx))
     }
-    fn response(v: Value) -> Result<Value, AppError> {
+    pub(super) fn response(v: Value) -> Result<Value, AppError> {
         if v["@type"] == "error" {
             Err(AppError::Telegram {
                 code: v["code"].as_i64().unwrap_or(500) as i32,
@@ -524,21 +526,6 @@ impl Telegram {
     pub(crate) fn configure_cache(&self) {
         self.request(json!({"@type":"setOption","name":"use_storage_optimizer","value":{"@type":"optionValueBoolean","value":false}}));
     }
-    pub(crate) async fn prefetch(&self, file: i64) {
-        let Ok(_cache) = self.cache_access.try_read() else {
-            return;
-        };
-        if self.downloads.lock().unwrap().contains_key(&file) {
-            return;
-        }
-        let mut pending = CancelCacheDownload {
-            telegram: self,
-            file: Some(file),
-        };
-        if self.call_async(json!({"@type":"downloadFile","file_id":file,"priority":1,"offset":0,"limit":1048576,"synchronous":true}), &Default::default()).await.is_ok() {
-            pending.file = None;
-        }
-    }
     pub(crate) async fn message_link(
         &self,
         chat: i64,
@@ -780,42 +767,17 @@ impl TelegramGateway for Telegram {
         cancel: &'a CancellationToken,
     ) -> GatewayFuture<'a, MediaPage> {
         Box::pin(async move {
-            #[cfg(feature = "telegram")]
-            let filter = serde_json::to_value(match kind {
-                crate::domain::MediaKind::Audio => tdlib_rs::enums::SearchMessagesFilter::Audio,
-                crate::domain::MediaKind::Document => {
-                    tdlib_rs::enums::SearchMessagesFilter::Document
-                }
-                crate::domain::MediaKind::Voice => tdlib_rs::enums::SearchMessagesFilter::VoiceNote,
-            })
-            .map_err(|e| AppError::Telegram {
-                code: 500,
-                message: e.to_string(),
-            })?;
-            #[cfg(not(feature = "telegram"))]
-            let filter = json!({"@type":(["searchMessagesFilterAudio","searchMessagesFilterDocument","searchMessagesFilterVoiceNote"][usize::from(kind)])});
-            let value=self.call_async(json!({"@type":"searchChatMessages","chat_id":chat,"topic_id":null,"query":"","sender_id":null,"from_message_id":cursor,"offset":offset,"limit":100,"filter":filter}),cancel).await?;
-            let next = value["next_from_message_id"]
-                .as_i64()
-                .ok_or_else(|| AppError::Protocol("Invalid search cursor".into()))?;
-            if offset == 0 && next != 0 && next == cursor {
-                return Err(AppError::Protocol("Search cursor did not advance".into()));
-            }
-            let messages = value["messages"]
-                .as_array()
-                .ok_or_else(|| AppError::Protocol("Invalid search response".into()))?;
-            let newest = messages.iter().try_fold(0, |newest, message| {
-                message["id"]
-                    .as_i64()
-                    .map(|id| newest.max(id))
-                    .ok_or_else(|| AppError::Protocol("Invalid search message identity".into()))
-            })?;
+            let filter = MEDIA_FILTERS[usize::from(kind)];
+            let value = self
+                .call_async(
+                    search_messages_request(chat, filter, cursor, offset),
+                    cancel,
+                )
+                .await?;
+            let (messages, next, newest) = search_page(&value, cursor, offset)?;
             Ok(MediaPage {
                 newest,
-                tracks: messages
-                    .iter()
-                    .filter_map(|m| super::telegram_mapping::track(chat, m))
-                    .collect(),
+                tracks: messages.iter().filter_map(|m| track(chat, m)).collect(),
                 next,
             })
         })
