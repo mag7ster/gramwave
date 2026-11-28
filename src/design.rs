@@ -114,6 +114,13 @@ pub fn style(ctx: &egui::Context, light: bool) {
             .insert(egui::TextStyle::Small, egui::FontId::proportional(12.));
     });
 }
+pub(crate) fn menu_rows(ui: &mut egui::Ui) {
+    let spacing = ui.spacing_mut();
+    spacing.button_padding = egui::vec2(8., 2.);
+    spacing.interact_size.y = 33.;
+    spacing.item_spacing.y = 0.;
+}
+
 pub fn button(ui: &mut egui::Ui, icon: Icon, label: &'static str) -> bool {
     labelled_button(ui, icon, crate::tr(label))
 }
@@ -236,6 +243,22 @@ pub fn settings_section(ui: &mut egui::Ui, title: String, contents: impl FnOnce(
     ui.add_space(4.);
 }
 pub fn choice(ui: &mut egui::Ui, label: String, active: bool) -> bool {
+    choice_button(ui, active, |ink| {
+        let label = if active {
+            format!("✓ {label}")
+        } else {
+            label
+        };
+        egui::Button::new(egui::RichText::new(label).color(ink)).min_size(egui::vec2(72., 36.))
+    })
+    .clicked()
+}
+
+pub(crate) fn choice_button<'a>(
+    ui: &mut egui::Ui,
+    active: bool,
+    button: impl FnOnce(egui::Color32) -> egui::Button<'a>,
+) -> egui::Response {
     let p = colors(ui);
     ui.scope(|ui| {
         let widgets = &mut ui.visuals_mut().widgets;
@@ -244,19 +267,7 @@ pub fn choice(ui: &mut egui::Ui, label: String, active: bool) -> bool {
             widgets.hovered.weak_bg_fill = p.raised;
             widgets.active.weak_bg_fill = p.raised;
         }
-        ui.add(
-            egui::Button::new(
-                egui::RichText::new(if active {
-                    format!("✓ {label}")
-                } else {
-                    label
-                })
-                .color(if active { p.accent } else { p.text }),
-            )
-            .corner_radius(8)
-            .min_size(egui::vec2(72., 36.)),
-        )
-        .clicked()
+        ui.add(button(if active { p.accent } else { p.text }).corner_radius(8))
     })
     .inner
 }

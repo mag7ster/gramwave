@@ -171,15 +171,19 @@ impl App {
                 let id = p.id;
                 let pinned = self.state.view().chat_pins.contains(&id);
                 let row_id = ui.id().with(("chat", id));
-                let focused = ui.memory(|m| m.has_focus(row_id));
+                let hovered_row = ui
+                    .ctx()
+                    .read_response(row_id)
+                    .is_some_and(|row| row.hovered());
+                let hover =
+                    ui.ctx()
+                        .animate_bool_with_time(row_id.with("hover"), hovered_row, 0.14);
                 let colors = design::colors(ui);
                 let frame = egui::Frame::new()
-                    .fill(if focused {
-                        colors.raised
-                    } else if self.opened_chat == Some(id) {
+                    .fill(if self.opened_chat == Some(id) {
                         colors.selected
                     } else {
-                        egui::Color32::TRANSPARENT
+                        colors.raised.gamma_multiply(hover)
                     })
                     .corner_radius(8)
                     .inner_margin(ROW_MARGIN);
@@ -243,6 +247,7 @@ impl App {
                     false,
                     (&response, response.rect),
                 );
+                focus_outline(ui, &response);
                 if ui.is_rect_visible(response.rect) {
                     self.image_wanted
                         .push(self.state.library().playlist_artwork(p.id).file);

@@ -271,8 +271,15 @@ impl App {
         let track_menu_open = keyboard::prepare_track_menu(&ctx);
         design::style(&ctx, self.state.view().light);
         root.set_style(ctx.global_style());
+        let filter_focused = ctx
+            .data_mut(|data| {
+                data.remove_temp::<Option<egui::Id>>(egui::Id::new(playlist::FILTER_FOCUS))
+            })
+            .flatten()
+            .is_some_and(|id| ctx.memory(|memory| memory.has_focus(id)));
         if !track_menu_open
             && !self.settings_open
+            && !filter_focused
             && !ctx.text_edit_focused()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {

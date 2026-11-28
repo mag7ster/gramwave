@@ -366,7 +366,7 @@ impl AppCore {
                 self.queue_work.reset();
                 play = self.handle(CoreCommand::Start(tracks, index));
                 if play.is_some() {
-                    self.playback.queue_removals.clear();
+                    self.playback.queue_started();
                 }
             }
             AppCommand::StartPlaylist {

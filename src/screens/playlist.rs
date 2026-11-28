@@ -12,6 +12,32 @@ use design::{button, Icon};
 use eframe::egui;
 use gramwave_domain::{PlaylistOrder, TrackId};
 
+pub(super) const FILTER_FOCUS: &str = "playlist-filter-focus";
+
+fn playlist_filter(ui: &mut egui::Ui, label: &str, selected: &mut bool, width: f32) {
+    let size = egui::vec2(width, ui.spacing().interact_size.y);
+    let response = design::choice_button(ui, *selected, |ink| {
+        egui::Button::new(egui::RichText::new(label).color(ink))
+            .min_size(size)
+            .truncate()
+    });
+    focus_outline(ui, &response);
+    if response.enabled() && response.has_focus() {
+        ui.data_mut(|data| data.insert_temp(egui::Id::new(FILTER_FOCUS), Some(response.id)));
+    }
+    if response.clicked() {
+        *selected = !*selected;
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            response.enabled(),
+            *selected,
+            label,
+        )
+    });
+}
+
 #[derive(Clone)]
 struct PlaylistScroll {
     chat: i64,
@@ -286,19 +312,17 @@ impl App {
         let inline_filters = !compact && ui.available_width() >= 620.;
         let inline = layout_fraction(ui, "playlist-filters-inline", inline_filters);
         let gap = ui.spacing().item_spacing.x;
-        let widths = if inline == 0. {
-            [40.; 3]
-        } else {
-            filter_labels.each_ref().map(|label| {
-                let text = egui::WidgetText::from(label.as_str()).into_galley(
-                    ui,
-                    Some(egui::TextWrapMode::Extend),
-                    f32::INFINITY,
-                    egui::TextStyle::Button,
-                );
-                (text.size().x + 2. * ui.spacing().button_padding.x + 2.).ceil()
-            })
-        };
+        let button_padding = ui.spacing().button_padding;
+        let button_height = ui.spacing().interact_size.y;
+        let widths = filter_labels.each_ref().map(|label| {
+            let text = egui::WidgetText::from(label.as_str()).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Button,
+            );
+            (text.size().x + 2. * button_padding.x + 2.).ceil()
+        });
         let inline_width = widths.iter().sum::<f32>() + 2. * gap;
         let (toolbar, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.), egui::Sense::hover());
@@ -333,7 +357,7 @@ impl App {
                     ui,
                     ("inline-filter", index),
                     egui::pos2(center - visible_width / 2., toolbar.center().y),
-                    egui::vec2(visible_width, 36.),
+                    egui::vec2(visible_width, button_height),
                 );
                 slot.set_clip_rect(ui.clip_rect().intersect(toolbar.with_min_x(filter_left)));
                 slot.multiply_opacity(inline);
@@ -341,15 +365,7 @@ impl App {
                     slot.visuals_mut().disabled_alpha = 1.;
                     slot.disable();
                 }
-                if slot
-                    .add_sized(
-                        [visible_width, 36.],
-                        egui::Button::selectable(*filter, label.as_str()).truncate(),
-                    )
-                    .clicked()
-                {
-                    *filter = !*filter;
-                }
+                playlist_filter(&mut slot, label, filter, visible_width);
                 slot_left += width + gap;
             }
         }
@@ -376,7 +392,12 @@ impl App {
                 egui::Button::image(Icon::More.image(p.muted, 20.).alt_text(&label))
                     .min_size(egui::vec2(40., 40.)),
             )
+            .config(
+                egui::containers::menu::MenuConfig::new()
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+            )
             .ui(ui, |ui| {
+                design::menu_rows(ui);
                 if compact {
                     play_all = ui
                         .add_enabled(can_play, egui::Button::new(tr("Play all")))
@@ -399,9 +420,21 @@ impl App {
                     ui.separator();
                     self.sort_playlist(ui);
                 }
-                for (filter, label) in filters.iter_mut().zip(&filter_labels) {
-                    ui.checkbox(filter, label.as_str());
-                }
+                ui.scope_builder(
+                    egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                        let widest_label = widths.into_iter().fold(0., f32::max)
+                            + 2. * (ui.spacing().button_padding.x - button_padding.x);
+                        let width = if ui.is_sizing_pass() {
+                            widest_label
+                        } else {
+                            ui.available_width().max(widest_label)
+                        };
+                        for (label, filter) in filter_labels.iter().zip(&mut filters) {
+                            playlist_filter(ui, label, filter, width);
+                        }
+                    },
+                );
                 if compact {
                     ui.separator();
                     self.playlist_pin_action(ui, chat_id);

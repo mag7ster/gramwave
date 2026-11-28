@@ -21,25 +21,32 @@ pub(super) struct QueueScroll {
     animation: Option<(f32, f64)>,
     snap_at: Option<f64>,
     generation: u64,
+    start_generation: u64,
     fade_start: Option<f64>,
     visible: Option<ScrollAnchor<(usize, QueueEntryId, TrackId)>>,
     interior_current: Option<(QueueEntryId, f32)>,
 }
 
 impl QueueScroll {
-    pub(super) fn load(ctx: &egui::Context, preview_history: bool) -> (egui::Id, Self, bool) {
+    pub(super) fn load(
+        ctx: &egui::Context,
+        preview_history: bool,
+        start_generation: u64,
+    ) -> (egui::Id, Self, bool) {
         let key = egui::Id::new("queue-scroll-mode");
         let mut scroll: Self = ctx.data(|data| data.get_temp(key)).unwrap_or_default();
         let frame = ctx.cumulative_frame_nr();
         let opened = scroll.frame.is_none_or(|last| frame > last + 1);
-        if opened {
+        let started = scroll.start_generation != start_generation;
+        if opened || started {
             scroll = Self {
-                following: !preview_history,
+                following: started || !preview_history,
+                start_generation,
                 ..Self::default()
             };
         }
         scroll.frame = Some(frame);
-        (key, scroll, opened)
+        (key, scroll, opened || started)
     }
 
     pub(super) fn reverse(

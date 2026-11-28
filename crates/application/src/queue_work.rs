@@ -137,7 +137,7 @@ impl AppCore {
                 .start_playlist(tracks, index, cursors, self.state.shuffle, order)?;
         self.queue_work.reset();
         self.playback.repeat_cycle = None;
-        self.playback.queue_removals.clear();
+        self.playback.queue_started();
         self.record_session_change();
         Some(current.into())
     }

@@ -313,6 +313,41 @@ fn scrollbars_stay_outside_the_rows_and_menus() {
 }
 
 #[test]
+fn sidebar_hover_fills_the_chat_row_and_preserves_the_open_chat() {
+    let mut h = Harness::new();
+    h.size = egui::vec2(1240., 800.);
+    h.settle();
+    let row = |h: &Harness, id| {
+        h.ctx.data(|data| {
+            data.get_temp::<egui::Rect>(egui::Id::new(("test-chat-row", id)))
+                .unwrap()
+        })
+    };
+    let other = row(&h, 2_i64);
+    let opened = row(&h, 0_i64);
+    let palette = design::palette(h.app.state.view().light);
+    let fill = |frame: &egui::FullOutput, row: egui::Rect, color| {
+        frame.shapes.iter().any(|painted| {
+            matches!(&painted.shape, egui::Shape::Rect(rect)
+                if rect.fill == color && rect.rect == row)
+        })
+    };
+    h.frame(vec![egui::Event::PointerMoved(
+        other.right_center() - egui::vec2(2., 0.),
+    )]);
+    h.settle();
+    let frame = h.frame(vec![]);
+    assert!(fill(&frame, other, palette.raised));
+    assert!(fill(&frame, opened, palette.selected));
+
+    h.frame(vec![egui::Event::PointerMoved(opened.center())]);
+    h.settle();
+    let frame = h.frame(vec![]);
+    assert!(!fill(&frame, other, palette.raised));
+    assert!(fill(&frame, opened, palette.selected));
+}
+
+#[test]
 fn chat_search_and_playlist_rows_share_the_same_edges_with_or_without_scroll() {
     let mut h = Harness::new();
     h.app.pane = WorkspacePane::Library;

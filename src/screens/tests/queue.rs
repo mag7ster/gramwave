@@ -154,6 +154,37 @@ fn queue_follows_selection_but_preserves_user_scroll_until_return() {
 }
 
 #[test]
+fn replacing_the_queue_resumes_following_the_current_track() {
+    let mut h = queue_harness(30);
+    let browse = |h: &mut Harness| {
+        let (viewport, _) = h.list_scroll("test-queue-scroll");
+        scroll_queue(h, viewport.center(), -620.);
+        for _ in 0..3 {
+            h.settle();
+        }
+        assert!(return_button(h).is_some());
+    };
+    browse(&mut h);
+    let track = h.app.test_rows[&4].0.center();
+    h.click(track);
+    h.settle();
+    assert!(return_button(&h).is_none());
+    let (viewport, _) = h.list_scroll("test-queue-scroll");
+    let entry = h.app.state.view().session.current().unwrap();
+    assert_eq!(entry.message, 4);
+    assert!((h.app.test_queue_rows[&entry.entry_id].0.top() - viewport.top()).abs() < 1.);
+
+    browse(&mut h);
+    h.app.execute(AppCommand::StartSession(
+        vec![gramwave_application::model::Track::default()],
+        0,
+    ));
+    h.settle();
+    assert!(return_button(&h).is_none());
+    assert!(scroll_offset(&h).abs() < 1.);
+}
+
+#[test]
 fn queue_drags_current_across_the_boundary_and_can_select_the_new_past() {
     let mut h = queue_harness(8);
     let current = h.app.state.view().session.current().unwrap().entry_id;

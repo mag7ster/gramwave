@@ -282,8 +282,11 @@ impl App {
         let has_current = self.state.view().session.current().is_some();
         let preview_history =
             self.demo && self.options.scenario.as_deref() == Some("queue-history");
-        let (scroll_key, mut follow, opened) =
-            queue_scroll::QueueScroll::load(ui.ctx(), preview_history);
+        let (scroll_key, mut follow, realign) = queue_scroll::QueueScroll::load(
+            ui.ctx(),
+            preview_history,
+            self.state.playback().queue_start_generation(),
+        );
         ui.horizontal(|ui| {
             if empty {
                 let heading = empty_label(ui, egui::RichText::new(tr("Queue")).heading());
@@ -387,7 +390,7 @@ impl App {
         let viewport_height = list_ui.available_height();
         let max = target.max(rows_height - viewport_height);
         let reversed = follow.reverse(
-            (generation, opened),
+            (generation, realign),
             queue,
             stride,
             max,
@@ -400,7 +403,7 @@ impl App {
         let fade = follow.fade(list_ui);
         let middle = design::middle_scroll_active(list_ui.ctx(), area_id);
         let (offset, busy) =
-            follow.start(list_ui, stride, target, anchor, opened || reversed, middle);
+            follow.start(list_ui, stride, target, anchor, realign || reversed, middle);
         if follow.following {
             list_ui.spacing_mut().scroll.fade.strength = 0.;
         }

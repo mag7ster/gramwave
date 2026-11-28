@@ -2,6 +2,148 @@ use super::*;
 use crate::screens::playlist::track_labels;
 
 #[test]
+fn playlist_filter_buttons_match_across_layouts() {
+    let labels = ["Music", "Audio files", "Voice messages"];
+    for size in [egui::vec2(850., 550.), egui::vec2(600., 700.)] {
+        let mut h = Harness::new();
+        h.size = size;
+        h.settle();
+        let search: egui::Rect = h
+            .ctx
+            .data(|data| data.get_temp(egui::Id::new(("test-search-rect", "track-search"))))
+            .unwrap();
+        let trigger = search.right_center() + egui::vec2(28., 0.);
+        h.click(trigger);
+        h.settle();
+        let positions = labels.map(|label| menu_text(&mut h, label)[0]);
+        let palette = design::palette(h.app.state.view().light);
+        let layer = h.ctx.layer_id_at(positions[0]).unwrap();
+        assert_eq!(layer.order, egui::Order::Foreground);
+        let popup = h.ctx.memory(|memory| memory.area_rect(layer.id)).unwrap();
+        let margin = h.ctx.global_style().spacing.menu_margin;
+        let left = popup.left() + f32::from(margin.left);
+        let right = popup.right() - f32::from(margin.right);
+        let frame = h.frame(vec![]);
+        let rows = positions.map(|pos| {
+            filter_fill(
+                &frame,
+                pos,
+                33.,
+                if pos == positions[2] {
+                    palette.panel
+                } else {
+                    palette.selected
+                },
+            )
+        });
+        for row in rows {
+            assert!((row.left() - left).abs() < 2. && (row.right() - right).abs() < 2.);
+        }
+        assert!(rows
+            .windows(2)
+            .all(|rows| (rows[0].bottom() - rows[1].top()).abs() < 1.));
+
+        let voice = egui::pos2(right - 2., positions[2].y);
+        h.frame(vec![egui::Event::PointerMoved(voice)]);
+        filter_fill(&h.frame(vec![]), voice, 33., palette.selected);
+        h.pointer(voice, true);
+        filter_fill(&h.frame(vec![]), voice, 33., palette.selected);
+        h.pointer(voice, false);
+        assert_eq!(h.app.state.view().playlists[0].filters, [true; 3]);
+        assert!(egui::Popup::is_any_open(&h.ctx));
+
+        h.frame(vec![egui::Event::PointerMoved(positions[0])]);
+        filter_fill(&h.frame(vec![]), positions[0], 33., palette.raised);
+        h.pointer(positions[0], true);
+        filter_fill(&h.frame(vec![]), positions[0], 33., palette.raised);
+        h.pointer(positions[0], false);
+        assert_eq!(h.app.state.view().playlists[0].filters, [false, true, true]);
+        assert!(egui::Popup::is_any_open(&h.ctx));
+
+        // A focused filter owns Space instead of the global transport shortcut.
+        let music_focused = |h: &Harness| {
+            h.ctx
+                .memory(|memory| memory.focused())
+                .and_then(|id| h.ctx.read_response(id))
+                .is_some_and(|response| {
+                    response.layer_id == layer
+                        && response.sense.senses_click()
+                        && response.rect.contains(positions[0])
+                        && (response.rect.height() - rows[0].height()).abs() < 1.
+                })
+        };
+        for _ in 0..20 {
+            if music_focused(&h) {
+                break;
+            }
+            h.key(egui::Key::Tab);
+        }
+        assert!(music_focused(&h));
+        h.key(egui::Key::Space);
+        assert_eq!(h.app.state.view().playlists[0].filters, [true; 3]);
+        h.key(egui::Key::Enter);
+        assert_eq!(h.app.state.view().playlists[0].filters, [false, true, true]);
+        assert!(egui::Popup::is_any_open(&h.ctx));
+
+        if size.y < 600. {
+            h.click(trigger);
+        } else {
+            h.key(egui::Key::Escape);
+        }
+        assert!(!egui::Popup::is_any_open(&h.ctx));
+        h.click(trigger);
+        h.settle();
+        h.click(egui::pos2(5., size.y - 5.));
+        assert!(!egui::Popup::is_any_open(&h.ctx));
+
+        if size.y < 600. {
+            h.click(trigger);
+            h.settle();
+            let refresh = menu_text(&mut h, "Refresh library")[0];
+            h.click(refresh);
+            assert!(!egui::Popup::is_any_open(&h.ctx));
+        }
+
+        h.size = egui::vec2(850., 700.);
+        h.settle();
+        let positions = labels.map(|label| menu_text(&mut h, label)[0]);
+        assert!(positions.windows(2).all(|pair| pair[0].x < pair[1].x));
+        let frame = h.frame(vec![]);
+        filter_fill(&frame, positions[0], 36., palette.panel);
+        filter_fill(&frame, positions[2], 36., palette.selected);
+        h.frame(vec![egui::Event::PointerMoved(positions[2])]);
+        filter_fill(&h.frame(vec![]), positions[2], 36., palette.raised);
+        h.click(positions[2]);
+        assert_eq!(
+            h.app.state.view().playlists[0].filters,
+            [false, true, false]
+        );
+    }
+}
+
+fn filter_fill(
+    frame: &egui::FullOutput,
+    position: egui::Pos2,
+    height: f32,
+    color: egui::Color32,
+) -> egui::Rect {
+    frame
+        .shapes
+        .iter()
+        .find_map(|painted| match &painted.shape {
+            egui::Shape::Rect(rect)
+                if rect.fill == color
+                    && rect.rect.contains(position)
+                    && (rect.rect.height() - height).abs() < 1. =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a filter fill of {color:?} at {position:?}"))
+}
+
+#[test]
 fn loading_notice_waits_for_an_empty_open_playlist() {
     use gramwave_application::library::LibraryCommand;
 

@@ -61,6 +61,7 @@ pub struct PlaybackCore {
     pub(crate) promoting_next: bool,
     pub(crate) waiting_for_next_pcm: bool,
     pub(crate) queue_reverse_generation: u64,
+    queue_start_generation: u64,
     pub(crate) repeat_cycle: Option<Vec<gramwave_domain::QueueEntryId>>,
     pub(crate) snapshot: PlayerSnapshot,
     pub(crate) queue_removals: Vec<PendingQueueRemoval>,
@@ -86,6 +87,14 @@ impl PlaybackCore {
     }
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+    pub fn queue_start_generation(&self) -> u64 {
+        self.queue_start_generation
+    }
+
+    pub(crate) fn queue_started(&mut self) {
+        self.queue_start_generation = self.queue_start_generation.wrapping_add(1);
+        self.queue_removals.clear();
     }
     pub fn promoting_next(&self) -> bool {
         self.promoting_next

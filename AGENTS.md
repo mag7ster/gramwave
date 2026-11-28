@@ -38,6 +38,8 @@ Link to those instructions from the README.
 
 ## Coding Style & Naming Conventions
 
+Read [the design guide](DESIGN.md) before changing the interface or how users control it.
+
 Use rustfmt defaults, including four-space indentation. Use `snake_case` for modules/functions, `PascalCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Route playback actions through shared application commands. Wrap product strings in translation calls; preserve user content and translation placeholders.
 
 ## Testing Guidelines

@@ -476,10 +476,7 @@ pub(super) fn show_track_menu(
     }
     let mut draw = |ui: &mut Ui| {
         ui.set_width(208.);
-        let spacing = ui.spacing_mut();
-        spacing.button_padding = egui::vec2(8., 2.);
-        spacing.interact_size.y = 33.;
-        spacing.item_spacing.y = 0.;
+        crate::design::menu_rows(ui);
         let mut items = MenuItems::default();
         contents(ui, &mut items);
         items
