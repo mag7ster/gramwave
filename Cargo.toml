@@ -17,7 +17,7 @@ resolver = "2"
 default = ["audio", "webm-emoji", "download-tdlib", "vulkan"]
 native-tests = ["audio", "webm-emoji"]
 release-branding = []
-audio = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:rodio", "dep:rtrb", "dep:symphonia", "dep:symphonia-adapter-libopus"]
+audio = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:rodio", "dep:rtrb", "dep:rubato", "dep:symphonia", "dep:symphonia-adapter-libopus"]
 webm-emoji = ["dep:rusty_vp9", "dep:webm-iterable"]
 telegram = ["dep:tdlib-rs"]
 download-tdlib = ["telegram", "tdlib-rs/download-tdlib"]
@@ -35,6 +35,7 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
 rtrb = { version = "0.3", optional = true }
+rubato = { version = "5.1", default-features = false, optional = true }
 symphonia = { version = "0.6.1", default-features = false, features = ["aac", "adpcm", "aiff", "alac", "flac", "id3v2", "isomp4", "mkv", "mpa", "ogg", "pcm", "vorbis", "wav"], optional = true }
 symphonia-adapter-libopus = { version = "0.3", optional = true }
 rusty_vp9 = { version = "0.3.0", optional = true }

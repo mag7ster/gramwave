@@ -109,8 +109,9 @@ JSON and the C API stay in adapters; tdlib-rs 1.4.0 remains pinned and supplies 
 types. A closed allowlist preserves read-only behavior and online=false.
 
 The `audio` feature uses Symphonia for audio decoding, libopus for Opus,
-and Rodio over CPAL for output. Decoder workers read network data and fill
-bounded PCM rings outside the audio callback. One persistent Rodio source
+and Rodio over CPAL for output. Decoder workers read network data, resample
+PCM with Rubato when the device rate differs, and fill bounded PCM rings
+outside the audio callback. One persistent Rodio source
 combines tracks in the output device's format. Generations fence stale EOF
 and worker results after Stop, Seek or a new load.
 

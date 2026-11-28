@@ -20,6 +20,8 @@ use std::{
 use tokio::{runtime::Handle, sync::Semaphore};
 use tokio_util::sync::CancellationToken;
 
+mod resample;
+
 type OutputFormat = (NonZeroU16, NonZeroU32);
 
 const POLL: Duration = Duration::from_millis(10);
@@ -839,10 +841,34 @@ fn decode(
         rate: pcm.rate,
         error: None,
     };
-    let resampled =
-        rodio::conversions::SampleRateConverter::new(&mut decoded, rate, format.1, channels);
+    let mut resampler = (rate != format.1)
+        .then(|| resample::Resampled::new(rate, format.1, channels))
+        .transpose()?;
+    let mut samples = std::iter::from_fn(|| {
+        let Some(resampler) = &mut resampler else {
+            return decoded.next();
+        };
+        match resampler.next(&mut decoded, &cancel) {
+            Ok(sample) => sample,
+            Err(error) => {
+                decoded.error = Some(error);
+                None
+            }
+        }
+    })
+    .fuse();
+    let downmix = channels.get() == 2 && format.0.get() == 1;
+    let mixed = std::iter::from_fn(|| {
+        let sample = samples.next()?;
+        if downmix {
+            Some((sample + samples.next()?) * 0.5)
+        } else {
+            Some(sample)
+        }
+    });
+    let mixed_channels = if downmix { format.0 } else { channels };
     let mut converted =
-        rodio::conversions::ChannelCountConverter::new(resampled, channels, format.0);
+        rodio::conversions::ChannelCountConverter::new(mixed, mixed_channels, format.0);
     let channels = usize::from(format.0.get());
     let (mut producer, ring) =
         rtrb::RingBuffer::new(channels * (format.1.get() as usize / 5).max(1));

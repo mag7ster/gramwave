@@ -179,7 +179,21 @@ fn cpal_plays_a_local_opus_track() {
 }
 
 fn constant_wav(path: &std::path::Path, rate: u32, channels: u16, frames: u32, sample: i16) {
-    let bytes = frames * u32::from(channels) * 2;
+    write_wav(
+        path,
+        rate,
+        channels,
+        std::iter::repeat_n(sample, frames as usize * usize::from(channels)),
+    );
+}
+
+fn write_wav(
+    path: &std::path::Path,
+    rate: u32,
+    channels: u16,
+    samples: impl ExactSizeIterator<Item = i16>,
+) {
+    let bytes = u32::try_from(samples.len()).unwrap() * 2;
     let mut wav = Vec::new();
     wav.extend(b"RIFF");
     wav.extend((bytes + 36).to_le_bytes());
@@ -193,10 +207,122 @@ fn constant_wav(path: &std::path::Path, rate: u32, channels: u16, frames: u32, s
     wav.extend(16u16.to_le_bytes());
     wav.extend(b"data");
     wav.extend(bytes.to_le_bytes());
-    for _ in 0..frames * u32::from(channels) {
+    for sample in samples {
         wav.extend(sample.to_le_bytes());
     }
     std::fs::write(path, wav).unwrap();
+}
+
+fn local_pcm(path: &std::path::Path, rate: u32, start_ms: u64, samples: usize) -> Vec<f32> {
+    let tasks = Scheduler::new();
+    let format = (1.try_into().unwrap(), rate.try_into().unwrap());
+    let (mixer, output) = rodio::mixer::mixer(format.0, format.1);
+    let (send, receive) = mpsc::channel();
+    let mut owner = Owner::new(
+        mixer,
+        format,
+        tasks.handle(),
+        send,
+        Arc::default(),
+        Arc::default(),
+    );
+    let mut events = Vec::new();
+    owner.apply(
+        Message::Command(
+            0,
+            0,
+            PlayerCommand::Load {
+                path: path.display().to_string(),
+                start_ms,
+            },
+        ),
+        &mut events,
+    );
+    owner.apply(
+        receive.recv_timeout(Duration::from_secs(2)).unwrap(),
+        &mut events,
+    );
+    assert_eq!(events, [PlaybackEvent::Loaded]);
+    let progress = &owner
+        .current
+        .as_ref()
+        .unwrap()
+        .prepared
+        .as_ref()
+        .unwrap()
+        .progress;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    // These fixtures all fit in the PCM ring before the mixer starts reading it.
+    while !progress.eof.load(std::sync::atomic::Ordering::Acquire) {
+        assert!(Instant::now() < deadline);
+        thread::yield_now();
+    }
+    owner.update(&mut events);
+    output.take(samples).collect()
+}
+
+fn tone_amplitude(samples: &[f32], rate: u32, frequency: f64) -> f64 {
+    let mut sin = 0.;
+    let mut cos = 0.;
+    for (i, sample) in samples.iter().enumerate() {
+        let (s, c) = (std::f64::consts::TAU * frequency * i as f64 / f64::from(rate)).sin_cos();
+        sin += f64::from(*sample) * s;
+        cos += f64::from(*sample) * c;
+    }
+    2. * sin.hypot(cos) / samples.len() as f64
+}
+
+#[test]
+fn resampling_suppresses_aliases_and_preserves_high_frequencies() {
+    let dir = tempfile::tempdir().unwrap();
+    for (rate, output_rate, tone, alias) in [
+        (44_100, 48_000, 15_000., 18_900.),
+        (48_000, 44_100, 23_000., 21_100.),
+        (96_000, 48_000, 30_000., 18_000.),
+    ] {
+        let path = dir.path().join("tone.wav");
+        let input = (0..rate * 3 / 20).map(|i| {
+            (16_384. * (std::f64::consts::TAU * tone * f64::from(i) / f64::from(rate)).sin())
+                .round() as i16
+        });
+        write_wav(&path, rate, 1, input);
+        let frames = output_rate as usize * 3 / 20;
+        let output = local_pcm(&path, output_rate, 0, frames + 1);
+        let steady = &output[output_rate as usize / 20..output_rate as usize / 10];
+        let alias_db = 20. * (tone_amplitude(steady, output_rate, alias) / 0.5).log10();
+        assert!(alias_db < -60., "{rate} Hz input: alias was {alias_db} dB");
+        if tone < f64::from(output_rate) / 2. {
+            let tone_db = 20. * (tone_amplitude(steady, output_rate, tone) / 0.5).log10();
+            assert!(tone_db.abs() < 0.5, "passband gain was {tone_db} dB");
+        }
+        assert_eq!(output[frames], 0.);
+    }
+}
+
+#[test]
+fn matching_rates_preserve_pcm_and_stereo_to_mono_keeps_the_right_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("track.wav");
+    let samples = [-32_768, -8192, 0, 8192, 32_767];
+    write_wav(&path, 48_000, 1, samples.into_iter());
+    assert_eq!(
+        local_pcm(&path, 48_000, 0, 5),
+        samples.map(|sample| f32::from(sample) / 32_768.)
+    );
+    write_wav(&path, 48_000, 2, [0, 16_384, -8192, 0].into_iter());
+    assert_eq!(local_pcm(&path, 48_000, 0, 3), [0.25, -0.125, 0.]);
+}
+
+#[test]
+fn resampling_after_seek_outputs_the_remaining_short_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("track.wav");
+    let input = (0..2400).map(|i| if i < 2160 { -8192 } else { 16_384 });
+    write_wav(&path, 24_000, 1, input);
+    let output = local_pcm(&path, 48_000, 90, 481);
+    assert!(output[..479].iter().all(|&sample| sample > 0.2));
+    assert!(output[479].abs() > 0.001);
+    assert_eq!(output[480], 0.);
 }
 
 #[test]
@@ -279,7 +405,12 @@ fn ready_tracks_join_without_waiting_for_the_owner() {
             );
             owner.update(&mut events);
         }
-        assert!(output.by_ref().take(64).all(|value| value == 0.5));
+        let mut successor = output.by_ref().take(64);
+        if next_rate == 48_000 {
+            assert!(successor.all(|value| value == 0.5));
+        } else {
+            assert!(successor.all(|value| value > 0.3));
+        }
         assert_eq!(events, vec![PlaybackEvent::Loaded]);
         owner.update(&mut events);
         assert_eq!(
