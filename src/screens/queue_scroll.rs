@@ -1,4 +1,7 @@
-use super::{scroll_anchor::ScrollAnchor, TRACK_SCROLL_GUTTER};
+use super::{
+    scroll_anchor::{row_clear_of_edges, ScrollAnchor},
+    TRACK_SCROLL_GUTTER,
+};
 use crate::design;
 use eframe::egui;
 use gramwave_domain::{playback::QueueTimeline, QueueEntryId, TrackId};
@@ -6,7 +9,6 @@ use std::time::Duration;
 
 // A wheel detent can land on either side of the row's top edge.
 const SNAP_DISTANCE: f32 = design::ROW_HEIGHT / 2.;
-const REVERSE_EDGE_HEIGHT: f32 = design::ROW_HEIGHT;
 
 #[derive(Clone, Default)]
 pub(super) struct QueueScroll {
@@ -111,10 +113,7 @@ impl QueueScroll {
             let top = index as f32 * self.stride - self.offset;
             (queue.get(index).unwrap().entry_id, top)
         });
-        let row_height = design::ROW_HEIGHT;
-        self.interior_current = current.filter(|&(_, top)| {
-            top >= REVERSE_EDGE_HEIGHT && top + row_height <= height - REVERSE_EDGE_HEIGHT
-        });
+        self.interior_current = current.filter(|&(_, top)| row_clear_of_edges(top, height));
         self.visible = Some(ScrollAnchor::capture(
             queue.len(),
             self.stride,

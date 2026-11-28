@@ -1047,6 +1047,7 @@ fn playlist_sort_starts_at_the_top_then_keeps_browsed_tracks_in_view() {
         },
     ]);
     h.settle();
+    h.app.test_rows.clear();
     h.settle();
     let (viewport, before) = h.list_scroll(key);
     assert!(before > 200.);
@@ -1059,10 +1060,11 @@ fn playlist_sort_starts_at_the_top_then_keeps_browsed_tracks_in_view() {
         .map(|(&id, (rect, _))| (id, rect.center().y - viewport.top()))
         .unwrap();
     h.app.playlist_order = PlaylistOrder::NewestFirst;
+    h.app.test_rows.clear();
     h.settle();
     let (viewport, after) = h.list_scroll(key);
     assert!((before - after).abs() > 100.);
-    assert!((h.app.test_rows[&id].0.center().y - viewport.top() - y).abs() < 1.);
+    assert!((h.app.test_rows[&id].0.center().y - viewport.bottom() + y).abs() < 1.);
 
     h.frame(vec![
         egui::Event::PointerMoved(viewport.center()),
@@ -1079,4 +1081,180 @@ fn playlist_sort_starts_at_the_top_then_keeps_browsed_tracks_in_view() {
     h.app.playlist_order = PlaylistOrder::OldestFirst;
     h.settle();
     assert!(h.list_scroll(key).1 > before);
+}
+
+#[test]
+fn playlist_sort_holds_the_current_row_before_scrolling_and_through_history_loading() {
+    use gramwave_application::{
+        library::LibraryCommand,
+        model::Track,
+        telegram::MediaPage,
+        workflow::{AppEvent, Effect},
+    };
+    use gramwave_domain::PlaylistOrder;
+
+    let mut h = Harness::new();
+    h.size = egui::vec2(1240., 850.);
+    let mut state = h.app.state.view().clone();
+    let playlist = &mut state.playlists[0];
+    for (i, track) in playlist.tracks.iter_mut().enumerate() {
+        track.message = 200 - i as i64;
+    }
+    playlist.filters = [true, false, false];
+    playlist.done = [false, true, true];
+    h.app.state = gramwave_application::AppCore::new(state);
+    let key = "test-playlist-scroll";
+    h.settle();
+    let (viewport, offset) = h.list_scroll(key);
+    assert_eq!(offset, 0.);
+    let message = 196;
+    let before = h.app.test_rows[&message].0.top() - viewport.top();
+    assert!(before >= design::ROW_HEIGHT);
+    assert!(before + 2. * design::ROW_HEIGHT <= viewport.height());
+    let track = h.app.state.view().playlists[0].tracks[4].clone();
+    h.app.execute(AppCommand::Play(track));
+
+    h.app.state.library_command(LibraryCommand::Connected(1));
+    let request = h
+        .app
+        .state
+        .command(AppCommand::LoadOldest {
+            chat: 0,
+            retry: false,
+        })
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::QueuePage {
+                operation,
+                browsing: true,
+                ..
+            } => Some(operation.key()),
+            _ => None,
+        })
+        .unwrap();
+    h.app.playlist_order = PlaylistOrder::OldestFirst;
+    let assert_position = |h: &mut Harness| {
+        h.app.test_rows.clear();
+        h.settle();
+        let (viewport, _) = h.list_scroll(key);
+        let after = h.app.test_rows[&message].0.top() - viewport.top();
+        assert!((after - before).abs() < 1., "{after} vs {before}");
+    };
+    assert_position(&mut h);
+
+    h.app.state.event(AppEvent::QueuePage {
+        request,
+        browsing: true,
+        result: Ok(MediaPage {
+            tracks: (140..150)
+                .map(|message| {
+                    Track {
+                        message,
+                        ..Default::default()
+                    }
+                    .into()
+                })
+                .collect(),
+            newest: 149,
+            next: 149,
+        }),
+    });
+    assert!(h.app.state.view().playlists[0]
+        .tracks
+        .iter()
+        .any(|track| track.message == 140));
+    assert_position(&mut h);
+
+    h.app.playlist_order = PlaylistOrder::NewestFirst;
+    assert_position(&mut h);
+}
+
+#[test]
+fn playlist_sort_prioritizes_the_current_row_only_outside_the_edge_zones() {
+    use gramwave_domain::PlaylistOrder;
+
+    for (distance, bottom, keep_current) in [
+        (92., false, true),
+        (92., true, true),
+        (25., false, false),
+        (25., true, false),
+        (-20., false, false),
+        (-20., true, false),
+        (-75., false, false),
+    ] {
+        let mut h = Harness::new();
+        h.size = egui::vec2(1240., 850.);
+        h.settle();
+        let key = "test-playlist-scroll";
+        let tracks = h.app.playlist_tracks(0);
+        let current_index = 14;
+        h.app
+            .execute(AppCommand::Play(tracks[current_index].metadata()));
+        h.settle();
+        let stride = h.app.test_rows[&tracks[1].message].0.top()
+            - h.app.test_rows[&tracks[0].message].0.top();
+        let (viewport, _) = h.list_scroll(key);
+        let top = if bottom {
+            viewport.height() - design::ROW_HEIGHT - distance
+        } else {
+            distance
+        };
+        h.frame(vec![
+            egui::Event::PointerMoved(viewport.center()),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0., top - current_index as f32 * stride),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        h.settle();
+        h.app.test_rows.clear();
+        h.settle();
+        let (viewport, offset) = h.list_scroll(key);
+        assert!((current_index as f32 * stride - offset - top).abs() < 1.);
+        if let Some((row, _)) = h.app.test_rows.get(&tracks[current_index].message) {
+            assert!((row.top() - viewport.top() - top).abs() < 1.);
+        }
+        let current = tracks[current_index].message;
+        let clipped: Vec<_> = if keep_current {
+            Vec::new()
+        } else {
+            h.app
+                .test_rows
+                .iter()
+                .filter_map(|(&message, (row, _))| {
+                    let height = viewport.intersect(*row).height();
+                    (height > 0. && height < design::ROW_HEIGHT).then_some((
+                        message,
+                        height,
+                        row.top() < viewport.top(),
+                    ))
+                })
+                .collect()
+        };
+        assert_eq!(clipped.is_empty(), keep_current);
+
+        for order in [PlaylistOrder::OldestFirst, PlaylistOrder::NewestFirst] {
+            h.app.playlist_order = order;
+            h.app.test_rows.clear();
+            h.settle();
+            let (viewport, new_offset) = h.list_scroll(key);
+            if keep_current {
+                assert!((h.app.test_rows[&current].0.top() - viewport.top() - top).abs() < 1.);
+            }
+            for &(message, height, was_above) in &clipped {
+                let row = h.app.test_rows[&message].0;
+                let reverse = order == PlaylistOrder::OldestFirst;
+                assert!(
+                    (viewport.intersect(row).height() - height).abs() < 1.,
+                    "visible height changed with the current row {distance} points from the edge"
+                );
+                assert_eq!(row.top() < viewport.top(), was_above ^ reverse);
+            }
+            if order == PlaylistOrder::NewestFirst {
+                assert!((new_offset - offset).abs() < 1.);
+            }
+        }
+    }
 }

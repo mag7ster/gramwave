@@ -10,7 +10,7 @@ use crate::application::commands::AppCommand;
 use crate::{design, tr, App};
 use design::{button, Icon};
 use eframe::egui;
-use gramwave_domain::PlaylistOrder;
+use gramwave_domain::{PlaylistOrder, TrackId};
 
 #[derive(Clone)]
 struct PlaylistScroll {
@@ -20,7 +20,8 @@ struct PlaylistScroll {
     query: String,
     filters: [bool; 3],
     scrolled: bool,
-    visible: ScrollAnchor<u64>,
+    held_current: Option<(u64, TrackId)>,
+    visible: ScrollAnchor<(u64, TrackId)>,
 }
 
 impl App {
@@ -505,23 +506,72 @@ impl App {
         let old: Option<PlaylistScroll> = list_ui.ctx().data(|data| data.get_temp(key));
         let old = old.filter(|old| old.chat == chat_id);
         let order_changed = old.as_ref().is_some_and(|old| old.order != order);
-        let stride = design::ROW_HEIGHT + list_ui.spacing().item_spacing.y;
-        let area_id = list_ui.make_persistent_id(("playlist-tracks", chat_id));
+        let spacing = list_ui.spacing().item_spacing.y;
+        let stride = design::ROW_HEIGHT + spacing;
+        let scroll_salt = ("playlist-tracks", chat_id);
+        // ScrollArea wraps the supplied salt before deriving its persistent ID.
+        let area_id = list_ui.make_persistent_id(egui::IdSalt::new(scroll_salt));
         let state = egui::scroll_area::State::load(list_ui.ctx(), area_id).unwrap_or_default();
         let scrolled = old.as_ref().is_some_and(|old| old.scrolled);
+        let current = self.state.view().session.current().map(|entry| entry.id());
+        let mut held_current = old
+            .as_ref()
+            .filter(|old| old.query == self.search && old.filters == filters)
+            .and_then(|old| old.held_current)
+            .filter(|&(_, id)| Some(id) == current);
         let relayout = old.as_ref().is_some_and(|old| {
             order_changed
                 || (old.library != library && old.query == self.search && old.filters == filters)
         });
         let mut area = list_scroll_area(list_ui);
         let start = if old.is_none() || relayout {
-            let max = tracks.len() as f32 * stride - list_ui.available_height();
+            let height = list_ui.available_height();
+            let max = tracks.len() as f32 * stride - spacing - height;
+            let find = |&(library_id, id): &(u64, TrackId)| {
+                tracks
+                    .iter()
+                    .position(|track| track.library_id == library_id && track.id() == id)
+            };
             let offset = old
                 .as_ref()
-                .filter(|old| old.scrolled)
                 .and_then(|old| {
-                    old.visible.offset(stride, max, |id| {
-                        tracks.iter().position(|track| track.library_id == *id)
+                    let current_offset = if order_changed {
+                        let anchor = old.visible.interior_offset(stride, max, |key| {
+                            if Some(key.1) == current {
+                                find(key)
+                            } else {
+                                None
+                            }
+                        });
+                        held_current = anchor.map(|(key, _)| *key);
+                        anchor.map(|(_, offset)| offset)
+                    } else {
+                        let offset = held_current.and_then(|held| {
+                            old.visible.offset(stride, max, |key| {
+                                if *key == held {
+                                    find(key)
+                                } else {
+                                    None
+                                }
+                            })
+                        });
+                        held_current = held_current.filter(|_| offset.is_some());
+                        offset
+                    };
+                    current_offset.or_else(|| {
+                        if !scrolled {
+                            None
+                        } else if order_changed {
+                            old.visible.mirrored_offset(
+                                stride,
+                                max,
+                                height,
+                                design::ROW_HEIGHT,
+                                find,
+                            )
+                        } else {
+                            old.visible.offset(stride, max, find)
+                        }
                     })
                 })
                 .unwrap_or_default();
@@ -534,7 +584,7 @@ impl App {
         } else {
             state.offset.y
         };
-        let scroll = area.id_salt(("playlist-tracks", chat_id)).show_rows(
+        let scroll = area.id_salt(scroll_salt).show_rows(
             list_ui,
             design::ROW_HEIGHT,
             tracks.len(),
@@ -574,13 +624,7 @@ impl App {
                     if t.file == 0 {
                         self.track_wanted.push(t.clone());
                     }
-                    let active = self
-                        .state
-                        .view()
-                        .session
-                        .current()
-                        .as_ref()
-                        .is_some_and(|c| c.id() == t.id());
+                    let active = current == Some(t.id());
                     let (rect, _) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), design::ROW_HEIGHT),
                         egui::Sense::hover(),
@@ -824,6 +868,8 @@ impl App {
                             });
                         },
                     );
+                    // Keep the virtual row stride when the inset scope advances the cursor.
+                    ui.advance_cursor_after_rect(rect);
                     if response.clicked() && !menu_clicked {
                         response.request_focus();
                     }
@@ -852,7 +898,7 @@ impl App {
             stride,
             state.offset.y,
             scroll.inner_rect.height(),
-            |i| tracks[i].library_id,
+            |i| (tracks[i].library_id, tracks[i].id()),
         );
         let query = self.search.clone();
         ui.ctx().data_mut(|data| {
@@ -865,6 +911,7 @@ impl App {
                     query,
                     filters,
                     scrolled: scrolled || moved,
+                    held_current: if moved { None } else { held_current },
                     visible,
                 },
             )

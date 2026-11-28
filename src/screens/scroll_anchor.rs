@@ -1,3 +1,11 @@
+use crate::design::ROW_HEIGHT;
+
+const REVERSE_EDGE_HEIGHT: f32 = ROW_HEIGHT;
+
+pub(super) fn row_clear_of_edges(top: f32, height: f32) -> bool {
+    top >= REVERSE_EDGE_HEIGHT && top + ROW_HEIGHT <= height - REVERSE_EDGE_HEIGHT
+}
+
 /// A small set of rows near the middle of a viewport, with their old screen offsets.
 #[derive(Clone)]
 pub(super) struct ScrollAnchor<K> {
@@ -36,6 +44,21 @@ impl<K> ScrollAnchor<K> {
         self.rows.iter().find_map(|(key, y)| {
             find(key).map(|index| (index as f32 * stride - y).clamp(0., max.max(0.)))
         })
+    }
+
+    pub(super) fn interior_offset(
+        &self,
+        stride: f32,
+        max: f32,
+        find: impl Fn(&K) -> Option<usize>,
+    ) -> Option<(&K, f32)> {
+        self.rows
+            .iter()
+            .filter(|(_, top)| row_clear_of_edges(*top, self.height))
+            .find_map(|(key, top)| {
+                let index = find(key)?;
+                Some((key, (index as f32 * stride - top).clamp(0., max.max(0.))))
+            })
     }
 
     pub(super) fn mirrored_offset(
