@@ -97,7 +97,7 @@ impl AppCore {
             }
             return;
         };
-        let order = self.state.session.playlist_order();
+        let order = self.state.session.playlist_source_order();
         let range = match (order, ceiling) {
             (PlaylistOrder::NewestFirst, i64::MAX) | (PlaylistOrder::OldestFirst, i64::MIN) => None,
             _ => Some((order, ceiling)),

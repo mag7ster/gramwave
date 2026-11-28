@@ -221,9 +221,9 @@ the current sample is beyond the main cursor, an ordered window loads
 contiguous neighbors in both directions without advancing that cursor.
 
 The transport's reverse action reverses the timeline around the current
-occurrence. When the source history is incomplete, the action first loads the
-remaining metadata. The current audio keeps its position. An advancing request
-waits until the reverse can apply to the whole timeline.
+occurrence immediately and keeps the current audio position. Pending source
+pages follow their boundary when it moves to the opposite side. Playback and
+browsing request pages at the side they approach.
 
 The application reserves the next queue occurrence and resolves its local path
 or loopback stream during playback. Speculative Telegram reads use lower

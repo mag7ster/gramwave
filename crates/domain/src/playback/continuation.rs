@@ -1,4 +1,4 @@
-use super::{PlaylistOrder, QueueEntry, QueueEntryId, QueueRangeEdit, Session, TrackMetadata};
+use super::{PlaylistOrder, QueueEntry, QueueEntryId, Session, TrackMetadata};
 use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -19,6 +19,8 @@ pub(super) struct Continuation {
     pub(super) samples: BTreeMap<i64, Sample>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ordered_window: Option<Box<OrderedWindow>>,
+    #[serde(default)]
+    page_before: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,6 +75,9 @@ impl OrderedWindow {
 }
 
 impl Continuation {
+    pub(super) fn set_page_side(&mut self, before: bool) {
+        self.page_before = before;
+    }
     fn next_page(&self, order: PlaylistOrder) -> Option<(usize, i64)> {
         next_cursor(self.cursors, order)
     }
@@ -84,7 +89,29 @@ impl Continuation {
 
 impl Session {
     pub fn playlist_order(&self) -> PlaylistOrder {
+        if self.reversed {
+            self.playlist_order.reversed()
+        } else {
+            self.playlist_order
+        }
+    }
+
+    pub fn playlist_source_order(&self) -> PlaylistOrder {
         self.playlist_order
+    }
+
+    fn source_insertion_index(&self, mut later: impl FnMut(&QueueEntryId) -> bool) -> usize {
+        if self.reversed {
+            self.order
+                .iter()
+                .rposition(later)
+                .map_or(0, |index| index + 1)
+        } else {
+            self.order
+                .iter()
+                .position(&mut later)
+                .unwrap_or(self.order.len())
+        }
     }
 
     pub fn start_playlist(
@@ -119,6 +146,7 @@ impl Session {
             deferred: BTreeSet::new(),
             samples: BTreeMap::new(),
             ordered_window: None,
+            page_before: false,
         };
         let frontier = continuation.frontier(order);
         let mut chosen = 0;
@@ -238,9 +266,8 @@ impl Session {
             {
                 continue;
             }
-            let id = self.entry(track);
-            let continuation = self.continuation.as_mut().unwrap();
-            let before = self.order.iter().position(|old| {
+            let continuation = self.continuation.as_ref().unwrap();
+            let before = self.source_insertion_index(|old| {
                 continuation.deferred.contains(old)
                     || continuation
                         .samples
@@ -251,7 +278,9 @@ impl Session {
                                 && order.key(self.entries[old].message) > order.key(message)
                         })
             });
-            self.order.insert(before.unwrap_or(self.order.len()), id);
+            let id = self.entry(track);
+            self.order.insert(before, id);
+            let continuation = self.continuation.as_mut().unwrap();
             continuation.samples.insert(
                 message,
                 Sample {
@@ -350,11 +379,25 @@ impl Session {
     }
 
     pub fn playlist_page_request(&self) -> Option<(i64, usize, i64)> {
-        if self.has_ordered_window() {
-            self.ordered_page_request(false)
-        } else {
+        self.page_request(false)
+    }
+
+    pub fn page_request(&self, before: bool) -> Option<(i64, usize, i64)> {
+        let continuation = self.continuation.as_ref()?;
+        if continuation.ordered_window.is_some() {
+            self.ordered_page_request(before ^ self.reversed)
+        } else if continuation.page_before == before {
             self.full_playlist_page_request()
+        } else {
+            None
         }
+    }
+
+    pub fn display_before(&self, window: Option<bool>) -> bool {
+        window.map_or_else(
+            || self.continuation.as_ref().is_some_and(|c| c.page_before),
+            |source_before| source_before ^ self.reversed,
+        )
     }
 
     pub fn has_ordered_window(&self) -> bool {
@@ -374,13 +417,15 @@ impl Session {
                     .iter()
                     .position(|id| *id == current)
                     .and_then(|at| {
-                        self.order[..at]
-                            .iter()
-                            .rev()
-                            .find(|id| {
-                                !self.manual.contains(id) && !continuation.deferred.contains(id)
-                            })
-                            .map(|id| self.entries[id].message)
+                        let eligible = |id: &&QueueEntryId| {
+                            !self.manual.contains(id) && !continuation.deferred.contains(id)
+                        };
+                        let previous = if self.reversed {
+                            self.order[at + 1..].iter().find(eligible)
+                        } else {
+                            self.order[..at].iter().rev().find(eligible)
+                        };
+                        previous.map(|id| self.entries[id].message)
                     })
             } else {
                 Some(self.entries[&current].message)
@@ -487,21 +532,17 @@ impl Session {
             {
                 continue;
             }
-            let before = self
-                .order
-                .iter()
-                .position(|id| {
-                    let continuation = self.continuation.as_ref().unwrap();
-                    let entry = &self.entries[id];
-                    continuation.deferred.contains(id)
-                        || !self.manual.contains(id)
-                            && !continuation
-                                .samples
-                                .get(&entry.message)
-                                .is_some_and(|sample| sample.id == *id && sample.fixed)
-                            && order.key(entry.message) > order.key(message)
-                })
-                .unwrap_or(self.order.len());
+            let before = self.source_insertion_index(|id| {
+                let continuation = self.continuation.as_ref().unwrap();
+                let entry = &self.entries[id];
+                continuation.deferred.contains(id)
+                    || !self.manual.contains(id)
+                        && !continuation
+                            .samples
+                            .get(&entry.message)
+                            .is_some_and(|sample| sample.id == *id && sample.fixed)
+                        && order.key(entry.message) > order.key(message)
+            });
             let id = self.entry(track);
             self.order.insert(before, id);
             self.continuation.as_mut().unwrap().samples.insert(
@@ -518,7 +559,7 @@ impl Session {
     }
 
     pub fn available_len(&self) -> usize {
-        if self.has_ordered_window() && self.ordered_page_request(false).is_none() {
+        if self.page_request(false).is_none() {
             return self.remaining.len();
         }
         self.continuation
@@ -531,6 +572,20 @@ impl Session {
             })
     }
 
+    pub fn available_past_len(&self) -> usize {
+        let len = self.timeline().past_len();
+        if self.page_request(true).is_none() {
+            return len;
+        }
+        let deferred = &self.continuation.as_ref().unwrap().deferred;
+        len - self
+            .preceding
+            .iter()
+            .chain(&self.history)
+            .take_while(|id| deferred.contains(id))
+            .count()
+    }
+
     pub fn add_playlist_page(
         &mut self,
         kind: usize,
@@ -538,6 +593,7 @@ impl Session {
         tracks: impl IntoIterator<Item = TrackMetadata>,
         shuffle: bool,
     ) {
+        let at = self.available_len();
         let Some(continuation) = &mut self.continuation else {
             return;
         };
@@ -571,17 +627,16 @@ impl Session {
         let done = continuation.next_page(order).is_none();
         let project = continuation.ordered_window.is_none();
         let mut samples = std::mem::take(&mut continuation.samples);
-        let at = self.available_len();
         let mut ids = Vec::with_capacity(ready.len());
         if samples.is_empty() {
             let deferred = &self.continuation.as_ref().unwrap().deferred;
-            let before = self
-                .order
-                .iter()
-                .position(|id| deferred.contains(id))
-                .unwrap_or(self.order.len());
+            let before = self.source_insertion_index(|id| deferred.contains(id));
             ids.extend(ready.into_iter().map(|track| self.entry(track)));
-            self.order.splice(before..before, ids.iter().copied());
+            if self.reversed {
+                self.order.splice(before..before, ids.iter().rev().copied());
+            } else {
+                self.order.splice(before..before, ids.iter().copied());
+            }
         } else {
             for track in ready {
                 let message = track.message;
@@ -590,28 +645,38 @@ impl Session {
                         ids.push(sample.id);
                     }
                 } else {
-                    let next_sample = self.order.iter().position(|id| {
+                    let before = self.source_insertion_index(|id| {
+                        if self.continuation.as_ref().unwrap().deferred.contains(id) {
+                            return true;
+                        }
                         let message_at = self.entries[id].message;
                         samples
                             .get(&message_at)
                             .is_some_and(|sample| sample.id == *id && !sample.fixed)
                             && order.key(message_at) > order.key(message)
                     });
-                    let before = next_sample.or_else(|| {
-                        let deferred = &self.continuation.as_ref().unwrap().deferred;
-                        self.order.iter().position(|id| deferred.contains(id))
-                    });
                     let id = self.entry(track);
-                    self.order.insert(before.unwrap_or(self.order.len()), id);
+                    self.order.insert(before, id);
                     ids.push(id);
                 }
             }
         }
         self.continuation.as_mut().unwrap().samples = samples;
+        let page_before = self.display_before(None);
         if shuffle {
             ids.shuffle(&mut rand::thread_rng());
         }
-        if project {
+        if project && page_before {
+            let defer = &self.continuation.as_ref().unwrap().deferred;
+            let at = self
+                .preceding
+                .iter()
+                .take_while(|id| defer.contains(id))
+                .count();
+            self.preceding.splice(at..at, ids.into_iter().rev());
+        } else if project && self.reversed && !shuffle {
+            self.remaining.splice(at..at, ids.into_iter().rev());
+        } else if project {
             self.remaining.splice(at..at, ids);
         }
         if done {
@@ -652,31 +717,35 @@ impl Session {
         self.jump_to(0)
     }
 
-    pub fn finish_ordered_reverse(&mut self) {
-        if self.continuation.is_none() {
-            self.history.clear();
-            self.rebuild_ordered();
-        }
-    }
-
     pub fn reverse_queue(&mut self) -> bool {
-        if self.continuation.is_some() {
+        if self.timeline().len() < 2 && self.continuation.is_none() {
             return false;
         }
-        let timeline = self.timeline();
-        let ids: Vec<_> = (0..timeline.len())
-            .map(|index| timeline.get(index).unwrap().entry_id)
-            .collect();
-        if self.edit_timeline_range(0, &ids, QueueRangeEdit::Reverse) {
-            self.playlist_order = self.playlist_order.reversed();
-            true
-        } else {
-            false
+        self.reversed = !self.reversed;
+        if let Some(continuation) = &mut self.continuation {
+            continuation.page_before = !continuation.page_before;
         }
+        self.order.reverse();
+        self.preceding.append(&mut self.history);
+        self.preceding.reverse();
+        self.remaining.reverse();
+        std::mem::swap(&mut self.preceding, &mut self.remaining);
+        let mut occupied: HashSet<_> = self.preceding.iter().copied().chain(self.current).collect();
+        for index in 0..self.remaining.len() {
+            let id = self.remaining[index];
+            if !occupied.insert(id) {
+                let copy = self.entry(self.entries[&id].track.clone());
+                self.remaining[index] = copy;
+                self.order.push(copy);
+            }
+        }
+        true
     }
 
     pub(super) fn restore_boundary(&mut self) {
         if let Some(continuation) = &self.continuation {
+            self.preceding
+                .sort_by_key(|id| !continuation.deferred.contains(id));
             self.remaining
                 .sort_by_key(|id| continuation.deferred.contains(id));
         }

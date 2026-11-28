@@ -132,7 +132,7 @@ fn playback_from_a_row_waits_at_an_empty_page_and_manual_tracks_follow_the_chat(
 }
 
 #[test]
-fn reverse_completes_the_chat_before_swapping_both_sides_of_the_current_track() {
+fn reverse_swaps_immediately_and_an_in_flight_page_fills_the_new_top() {
     let mut core = core();
     let middle = core.view().playlists[0].tracks[1].library_id;
     start(&mut core, Some(middle));
@@ -143,9 +143,11 @@ fn reverse_completes_the_chat_before_swapping_both_sides_of_the_current_track() 
         ..Default::default()
     });
     let id = core.view().session.current().unwrap().entry_id;
-    core.command(AppCommand::ReverseQueue);
     let request = page_request(&mut core, (42, 0, 75));
-    assert!(core.queue_reversing());
+    core.command(AppCommand::ReverseQueue);
+    assert_eq!(upcoming(&core), [100]);
+    assert_eq!(core.view().session.timeline().current_index(), Some(2));
+    assert!(!request.cancel.is_cancelled());
     let effects = page(&mut core, request, 0, &[70, 60]);
     assert!(!effects.iter().any(|effect| matches!(
         effect,
@@ -165,6 +167,61 @@ fn reverse_completes_the_chat_before_swapping_both_sides_of_the_current_track() 
     assert_eq!(upcoming(&core), [100]);
     core.command(AppCommand::Previous);
     assert_eq!(current(&core), 80);
+}
+
+#[test]
+fn reversing_a_new_shuffle_moves_its_unloaded_boundary_above_the_current_track() {
+    let mut core = core();
+    core.command(AppCommand::StartPlaylist {
+        chat: 42,
+        start: crate::commands::PlaylistStart::Shuffled,
+        order: Default::default(),
+    });
+    core.event(AppEvent::Player(PlaybackEvent::Loaded));
+    core.command(AppCommand::Insert(track(500), false));
+    let first = current(&core);
+    let future = upcoming(&core);
+    core.command(AppCommand::ReverseQueue);
+    assert!(upcoming(&core).is_empty());
+    assert!(core.pump(Instant::now(), true).is_empty());
+    core.command(AppCommand::Next);
+    assert_eq!(current(&core), first);
+    assert!(!core.queue_waiting());
+
+    let restored = serde_json::from_value::<gramwave_domain::Session>(
+        serde_json::to_value(&core.view().session).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(restored.page_request(true), Some((42, 0, 75)));
+    assert_eq!(restored.page_request(false), None);
+    core.command(AppCommand::ReverseQueue);
+    assert_eq!(upcoming(&core), future);
+    core.command(AppCommand::ReverseQueue);
+
+    for message in future.into_iter().filter(|&message| message != 500) {
+        core.command(AppCommand::Previous);
+        assert_eq!(current(&core), message);
+    }
+    let request = page_request(&mut core, (42, 0, 75));
+    core.command(AppCommand::Previous);
+    assert!(core.queue_waiting());
+    page(&mut core, request, 65, &[70]);
+    assert_eq!(current(&core), 70);
+    assert!(!core.queue_waiting());
+    assert_eq!(core.view().session.timeline().get(0).unwrap().message, 500);
+}
+
+#[test]
+fn repeat_all_can_wrap_at_a_reversed_edge_without_draining_pages_from_above() {
+    let mut core = core();
+    start(&mut core, None);
+    core.command(AppCommand::Repeat(RepeatMode::All));
+    core.command(AppCommand::ReverseQueue);
+    assert!(upcoming(&core).is_empty());
+    core.command(AppCommand::Next);
+    assert_eq!(current(&core), 80);
+    assert_eq!(upcoming(&core), [90, 100]);
+    assert!(core.pump(Instant::now(), true).is_empty());
 }
 
 #[test]
@@ -242,16 +299,13 @@ fn removing_and_restoring_rows_keeps_the_history_boundary() {
 }
 
 #[test]
-fn finishing_during_a_reverse_waits_then_plays_the_reversed_history() {
+fn finishing_after_reverse_uses_the_reversed_history_without_waiting_for_the_other_side() {
     let mut core = core();
     let middle = core.view().playlists[0].tracks[1].library_id;
     start(&mut core, Some(middle));
     core.command(AppCommand::ReverseQueue);
-    let request = page_request(&mut core, (42, 0, 75));
+    assert!(core.pump(Instant::now(), true).is_empty());
     core.event(AppEvent::Player(PlaybackEvent::Finished));
-    assert!(core.queue_waiting());
-    assert_eq!(current(&core), 90);
-    page(&mut core, request, 0, &[70, 60]);
     assert_eq!(current(&core), 100);
     assert!(!core.queue_waiting());
 }

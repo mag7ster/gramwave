@@ -107,7 +107,7 @@ pub(crate) type PlaylistKey = (i64, PlaylistOrder, [bool; 3]);
 #[derive(Default)]
 pub(crate) struct PageBrowse {
     queue_revision: u64,
-    queue: Demand,
+    queue: [Demand; 2],
     playlist: Option<PlaylistKey>,
     tracks: Demand,
     tracks_retry: PageRetry,
@@ -127,12 +127,16 @@ impl AppCore {
     }
 
     pub fn browse_queue(&mut self, signal: Browse) -> bool {
+        self.browse_queue_on(false, signal)
+    }
+
+    pub fn browse_queue_on(&mut self, before: bool, signal: Browse) -> bool {
         let revision = self.playback.queue_start_generation();
         if self.page_browse.queue_revision != revision {
             self.page_browse.queue_revision = revision;
-            self.page_browse.queue = Demand::default();
+            self.page_browse.queue = Default::default();
         }
-        self.page_browse.queue.observe(signal)
+        self.page_browse.queue[usize::from(before)].observe(signal)
     }
 
     pub fn browse_playlist(
@@ -152,25 +156,38 @@ impl AppCore {
     }
 
     pub fn finish_page_browse_frame(&mut self) {
-        self.page_browse.queue.end_frame();
+        for demand in &mut self.page_browse.queue {
+            demand.end_frame();
+        }
         self.page_browse.tracks.end_frame();
     }
 
-    pub(crate) fn queue_browse_pending(&self) -> bool {
-        self.page_browse.queue.pending
+    pub(crate) fn queue_browse_pending_on(&self, before: bool) -> bool {
+        self.page_browse.queue[usize::from(before)].pending
             && self.page_browse.queue_revision == self.playback.queue_start_generation()
     }
 
     pub(crate) fn complete_queue_browse(&mut self) {
-        self.page_browse.queue.pending = false;
+        self.complete_queue_browse_on(false);
+        self.complete_queue_browse_on(true);
     }
 
-    pub fn queue_page_status(&self) -> PageStatus {
+    pub(crate) fn complete_queue_browse_on(&mut self, before: bool) {
+        self.page_browse.queue[usize::from(before)].pending = false;
+    }
+
+    pub fn queue_page_status_on(&self, before: bool) -> PageStatus {
         if self.queue_work.page_retry.terminal {
             PageStatus::Unavailable
-        } else if self.queue_work.page_active()
-            || self.queue_browse_pending()
-            || self.queue_waiting()
+        } else if self.queue_work.page_active_on(&self.state.session, before)
+            || self.queue_browse_pending_on(before)
+            || if before {
+                self.queue_work.waiting_previous
+                    || self.queue_work.prefetch_previous
+                        && self.state.session.available_past_len() <= QUEUE_PREFETCH_ROWS
+            } else {
+                self.queue_work.waiting.is_some()
+            }
         {
             PageStatus::Loading
         } else {

@@ -113,24 +113,29 @@ pub fn apply(app: &mut App, scenario: &str) {
                 .start_playlist(ordered, 5, [None; 3], false, app.playlist_order);
             state.queue_panel_open = true;
         }
-        "queue-continuation" => {
+        "queue-continuation" | "queue-continuation-top" => {
+            let top = scenario == "queue-continuation-top";
             let recent = tracks
                 .iter()
                 .rev()
-                .take(8)
+                .take(if top { 1 } else { 8 })
                 .cloned()
                 .map(Into::into)
                 .collect();
             state.session.start_playlist(
                 recent,
-                3,
+                if top { 0 } else { 3 },
                 [Some(31), None, None],
                 false,
                 Default::default(),
             );
-            state
-                .session
-                .insert(state.playlists[2].tracks[6].clone(), false);
+            if top {
+                state.session.reverse_queue();
+            } else {
+                state
+                    .session
+                    .insert(state.playlists[2].tracks[6].clone(), false);
+            }
             state.queue_panel_open = true;
             app.pane = crate::screens::WorkspacePane::Queue;
         }

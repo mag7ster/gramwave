@@ -335,9 +335,6 @@ impl App {
             ui.ctx()
                 .data_mut(|data| data.remove::<egui::Rect>(egui::Id::new("test-queue-return")));
         }
-        if self.state.queue_reversing() {
-            ui.weak(tr("Loading the rest of the queue to reverse it…"));
-        }
         if empty {
             ui.label(tr("Your queue is empty"));
         }
@@ -405,7 +402,7 @@ impl App {
             realign || reversed,
         );
         let keyboard_down = super::page_browse::keyboard_down(list_ui);
-        let wheel_down = super::page_browse::wheel_moving_down(list_ui);
+        let wheel_moving = list_ui.input(|input| input.smooth_scroll_delta().y != 0.);
         let fade = follow.fade(list_ui);
         let middle = design::middle_scroll_active(list_ui.ctx(), area_id);
         let (offset, busy) =
@@ -801,44 +798,73 @@ impl App {
             reordering || reversed || shuffled,
             middle,
         );
-        let preview_paging =
-            self.demo && self.options.scenario.as_deref() == Some("queue-continuation");
-        if (!self.demo || preview_paging)
-            && !self.settings_open
-            && self.offline_confirm.is_none()
-            && self.state.view().session.playlist_page_request().is_some()
-        {
+        let preview_paging = self.demo
+            && matches!(
+                self.options.scenario.as_deref(),
+                Some("queue-continuation" | "queue-continuation-top")
+            );
+        if (!self.demo || preview_paging) && !self.settings_open && self.offline_confirm.is_none() {
+            let session = &self.state.view().session;
+            let top_boundary = session.timeline().past_len() - session.available_past_len();
+            let pages = [
+                session.page_request(false).is_some(),
+                session.page_request(true).is_some(),
+            ];
             let viewport = queue_scroll.inner_rect;
             let offset = follow.offset();
-            let end = boundary as f32 * stride;
-            // The distance from the top of a row includes that row itself.
             let lookahead = (gramwave_application::page_browse::QUEUE_PREFETCH_ROWS + 1) as f32;
-            let interacting = keyboard_down
-                || middle
-                || wheel_down && ui.rect_contains_pointer(viewport)
-                || ui.input(|input| input.pointer.primary_down());
-            let signal = super::page_browse::demand(
-                ui,
-                viewport,
-                (queue_scroll.inner, offset),
-                end,
-                (lookahead * stride, (lookahead + 8.) * stride),
-                interacting,
-            );
-            if !shuffled && !preview_paging && self.state.browse_queue(signal) {
-                ui.request_repaint();
+            let keyboard_up = ui.input(|input| {
+                [egui::Key::ArrowUp, egui::Key::PageUp, egui::Key::Home]
+                    .iter()
+                    .any(|&key| input.key_pressed(key))
+            });
+            let pointer = middle
+                || ui.input(|input| {
+                    input.pointer.primary_down()
+                        || input
+                            .pointer
+                            .hover_pos()
+                            .is_some_and(|point| viewport.contains(point))
+                            && wheel_moving
+                });
+            for (before, has_page, edge, key) in [
+                (true, pages[1], top_boundary, keyboard_up),
+                (false, pages[0], boundary, keyboard_down),
+            ] {
+                if !has_page {
+                    continue;
+                }
+                let end = edge as f32 * stride;
+                let ahead = if before { lookahead - 1. } else { lookahead };
+                let signal = super::page_browse::demand(
+                    ui,
+                    viewport,
+                    (queue_scroll.inner, offset),
+                    end,
+                    (ahead * stride, (ahead + 8.) * stride),
+                    pointer || key,
+                    before,
+                );
+                if !shuffled
+                    && !reversed
+                    && !preview_paging
+                    && self.state.browse_queue_on(before, signal)
+                {
+                    ui.request_repaint();
+                }
+                super::page_browse::indicator(
+                    ui,
+                    viewport,
+                    offset,
+                    end.min(rows_height),
+                    if preview_paging {
+                        gramwave_application::page_browse::PageStatus::Loading
+                    } else {
+                        self.state.queue_page_status_on(before)
+                    },
+                    before,
+                );
             }
-            super::page_browse::indicator(
-                ui,
-                viewport,
-                offset,
-                end.min(rows_height),
-                if preview_paging {
-                    gramwave_application::page_browse::PageStatus::Loading
-                } else {
-                    self.state.queue_page_status()
-                },
-            );
         }
         follow.remember(
             self.state.view().session.timeline(),

@@ -54,8 +54,8 @@ impl App {
             let mut slot = horizontal_slot(ui, "reverse-queue", point, egui::Vec2::splat(36.));
             slot.multiply_opacity(reverse);
             let session = &self.state.view().session;
-            let enabled = !self.state.queue_reversing()
-                && (session.timeline().len() > 1 || session.full_playlist_page_request().is_some());
+            let enabled =
+                session.timeline().len() > 1 || session.full_playlist_page_request().is_some();
             let active = session.playlist_order() == gramwave_domain::PlaylistOrder::OldestFirst;
             let hint = if active {
                 tr("Reverse on · Turn off")

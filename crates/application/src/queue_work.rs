@@ -21,11 +21,9 @@ pub(crate) struct QueueWork {
     active: Option<(Operation, QueuePageRequest)>,
     pub(crate) waiting_previous: bool,
     pub(crate) waiting: Option<bool>,
-    reversing: bool,
-    reverse_from_window: bool,
+    pub(crate) prefetch_previous: bool,
     oldest_start: Option<i64>,
     oldest_start_retry: crate::page_browse::PageRetry,
-    retry_reverse: bool,
     pub(crate) error: Option<AppError>,
     pub(crate) page_retry: crate::page_browse::PageRetry,
     page_generation: u64,
@@ -41,8 +39,10 @@ impl QueueWork {
         self.page_retry = Default::default();
     }
 
-    pub(crate) fn page_active(&self) -> bool {
-        self.active.is_some()
+    pub(crate) fn page_active_on(&self, session: &gramwave_domain::Session, before: bool) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|(_, page)| session.display_before(page.window) == before)
     }
 
     pub(crate) fn reset(&mut self) {
@@ -55,10 +55,6 @@ impl QueueWork {
 }
 
 impl AppCore {
-    pub fn queue_reversing(&self) -> bool {
-        self.queue_work.reversing
-    }
-
     pub fn queue_waiting(&self) -> bool {
         self.queue_work.waiting.is_some() || self.queue_work.waiting_previous
     }
@@ -72,13 +68,12 @@ impl AppCore {
     }
 
     pub(crate) fn queue_blocks_advance(&self, eof: bool) -> bool {
-        self.queue_work.reversing
-            || (self.state.session.playlist_page_request().is_some()
-                && self.state.session.available_len() == 0
-                && !(eof
-                    && !self.queue_waiting()
-                    && self.state.repeat == RepeatMode::One
-                    && self.state.session.current().is_some()))
+        self.state.session.playlist_page_request().is_some()
+            && self.state.session.available_len() == 0
+            && !(eof
+                && !self.queue_waiting()
+                && self.state.repeat == RepeatMode::One
+                && self.state.session.current().is_some())
     }
 
     pub fn queue_reverse_generation(&self) -> u64 {
@@ -316,24 +311,21 @@ impl AppCore {
     }
 
     pub(crate) fn request_queue_reverse(&mut self) {
-        self.queue_work.retry_reverse = false;
-        if self.state.session.full_playlist_page_request().is_some() {
-            self.queue_work.cancel_page();
-            self.queue_work.reversing = true;
-            self.queue_work.reverse_from_window = self.state.session.has_ordered_window();
-            self.queue_work.error = None;
-            self.queue_work.page_retry = Default::default();
-        } else {
-            self.reverse_queue();
+        if self.state.session.reverse_queue() {
+            self.queue_work.waiting = None;
+            self.queue_work.waiting_previous = false;
+            self.queue_work.prefetch_previous = false;
+            self.complete_queue_browse();
+            self.playback.queue_reverse_generation =
+                self.playback.queue_reverse_generation.wrapping_add(1);
+            self.playback.repeat_cycle = None;
+            self.record_session_change();
         }
     }
 
     pub(crate) fn retry_queue_page(&mut self) {
         self.queue_work.error = None;
         self.queue_work.page_retry = Default::default();
-        if std::mem::take(&mut self.queue_work.retry_reverse) {
-            self.request_queue_reverse();
-        }
     }
 
     fn queue_page_failed(&mut self, error: AppError, effects: &mut Vec<Effect>) {
@@ -344,24 +336,7 @@ impl AppCore {
         self.record_page_cooldown(&error, now);
         self.queue_work.page_retry.failed(&error, now);
         self.queue_work.error = Some(error);
-        if self.queue_page_status() == crate::page_browse::PageStatus::Unavailable {
-            self.queue_work.retry_reverse = std::mem::take(&mut self.queue_work.reversing);
-        }
         self.resume_queue_wait(effects);
-    }
-
-    fn reverse_queue(&mut self) {
-        self.queue_work.reversing = false;
-        if std::mem::take(&mut self.queue_work.reverse_from_window) && !self.state.shuffle {
-            // Once all pages are present, restore rows hidden outside the local window.
-            self.state.session.finish_ordered_reverse();
-        }
-        if self.state.session.reverse_queue() {
-            self.playback.queue_reverse_generation =
-                self.playback.queue_reverse_generation.wrapping_add(1);
-            self.playback.repeat_cycle = None;
-            self.record_session_change();
-        }
     }
 
     pub(crate) fn queue_needs_retry(&self) -> bool {
@@ -370,42 +345,51 @@ impl AppCore {
 
     fn next_queue_page(&self) -> Option<(i64, QueuePageRequest)> {
         let session = &self.state.session;
-        let order = session.playlist_order();
-        let window = session.has_ordered_window() && !self.queue_work.reversing;
+        let order = session.playlist_source_order();
+        let reversed = order != session.playlist_order();
+        let request = |before| {
+            let (chat, kind, cursor) = session.page_request(before)?;
+            let source_before = before ^ reversed;
+            let window = session.has_ordered_window().then_some(source_before);
+            Some((
+                chat,
+                QueuePageRequest {
+                    kind,
+                    cursor,
+                    window,
+                    order: if window == Some(true) {
+                        order.reversed()
+                    } else {
+                        order
+                    },
+                },
+            ))
+        };
         let forward_needed = self.queue_work.waiting.is_some()
-            || self.queue_browse_pending()
+            || self.queue_browse_pending_on(false)
             || (session.current().is_some()
                 && session.available_len() <= crate::page_browse::QUEUE_PREFETCH_ROWS);
-        let (page, before) = if !window {
-            if !forward_needed && !self.queue_work.reversing {
-                return None;
-            }
-            (session.full_playlist_page_request(), false)
-        } else {
-            let previous = session.ordered_page_request(true);
-            let forward = session.ordered_page_request(false);
-            if self.queue_work.waiting_previous && previous.is_some() {
-                (previous, true)
-            } else if (forward_needed || session.needs_ordered_neighbors(false))
-                && forward.is_some()
-            {
-                (forward, false)
-            } else if session.needs_ordered_neighbors(true) {
-                (previous, true)
-            } else {
-                (None, false)
-            }
-        };
-        let (chat, kind, cursor) = page?;
-        Some((
-            chat,
-            QueuePageRequest {
-                kind,
-                cursor,
-                window: window.then_some(before),
-                order: if before { order.reversed() } else { order },
-            },
-        ))
+        let previous_needed = self.queue_browse_pending_on(true)
+            || self.queue_work.prefetch_previous
+                && session.available_past_len() <= crate::page_browse::QUEUE_PREFETCH_ROWS;
+        if let Some(previous) = self
+            .queue_work
+            .waiting_previous
+            .then(|| request(true))
+            .flatten()
+        {
+            return Some(previous);
+        }
+        let initial = |before| session.needs_ordered_neighbors(before ^ reversed);
+        if let Some(forward) = (forward_needed || initial(false))
+            .then(|| request(false))
+            .flatten()
+        {
+            return Some(forward);
+        }
+        (previous_needed || initial(true))
+            .then(|| request(true))
+            .flatten()
     }
 
     pub(crate) fn pump_queue(&mut self, now: std::time::Instant, effects: &mut Vec<Effect>) {
@@ -413,8 +397,6 @@ impl AppCore {
             return;
         }
         if let Some((chat, page)) = self.next_queue_page() {
-            self.queue_work.reverse_from_window |=
-                self.queue_work.reversing && self.state.session.has_ordered_window();
             let operation = self.library.operation();
             self.queue_work.active = Some((operation.clone(), page));
             effects.push(Effect::QueuePage {
@@ -465,9 +447,8 @@ impl AppCore {
                 return;
             }
         };
-        if window != Some(true) {
-            self.complete_queue_browse();
-        }
+        let display_before = self.state.session.display_before(window);
+        self.complete_queue_browse_on(display_before);
         self.queue_work.page_retry = Default::default();
         self.queue_work.error = None;
         let before = self.state.session.timeline().len();
@@ -491,15 +472,17 @@ impl AppCore {
             self.queue_work.page_generation = self.queue_work.page_generation.wrapping_add(1);
         }
         self.record_session_change();
-        if self.queue_work.reversing && self.state.session.full_playlist_page_request().is_none() {
-            self.reverse_queue();
+        if self.state.session.available_past_len() > crate::page_browse::QUEUE_PREFETCH_ROWS
+            || self.state.session.page_request(true).is_none()
+        {
+            self.queue_work.prefetch_previous = false;
         }
         self.resume_queue_wait(effects);
     }
 
     pub(crate) fn previous_neighbor_missing(&self) -> bool {
         let session = &self.state.session;
-        session.timeline().past_len() == 0 && session.ordered_page_request(true).is_some()
+        session.available_past_len() == 0 && session.page_request(true).is_some()
     }
 
     pub(crate) fn resume_queue_wait(&mut self, effects: &mut Vec<Effect>) {

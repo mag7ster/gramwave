@@ -272,10 +272,6 @@ msgstr ""
 msgid "Loading older history…"
 msgstr ""
 
-#: src/screens/queue.rs:338
-msgid "Loading the rest of the queue to reverse it…"
-msgstr ""
-
 #: src/adapters/control/output.rs:98 src/screens/queue.rs:342
 msgid "More tracks from the source chat"
 msgstr ""

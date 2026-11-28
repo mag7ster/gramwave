@@ -106,6 +106,7 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     continuation: Option<continuation::Continuation>,
     playlist_order: PlaylistOrder,
+    reversed: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     play_next: Vec<QueueEntryId>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
@@ -187,6 +188,7 @@ impl Session {
         tracks.get(index)?;
         self.continuation = None;
         self.playlist_order = PlaylistOrder::NewestFirst;
+        self.reversed = false;
         self.entries.clear();
         self.play_next.clear();
         self.manual.clear();
@@ -250,7 +252,8 @@ impl Session {
             self.play_next.splice(..0, ids.iter().copied());
             self.remaining.splice(..0, ids);
         } else {
-            if let Some(continuation) = &mut self.continuation {
+            let defer = self.playlist_page_request().is_some();
+            if let Some(continuation) = self.continuation.as_mut().filter(|_| defer) {
                 continuation.deferred.extend(ids.iter().copied());
             }
             self.remaining.extend(ids);
@@ -285,6 +288,7 @@ impl Session {
     pub fn clear(&mut self) {
         self.continuation = None;
         self.playlist_order = PlaylistOrder::NewestFirst;
+        self.reversed = false;
         self.play_next.clear();
         self.manual.clear();
         self.remaining.clear();
@@ -351,6 +355,7 @@ impl Session {
                 .filter(|id| Some(*id) != self.current)
                 .collect();
             if let Some(continuation) = &mut self.continuation {
+                continuation.set_page_side(false);
                 for sample in continuation.samples.values_mut() {
                     sample.held = false;
                 }
@@ -358,15 +363,26 @@ impl Session {
             self.restore_boundary();
             self.reorder(true);
         } else {
+            if let Some(continuation) = &mut self.continuation {
+                continuation.set_page_side(self.reversed);
+            }
             self.open_ordered_window();
             if let Some(current) = self.current {
-                let priority: HashSet<_> = self.play_next.iter().copied().collect();
+                let priority: HashSet<_> = self
+                    .play_next
+                    .iter()
+                    .copied()
+                    .filter(|id| self.remaining.contains(id))
+                    .collect();
                 self.order
                     .retain(|id| !priority.contains(id) || *id == current);
                 if let Some(index) = self.order.iter().position(|id| *id == current) {
                     self.order.splice(
                         index + 1..index + 1,
-                        self.play_next.iter().copied().filter(|id| *id != current),
+                        self.play_next
+                            .iter()
+                            .copied()
+                            .filter(|id| priority.contains(id) && *id != current),
                     );
                 }
             }
@@ -502,6 +518,8 @@ struct StoredSession {
     #[serde(default)]
     playlist_order: PlaylistOrder,
     #[serde(default)]
+    reversed: bool,
+    #[serde(default)]
     play_next: Vec<QueueEntryId>,
     #[serde(default)]
     manual: BTreeSet<QueueEntryId>,
@@ -579,6 +597,7 @@ impl<'de> Deserialize<'de> for Session {
                     source: s.source,
                     continuation: s.continuation,
                     playlist_order: s.playlist_order,
+                    reversed: s.reversed,
                     manual: s.manual,
                     serial,
                 })

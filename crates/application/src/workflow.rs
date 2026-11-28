@@ -184,10 +184,7 @@ impl AppCore {
         }
         let session = &self.state.session;
         let current = session.current()?;
-        let next = if self.state.repeat == RepeatMode::One
-            && !self.queue_reversing()
-            && !self.queue_waiting()
-        {
+        let next = if self.state.repeat == RepeatMode::One && !self.queue_waiting() {
             current
         } else if self.queue_blocks_advance(false) {
             return None;
@@ -225,10 +222,7 @@ impl AppCore {
         }
         let session = &self.state.session;
         let current = session.current()?;
-        let next = if self.state.repeat == RepeatMode::One
-            && !self.queue_reversing()
-            && !self.queue_waiting()
-        {
+        let next = if self.state.repeat == RepeatMode::One && !self.queue_waiting() {
             current
         } else if self.queue_blocks_advance(false) {
             return None;
@@ -271,6 +265,7 @@ impl AppCore {
                 | AppCommand::Shuffle(_)
         ) {
             self.queue_work.waiting_previous = false;
+            self.queue_work.prefetch_previous = false;
         }
         let mut effects = Vec::new();
         let advancing = matches!(&command, AppCommand::Next | AppCommand::Advance(_));
@@ -453,6 +448,7 @@ impl AppCore {
                     self.queue_work.waiting = None;
                     return vec![Effect::Player(PlayerCommand::Seek(0.)), Effect::ClearSeek];
                 }
+                self.queue_work.prefetch_previous = self.state.session.page_request(true).is_some();
                 if self.previous_neighbor_missing() {
                     self.queue_work.waiting = None;
                     self.queue_work.waiting_previous = true;

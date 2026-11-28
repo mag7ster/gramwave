@@ -21,8 +21,14 @@ pub(super) fn demand(
     boundary: f32,
     lookahead: (f32, f32),
     moved_by_user: bool,
+    upward: bool,
 ) -> Browse {
     let (before, after) = offsets;
+    let (before, after, boundary) = if upward {
+        (-before, -after, -boundary)
+    } else {
+        (before, after, boundary)
+    };
     let (request, abandon) = lookahead;
     if viewport.height() <= 0. || after + abandon < boundary {
         return Browse::Away;
@@ -35,7 +41,7 @@ pub(super) fn demand(
             && input.events.iter().any(|event| {
                 matches!(event,
                     egui::Event::MouseWheel { delta, modifiers, .. }
-                        if delta.y < 0. && !modifiers.ctrl && !modifiers.shift
+                        if (if upward { delta.y > 0. } else { delta.y < 0. }) && !modifiers.ctrl && !modifiers.shift
                 )
             })
     });
@@ -53,19 +59,35 @@ pub(super) fn indicator(
     offset: f32,
     boundary: f32,
     status: PageStatus,
+    upward: bool,
 ) {
-    if viewport.height() < 22. || offset + viewport.height() + 1. < boundary {
+    let outside = if upward {
+        offset > boundary + 1.
+    } else {
+        offset + viewport.height() + 1. < boundary
+    };
+    if viewport.height() < 22. || outside {
         return;
     }
-    let y =
-        (viewport.top() + boundary - offset).clamp(viewport.top() + 11., viewport.bottom() - 11.);
+    let edge = viewport.top() + boundary - offset;
+    let (y, clip) = if upward {
+        let top = viewport.top() - 22.;
+        let clip = egui::Rect::from_min_max(egui::pos2(viewport.left(), top), viewport.max);
+        ((edge - 11.).clamp(top + 11., viewport.bottom() - 11.), clip)
+    } else {
+        (
+            edge.clamp(viewport.top() + 11., viewport.bottom() - 11.),
+            viewport,
+        )
+    };
+    let clip = clip.intersect(ui.clip_rect());
     let center = egui::pos2(viewport.center().x, y);
     match status {
         PageStatus::Idle => {}
         PageStatus::Loading => {
             let rect = egui::Rect::from_center_size(center, egui::Vec2::splat(20.));
             let mut overlay = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-            overlay.set_clip_rect(viewport.intersect(ui.clip_rect()));
+            overlay.set_clip_rect(clip);
             overlay
                 .painter()
                 .circle_filled(center, 10., design::palette(false).raised);
@@ -87,9 +109,7 @@ pub(super) fn indicator(
                 });
         }
         PageStatus::Unavailable => {
-            let painter = ui
-                .painter()
-                .with_clip_rect(viewport.intersect(ui.clip_rect()));
+            let painter = ui.painter().with_clip_rect(clip);
             let palette = design::colors(ui);
             let text = painter.layout_no_wrap(
                 tr("More tracks are unavailable"),

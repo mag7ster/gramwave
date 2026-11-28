@@ -1053,6 +1053,7 @@ impl App {
                     end,
                     (3. * viewport.height(), 4. * viewport.height()),
                     interacting,
+                    false,
                 )
             };
             if self.state.browse_playlist(chat_id, order, filters, signal) {
@@ -1064,6 +1065,7 @@ impl App {
                 state.offset.y,
                 end,
                 self.state.playlist_page_status(chat_id, order),
+                false,
             );
         }
         if let Some((batch, row)) = batch {
